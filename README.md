@@ -11,8 +11,8 @@ There's no built-in chat. If you want a co-director, run `shotline mcp` and let 
 drive it. It always asks before spending credits.
 
 Very early. So far you can set up a project, add cast/sets/props with anchor images, break it
-into chapters and shots, and preview the exact prompt each shot would send. Nothing talks to a
-provider yet. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
+into chapters and shots, preview the exact prompt each shot would send, and install and check
+plugins. Nothing generates anything yet. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ```
 cargo install --path crates/shotline-cli
@@ -25,7 +25,7 @@ shotline prompt 01-010
 ```
 
 Video models, TTS, lip sync, upscalers and anything else are plugins: small programs in any
-language that speak a JSON protocol over stdio. fal is built in. Every paid step is quoted first
+language that speak a JSON protocol over stdio ([docs/PLUGINS.md](docs/PLUGINS.md)). fal is built in. Every paid step is quoted first
 and recorded in an append-only ledger per film.
 
 Needs ffmpeg. API keys go in your environment.

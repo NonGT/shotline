@@ -133,7 +133,7 @@ through the same path.
 
 ## Plugins
 
-A plugin is an executable that talks JSON-RPC 2.0 over stdin/stdout. It can be written in anything;
+A plugin is an executable that talks JSON-RPC 2.0 over stdin/stdout (spec in PLUGINS.md). It can be written in anything;
 my Python experiments can be wrapped as they are. shotline starts it on demand and keeps it running
 for the session.
 
@@ -357,8 +357,9 @@ assets/
 crates/
   shotline-core        project folder, elements, shots, recipes, jobs, prompt building
   shotline-ledger      ledger, budgets, reserve/charge, rates, reports, verify, reconcile
-  shotline-plugin      protocol types, Plugin trait, external process plugins, discovery,
-                       conformance kit, fake plugin for tests
+  shotline-protocol    plugin protocol types only (serde), shared by core and plugins
+  shotline-plugin      Plugin trait, external process plugins, discovery, conformance kit,
+                       fake plugin for tests
   shotline-builtin     fal (reqwest + rustls, tokio)
   shotline-media       ffmpeg/ffprobe: last frame, colour match, concat, frame/PCM pipes
   shotline-ui          egui app
@@ -399,7 +400,7 @@ windows.
 ## Order of work
 
 1. workspace, data model, init/element/shot/prompt (no network) - done
-2. plugin protocol, Plugin trait, fake plugin, conformance kit, jobs and takes
+2. plugin protocol, Plugin trait, fake plugin, conformance kit, jobs and takes - done
 3. ledger: reserve/charge, budgets, rates and currencies, `cost`, `verify`
 4. fal built in: quote, take, select, errors
 5. external plugins: Venice, ElevenLabs (voices, lines), WaveSpeed lip sync; recipes

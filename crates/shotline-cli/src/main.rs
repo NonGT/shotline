@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use shotline_core::{Kind, Project, Shot, ShotRef, Transition, build};
+use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, build};
+
+mod plugins;
 
 #[derive(Parser)]
 #[command(
@@ -37,6 +39,25 @@ enum Cmd {
     Shot(ShotCmd),
     /// Show the exact prompt and references a shot would send, without spending anything
     Prompt { shot: ShotRef },
+    /// List a shot's takes
+    Takes { shot: ShotRef },
+    /// Pick the take a shot uses: `select 01-010 3` or `select 01-010#3`
+    Select { shot: String, take: Option<String> },
+    /// Installed plugins
+    #[command(subcommand)]
+    Plugin(PluginCmd),
+    /// Serves the built-in fake plugin over stdio, for tests and dry runs
+    #[command(name = "__fake-plugin", hide = true)]
+    FakePlugin,
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    Ls,
+    /// Check a plugin talks the protocol properly. Never spends anything.
+    Doctor {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -84,6 +105,12 @@ enum ShotCmd {
         duration: Option<f64>,
         #[arg(long, default_value = "cut")]
         transition: Transition,
+        /// Plugin for this shot instead of the project default
+        #[arg(long)]
+        plugin: Option<String>,
+        /// Model for this shot instead of the project default
+        #[arg(long)]
+        model: Option<String>,
     },
     Ls {
         chapter: Option<String>,
@@ -166,14 +193,22 @@ fn run(cli: Cli) -> Result<()> {
             ref prompt,
             duration,
             transition,
+            ref plugin,
+            ref model,
         }) => {
             let after = after.as_deref().map(parse_shot_number).transpose()?;
+            let model = (plugin.is_some() || model.is_some()).then(|| ModelOverride {
+                plugin: plugin.clone(),
+                id: model.clone(),
+                ..ModelOverride::default()
+            });
             let shot = Shot {
                 title: title.clone(),
                 plot: plot.clone(),
                 prompt: prompt.clone(),
                 duration,
                 transition,
+                model,
                 ..Shot::default()
             };
             println!("{}", open()?.add_shot(chapter, after, shot)?);
@@ -197,13 +232,15 @@ fn run(cli: Cli) -> Result<()> {
         }
 
         Cmd::Prompt { shot } => {
-            let b = build(&open()?, shot)?;
+            let p = open()?;
+            let installed = plugins::load();
+            let b = build(&p, &plugins::catalog(&p, &installed)?, shot)?;
             for w in &b.warnings {
                 eprintln!("warning: {w}");
             }
             println!(
                 "shot {} · {} {} · {}s · {} · {}",
-                b.shot, b.provider, b.model, b.duration, b.resolution, b.aspect
+                b.shot, b.plugin, b.model, b.duration, b.resolution, b.aspect
             );
             if let Some(sf) = &b.start_frame {
                 println!("start frame: {} (from {})", sf.path, sf.from);
@@ -215,6 +252,48 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             println!("\n{}", b.text);
+        }
+
+        Cmd::Takes { shot } => {
+            let p = open()?;
+            let selected = p.shot(shot)?.selected_take;
+            for t in p.takes(shot)? {
+                let mark = if selected.as_deref() == Some(&t.id.to_string()) {
+                    "*"
+                } else {
+                    " "
+                };
+                let cost = t
+                    .costs()
+                    .iter()
+                    .map(|c| format!("{} {}", c.amount, c.unit))
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                let steps = t.jobs.len();
+                let s = if steps == 1 { "" } else { "s" };
+                println!(
+                    "{mark} {t}  {:<9} {steps} step{s}  {cost}  {}",
+                    t.status(),
+                    t.id
+                );
+            }
+        }
+        Cmd::Select { ref shot, ref take } => {
+            let (shot, take) = match (shot.split_once('#'), take) {
+                (Some((s, t)), None) => (s.parse::<ShotRef>()?, t.to_string()),
+                (None, Some(t)) => (shot.parse::<ShotRef>()?, t.clone()),
+                _ => bail!("give the take as `01-010 3` or `01-010#3`"),
+            };
+            let t = open()?.select_take(shot, &take)?;
+            println!("{t} selected");
+        }
+
+        Cmd::Plugin(PluginCmd::Ls) => plugins::ls(&plugins::load()),
+        Cmd::Plugin(PluginCmd::Doctor { ref name }) => plugins::doctor(&plugins::load(), name)?,
+        Cmd::FakePlugin => {
+            plugins::runtime().block_on(shotline_plugin::serve(
+                shotline_plugin::fake::FakePlugin::default(),
+            ))?;
         }
     }
     Ok(())

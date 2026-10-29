@@ -3,9 +3,12 @@ use assert_fs::TempDir;
 use assert_fs::prelude::*;
 use predicates::prelude::*;
 
+/// Runs in `dir` with an empty user folder, so installed plugins on this machine don't leak in.
 fn shotline(dir: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("shotline").unwrap();
-    cmd.current_dir(dir.path());
+    cmd.current_dir(dir.path())
+        .env("SHOTLINE_HOME", dir.path().join(".home"))
+        .env("PATH", "");
     cmd
 }
 
@@ -20,7 +23,7 @@ fn plan_a_film_and_preview_prompts() {
     film.child("shotline.toml")
         .assert(predicate::path::exists());
     let run = || {
-        let mut c = Command::cargo_bin("shotline").unwrap();
+        let mut c = shotline(&tmp);
         c.current_dir(film.path());
         c
     };
@@ -114,8 +117,8 @@ fn works_from_a_subfolder_and_with_dash_c() {
     let tmp = TempDir::new().unwrap();
     shotline(&tmp).args(["init", "f"]).assert().success();
     let sub = tmp.child("f/chapters");
-    let mut cmd = Command::cargo_bin("shotline").unwrap();
-    cmd.current_dir(sub.path())
+    shotline(&tmp)
+        .current_dir(sub.path())
         .args(["chapter", "add", "One"])
         .assert()
         .success();

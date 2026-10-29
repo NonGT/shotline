@@ -7,7 +7,7 @@ Built {
         chapter: 1,
         shot: 10,
     },
-    provider: "venice",
+    plugin: "venice",
     model: "minimax-h3-max-reference-to-video",
     resolution: "768P",
     aspect: "9:16",
@@ -30,6 +30,7 @@ Built {
         },
     ],
     start_frame: None,
+    params: {},
     text: "<Picture 1> argues with <Picture 2> and <Picture 3>.\n\nStyle: Muted greens, 35mm, soft overcast light.\n\nKeep each character's face, hair and outfit exactly as in their reference images.",
     warnings: [
         "minimax-h3-max-reference-to-video only takes whole seconds",

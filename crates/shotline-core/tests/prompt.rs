@@ -1,12 +1,20 @@
 use std::fs;
+use std::sync::Arc;
 
-use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, build};
+use shotline_core::protocol::Op;
+use shotline_core::{
+    Built, Catalog, Job, JobStatus, Kind, ModelOverride, Project, Shot, ShotRef, TestClock,
+    Transition,
+};
 use tempfile::TempDir;
 
 /// Two cast members with anchors, one set without, one chapter.
 fn film() -> (TempDir, Project) {
     let dir = TempDir::new().unwrap();
-    let p = Project::init(dir.path(), Some("Forest")).unwrap();
+    let clock = TestClock::new("2026-10-30T10:00:00Z".parse().unwrap());
+    let p = Project::init(dir.path(), Some("Forest"))
+        .unwrap()
+        .with_clock(Arc::new(clock));
     let img = dir.path().join("in.png");
     fs::write(&img, b"png").unwrap();
     p.add_element(Kind::Cast, "Paka", None, "").unwrap();
@@ -33,9 +41,28 @@ fn add(p: &Project, prompt: &str, f: impl FnOnce(&mut Shot)) -> ShotRef {
     p.add_shot("1", None, shot).unwrap()
 }
 
+fn build(p: &Project, r: ShotRef) -> shotline_core::Result<Built> {
+    shotline_core::build(p, &p.catalog(Catalog::builtin())?, r)
+}
+
+/// A finished one-step take for a shot.
+fn finished_take(p: &Project, r: ShotRef) {
+    let mut job = Job::new(
+        Op::VideoGenerate,
+        "fal",
+        "minimax/h3-max/reference-to-video",
+    );
+    job.shot = Some(r);
+    job.take = Some(p.new_take_id());
+    let mut job = p.create_job(job).unwrap();
+    job.status = JobStatus::Done;
+    job.outputs = vec!["out.mp4".into()];
+    p.save_job(&job).unwrap();
+}
+
 fn venice() -> Option<ModelOverride> {
     Some(ModelOverride {
-        provider: Some("venice".into()),
+        plugin: Some("venice".into()),
         id: Some("minimax-h3-max-reference-to-video".into()),
         ..Default::default()
     })
@@ -61,9 +88,9 @@ fn cut_on_venice() {
 #[test]
 fn continue_with_selected_take() {
     let (_d, p) = film();
-    add(&p, "@paka walks in.", |s| {
-        s.selected_take = Some("t002".into())
-    });
+    let first = add(&p, "@paka walks in.", |_| {});
+    finished_take(&p, first);
+    p.select_take(first, "1").unwrap();
     let r = add(&p, "@paka stops and turns.", |s| {
         s.transition = Transition::Continue
     });
@@ -110,4 +137,34 @@ fn too_many_references() {
     let b = build(&p, r).unwrap();
     assert_eq!(b.references.len(), 11);
     assert!(b.warnings.iter().any(|w| w.contains("at most 9")));
+}
+
+#[test]
+fn selected_take_that_is_gone() {
+    let (_d, p) = film();
+    add(&p, "@paka walks in.", |s| {
+        s.selected_take = Some("01JBX9Q3T7K2M8V5N4R6P1W0YZ".into())
+    });
+    let r = add(&p, "@paka stops.", |s| s.transition = Transition::Continue);
+    let b = build(&p, r).unwrap();
+    assert!(
+        b.warnings
+            .iter()
+            .any(|w| w.contains("selected take is gone")),
+        "{:?}",
+        b.warnings
+    );
+}
+
+#[test]
+fn unknown_model() {
+    let (_d, p) = film();
+    let r = add(&p, "@paka", |s| {
+        s.model = Some(ModelOverride {
+            plugin: Some("nobody".into()),
+            ..Default::default()
+        })
+    });
+    let e = build(&p, r).unwrap_err().to_string();
+    assert!(e.contains("from plugin nobody"), "{e}");
 }

@@ -41,13 +41,16 @@ impl FromStr for Transition {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    pub plugin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aspect: Option<String>,
+    /// Passed to the plugin untouched.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub params: toml::Table,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -110,6 +113,20 @@ impl FromStr for ShotRef {
             chapter: c.parse().map_err(|_| bad())?,
             shot: n.parse().map_err(|_| bad())?,
         })
+    }
+}
+
+impl Serialize for ShotRef {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ShotRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<ShotRef, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -335,12 +352,17 @@ transition = "continue"
 elements = ["mali"]
 
 [model]
-provider = "fal"
+plugin = "fal"
+
+[model.params]
+prompt_expansion_mode = "disabled"
 "#,
         )
         .unwrap();
         assert_eq!(shot.duration, Some(8.0));
         assert_eq!(shot.transition, Transition::Continue);
-        assert_eq!(shot.model.unwrap().provider.as_deref(), Some("fal"));
+        let m = shot.model.unwrap();
+        assert_eq!(m.plugin.as_deref(), Some("fal"));
+        assert_eq!(m.params["prompt_expansion_mode"].as_str(), Some("disabled"));
     }
 }

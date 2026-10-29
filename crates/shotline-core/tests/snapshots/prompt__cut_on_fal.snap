@@ -7,7 +7,7 @@ Built {
         chapter: 1,
         shot: 10,
     },
-    provider: "fal",
+    plugin: "fal",
     model: "minimax/h3-max/reference-to-video",
     resolution: "768P",
     aspect: "9:16",
@@ -30,6 +30,7 @@ Built {
         },
     ],
     start_frame: None,
+    params: {},
     text: "Image 1 argues with Image 2 and Image 3 in Deep forest.\n\nStyle: Muted greens, 35mm, soft overcast light.\n\nKeep each character's face, hair and outfit exactly as in their reference images.",
     warnings: [
         "@deep-forest has no anchor images, the prompt uses its name",

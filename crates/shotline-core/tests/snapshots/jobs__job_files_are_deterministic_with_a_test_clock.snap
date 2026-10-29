@@ -1,0 +1,14 @@
+---
+source: crates/shotline-core/tests/jobs.rs
+expression: text
+---
+op = "audio.tts"
+plugin = "fake"
+model = "fake/tts"
+shot = "01-010"
+step = 0
+status = "pending"
+created = "2026-10-30T10:00:01Z"
+
+[params]
+voice = "kan"

@@ -1,5 +1,7 @@
+use shotline_protocol::Op;
+
 use crate::template::render;
-use crate::{Project, Result, ShotRef, Transition, handle};
+use crate::{Catalog, Project, Result, ShotRef, Transition, handle};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reference {
@@ -21,27 +23,28 @@ pub struct StartFrame {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Built {
     pub shot: ShotRef,
-    pub provider: String,
+    pub plugin: String,
     pub model: String,
     pub resolution: String,
     pub aspect: String,
     pub duration: f64,
     pub references: Vec<Reference>,
     pub start_frame: Option<StartFrame>,
+    pub params: toml::Table,
     pub text: String,
     pub warnings: Vec<String>,
 }
 
-pub fn build(project: &Project, r: ShotRef) -> Result<Built> {
+pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> {
     let shot = project.shot(r)?;
     let cfg = &project.config;
     let ov = shot.model.clone().unwrap_or_default();
-    let provider = ov.provider.unwrap_or_else(|| cfg.provider.clone());
+    let plugin = ov.plugin.unwrap_or_else(|| cfg.plugin.clone());
     let model = ov.id.unwrap_or_else(|| cfg.model.clone());
     let resolution = ov.resolution.unwrap_or_else(|| cfg.resolution.clone());
     let aspect = ov.aspect.unwrap_or_else(|| cfg.aspect.clone());
     let duration = shot.duration.unwrap_or(cfg.duration);
-    let spec = project.model(&provider, &model)?;
+    let spec = &catalog.get(&plugin, &model, &Op::VideoGenerate)?.info;
     let mut warnings = vec![];
 
     // Mentioned handles first, in prompt order, then any listed by hand in `elements`.
@@ -64,10 +67,14 @@ pub fn build(project: &Project, r: ShotRef) -> Result<Built> {
             replacements.push((h.clone(), el.name.clone()));
             continue;
         }
+        let Some(ref_image) = &spec.ref_image else {
+            replacements.push((h.clone(), el.name.clone()));
+            continue;
+        };
         let mut labels = vec![];
         for path in anchors {
             let n = (references.len() + 1).to_string();
-            let label = render(&spec.ref_image, &[("n", &n)]);
+            let label = render(ref_image, &[("n", &n)]);
             labels.push(label.clone());
             references.push(Reference {
                 label,
@@ -77,12 +84,19 @@ pub fn build(project: &Project, r: ShotRef) -> Result<Built> {
         }
         replacements.push((h.clone(), labels.join(" and ")));
     }
-    if references.len() > spec.max_images {
+    if spec.ref_image.is_none() && !handles.is_empty() {
         warnings.push(format!(
-            "{} reference images but {} takes at most {}",
+            "{} doesn't take reference images, the prompt uses names",
+            spec.id
+        ));
+    }
+    if let Some(max) = spec.max_images
+        && references.len() > max
+    {
+        warnings.push(format!(
+            "{} reference images but {} takes at most {max}",
             references.len(),
             spec.id,
-            spec.max_images
         ));
     }
 
@@ -128,14 +142,19 @@ pub fn build(project: &Project, r: ShotRef) -> Result<Built> {
                         spec.id
                     ));
                 }
-                match project.shot(prev)?.selected_take {
-                    Some(take) => {
+                let selected = project.shot(prev)?.selected_take;
+                match (selected.is_some(), project.selected_take(prev)?) {
+                    (_, Some(take)) => {
+                        let job = take.output().expect("only done takes get selected");
                         start_frame = Some(StartFrame {
                             from: prev,
-                            path: format!("takes/{prev}/{take}/last.png"),
+                            path: format!("jobs/{}/last.png", job.id),
                         })
                     }
-                    None => warnings.push(format!(
+                    (true, None) => warnings.push(format!(
+                        "{prev}'s selected take is gone, so there's no start frame"
+                    )),
+                    (false, None) => warnings.push(format!(
                         "{prev} has no selected take yet, so there's no start frame"
                     )),
                 }
@@ -155,23 +174,24 @@ pub fn build(project: &Project, r: ShotRef) -> Result<Built> {
         parts.push(render(&t, &[]));
     }
 
-    if duration < spec.min_duration || duration > spec.max_duration {
-        warnings.push(format!(
-            "{duration}s is outside {}'s {}-{}s",
-            spec.id, spec.min_duration, spec.max_duration
-        ));
+    let (lo, hi) = (
+        spec.min_duration.unwrap_or(0.0),
+        spec.max_duration.unwrap_or(f64::INFINITY),
+    );
+    if duration < lo || duration > hi {
+        warnings.push(format!("{duration}s is outside {}'s {lo}-{hi}s", spec.id));
     }
     if spec.whole_seconds && duration.fract() != 0.0 {
         warnings.push(format!("{} only takes whole seconds", spec.id));
     }
-    if !spec.resolutions.contains(&resolution) {
+    if !spec.resolutions.is_empty() && !spec.resolutions.contains(&resolution) {
         warnings.push(format!(
             "{} doesn't do {resolution} ({})",
             spec.id,
             spec.resolutions.join(", ")
         ));
     }
-    if !spec.aspects.contains(&aspect) {
+    if !spec.aspects.is_empty() && !spec.aspects.contains(&aspect) {
         warnings.push(format!(
             "{} doesn't do {aspect} ({})",
             spec.id,
@@ -181,13 +201,14 @@ pub fn build(project: &Project, r: ShotRef) -> Result<Built> {
 
     Ok(Built {
         shot: r,
-        provider,
+        plugin,
         model,
         resolution,
         aspect,
         duration,
         references,
         start_frame,
+        params: ov.params,
         text: parts.join("\n\n"),
         warnings,
     })

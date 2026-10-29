@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
+use crate::job::{Clock, SystemClock};
 use crate::{Error, Result, fsx};
 
 pub const CONFIG_FILE: &str = "shotline.toml";
@@ -12,7 +14,7 @@ pub const CONFIG_FILE: &str = "shotline.toml";
 #[serde(default)]
 pub struct Config {
     pub name: String,
-    pub provider: String,
+    pub plugin: String,
     pub model: String,
     pub resolution: String,
     pub aspect: String,
@@ -26,7 +28,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             name: String::new(),
-            provider: "fal".into(),
+            plugin: "fal".into(),
             model: "minimax/h3-max/reference-to-video".into(),
             resolution: "768P".into(),
             aspect: "9:16".into(),
@@ -79,6 +81,7 @@ impl Default for PromptLayers {
 pub struct Project {
     pub root: PathBuf,
     pub config: Config,
+    pub clock: Arc<dyn Clock>,
 }
 
 const STORY: &str = "\
@@ -93,6 +96,15 @@ const STORY: &str = "\
 
 const STYLE: &str = "\
 <!-- Look of the film: palette, lighting, camera, lenses. Anything outside comments goes into every prompt. -->
+";
+
+const GITIGNORE: &str = "\
+# Media made by shotline gets big fast. job.toml files stay, so what was made, from what and
+# for how much is still on record.
+jobs/**/*
+!jobs/*/
+!jobs/*/job.toml
+.shotline/cache/
 ";
 
 impl Project {
@@ -114,6 +126,7 @@ impl Project {
         fsx::write_toml(&dir.join(CONFIG_FILE), &config)?;
         fsx::write(&dir.join("story.md"), &STORY.replace("{name}", &name))?;
         fsx::write(&dir.join("style.md"), STYLE)?;
+        fsx::write(&dir.join(".gitignore"), GITIGNORE)?;
         for sub in [
             "elements/cast",
             "elements/sets",
@@ -134,6 +147,7 @@ impl Project {
         Ok(Project {
             root: dir.to_path_buf(),
             config: fsx::read_toml(&path)?,
+            clock: Arc::new(SystemClock),
         })
     }
 
@@ -147,6 +161,11 @@ impl Project {
             dir = d.parent();
         }
         Err(Error::NotAProject(start.to_path_buf()))
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Project {
+        self.clock = clock;
+        self
     }
 
     /// style.md with HTML comments removed.
@@ -166,6 +185,18 @@ impl Project {
             .collect::<Vec<_>>()
             .join("/")
     }
+}
+
+/// Per-user folder: plugins, .env, caches. `SHOTLINE_HOME` overrides it.
+pub fn user_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("SHOTLINE_HOME") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    home.join(".config").join("shotline")
 }
 
 fn strip_comments(s: &str) -> String {
@@ -199,6 +230,6 @@ mod tests {
         assert_eq!(c.duration, 5.0);
         assert_eq!(c.budget.per_day, 3.0);
         assert_eq!(c.budget.per_take, 2.0);
-        assert_eq!(c.provider, "fal");
+        assert_eq!(c.plugin, "fal");
     }
 }
