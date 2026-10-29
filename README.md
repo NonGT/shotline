@@ -10,7 +10,19 @@ the selected takes into one video.
 There's no built-in chat. If you want a co-director, run `shotline mcp` and let any MCP client
 drive it. It always asks before spending credits.
 
-Very early: only the design exists so far, see [docs/DESIGN.md](docs/DESIGN.md).
+Very early. So far you can set up a project, add cast/sets/props with anchor images, break it
+into chapters and shots, and preview the exact prompt each shot would send. Nothing talks to a
+provider yet. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
+
+```
+cargo install --path crates/shotline-cli
+shotline init my-film && cd my-film
+shotline element add cast "Paka" --desc "team lead, 30s"
+shotline element anchor paka --file paka.png
+shotline chapter add "Into the forest"
+shotline shot add 1 --prompt "@paka walks into the trees"
+shotline prompt 01-010
+```
 
 Needs ffmpeg. API keys for fal and/or Venice go in your environment.
 

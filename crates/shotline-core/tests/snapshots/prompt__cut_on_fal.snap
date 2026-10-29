@@ -1,0 +1,37 @@
+---
+source: crates/shotline-core/tests/prompt.rs
+expression: "build(&p, r).unwrap()"
+---
+Built {
+    shot: ShotRef {
+        chapter: 1,
+        shot: 10,
+    },
+    provider: "fal",
+    model: "minimax/h3-max/reference-to-video",
+    resolution: "768P",
+    aspect: "9:16",
+    duration: 8.0,
+    references: [
+        Reference {
+            label: "Image 1",
+            handle: "kan",
+            path: "elements/cast/kan/01.png",
+        },
+        Reference {
+            label: "Image 2",
+            handle: "paka",
+            path: "elements/cast/paka/01.png",
+        },
+        Reference {
+            label: "Image 3",
+            handle: "paka",
+            path: "elements/cast/paka/02.png",
+        },
+    ],
+    start_frame: None,
+    text: "Image 1 argues with Image 2 and Image 3 in Deep forest.\n\nStyle: Muted greens, 35mm, soft overcast light.\n\nKeep each character's face, hair and outfit exactly as in their reference images.",
+    warnings: [
+        "@deep-forest has no anchor images, the prompt uses its name",
+    ],
+}

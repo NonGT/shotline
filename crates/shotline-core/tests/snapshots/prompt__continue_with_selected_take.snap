@@ -1,0 +1,38 @@
+---
+source: crates/shotline-core/tests/prompt.rs
+expression: "build(&p, r).unwrap()"
+---
+Built {
+    shot: ShotRef {
+        chapter: 1,
+        shot: 20,
+    },
+    provider: "fal",
+    model: "minimax/h3-max/reference-to-video",
+    resolution: "768P",
+    aspect: "9:16",
+    duration: 8.0,
+    references: [
+        Reference {
+            label: "Image 1",
+            handle: "paka",
+            path: "elements/cast/paka/01.png",
+        },
+        Reference {
+            label: "Image 2",
+            handle: "paka",
+            path: "elements/cast/paka/02.png",
+        },
+    ],
+    start_frame: Some(
+        StartFrame {
+            from: ShotRef {
+                chapter: 1,
+                shot: 10,
+            },
+            path: "takes/01-010/t002/last.png",
+        },
+    ),
+    text: "Image 1 and Image 2 stops and turns.\n\nStyle: Muted greens, 35mm, soft overcast light.\n\nKeep each character's face, hair and outfit exactly as in their reference images.\n\nThe video starts exactly on the given start frame and carries on the action from it.",
+    warnings: [],
+}

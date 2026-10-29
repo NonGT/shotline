@@ -1,0 +1,8 @@
+---
+source: crates/shotline-core/tests/prompt.rs
+expression: b.warnings
+---
+[
+    "minimax-h3-max-reference-to-video doesn't take a start frame together with reference images",
+    "01-010 has no selected take yet, so there's no start frame",
+]
