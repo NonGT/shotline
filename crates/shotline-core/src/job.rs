@@ -24,7 +24,14 @@ impl Clock for SystemClock {
     }
 
     fn ulid(&self) -> Ulid {
-        Ulid::generate()
+        // Plain Ulid::generate() is random within a millisecond, which would let take numbers
+        // (ordered by id) swap when two are made in the same ms.
+        static GEN: std::sync::Mutex<ulid::Generator> =
+            std::sync::Mutex::new(ulid::Generator::new());
+        GEN.lock()
+            .unwrap()
+            .generate()
+            .unwrap_or_else(|_| Ulid::generate())
     }
 }
 
@@ -341,5 +348,16 @@ impl Project {
         let id = Ulid::from_string(&id)
             .map_err(|_| Error::Invalid(format!("{shot}: selected_take {id:?} isn't a ULID")))?;
         Ok(self.takes(shot)?.into_iter().find(|t| t.id == id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_ids_only_go_up() {
+        let ids: Vec<Ulid> = (0..2000).map(|_| SystemClock.ulid()).collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]));
     }
 }
