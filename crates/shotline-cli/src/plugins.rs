@@ -10,7 +10,7 @@ use shotline_plugin::{Plugin, protocol::PROTOCOL_VERSION};
 
 pub enum Origin {
     Builtin,
-    External(Entry),
+    External(Box<Entry>),
 }
 
 pub struct Available {
@@ -55,7 +55,7 @@ pub fn load() -> Installed {
         .map(|e| Available {
             name: e.found.name.clone(),
             description: e.description.clone(),
-            origin: Origin::External(e),
+            origin: Origin::External(Box::new(e)),
         })
         .collect();
     if !plugins.iter().any(|p| p.name == "fal") {
