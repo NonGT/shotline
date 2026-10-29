@@ -2,6 +2,7 @@
 //! request through `params`:
 //!
 //! - `fake_reject = "<kind>"`: quote and run fail right away with that error kind
+//! - `fake_reject_run = "<kind>"`: quote works, run fails right away
 //! - `fake_fail = "<kind>"`: the job runs, then fails with that kind
 //! - `fake_charge_on_fail = true`: a failed job still reports a cost
 //! - `fake_polls = n`: polls that say running before it finishes (default 1)
@@ -193,6 +194,11 @@ impl Plugin for FakePlugin {
 
     async fn run(&self, req: &Request, _output_dir: &Path) -> Result<String> {
         check(req)?;
+        if let Some(kind) = kind_param(req, "fake_reject_run")? {
+            return Err(PluginError::new(kind, "rejected on submit")
+                .field("references[0]")
+                .into());
+        }
         let fail = kind_param(req, "fake_fail")?;
         let polls = req.params.get("fake_polls").and_then(Value::as_u64);
         let charge_on_fail = req.params.get("fake_charge_on_fail") == Some(&json!(true));

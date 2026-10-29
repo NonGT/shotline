@@ -6,8 +6,6 @@ use shotline_core::ledger::report::{self, By};
 use shotline_core::ledger::{Books, money};
 use shotline_core::protocol::Quote;
 use shotline_core::{Project, UserConfig, user_dir};
-use shotline_plugin::Plugin;
-use shotline_plugin::discovery;
 
 use crate::plugins::{self, Installed};
 
@@ -122,15 +120,14 @@ pub fn reconcile_cmd(p: &Project, installed: &Installed, only: Option<&str>) -> 
         println!("no charges to check");
         return Ok(());
     }
-    let dotenv = user_dir().join(".env");
     let rt = plugins::runtime();
     let mut differ = false;
     for name in names {
-        let Some(entry) = installed.entries.iter().find(|e| e.found.name == name) else {
+        if !installed.plugins.iter().any(|p| p.name == name) {
             println!("{name}: not installed, skipped");
             continue;
-        };
-        let plugin = discovery::open(entry, &dotenv).map_err(anyhow::Error::msg)?;
+        }
+        let plugin = plugins::open(installed, name)?;
         let since = entries
             .iter()
             .filter(|e| e.plugin.as_deref() == Some(name))

@@ -367,6 +367,7 @@ crates/
   shotline-plugin      Plugin trait, external process plugins, discovery, conformance kit,
                        fake plugin for tests
   shotline-builtin     fal (reqwest + rustls, tokio)
+  shotline-engine      plan, quote, reserve, run, poll, fetch, book; shared by CLI, MCP and UI
   shotline-media       ffmpeg/ffprobe: last frame, colour match, concat, frame/PCM pipes
   shotline-ui          egui app
   shotline-cli         the binary, clap; `mcp` via rmcp, `ui` behind the `ui` cargo feature
@@ -408,7 +409,7 @@ windows.
 1. workspace, data model, init/element/shot/prompt (no network) - done
 2. plugin protocol, Plugin trait, fake plugin, conformance kit, jobs and takes - done
 3. ledger: reserve/charge, budgets, rates and currencies, `cost`, `verify` - done
-4. fal built in: quote, take, select, errors
+4. fal built in: quote, take, select, errors - done
 5. external plugins: Venice, ElevenLabs (voices, lines), WaveSpeed lip sync; recipes
 6. continuity: last frame chaining, colour match, timeline render with audio tracks
 7. mcp server and the co-director notes

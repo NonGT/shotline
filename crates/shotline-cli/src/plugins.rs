@@ -1,10 +1,26 @@
+use std::path::Path;
+
 use anyhow::{Result, bail};
+use shotline_builtin::fal::{self, Fal};
+use shotline_core::protocol::Description;
 use shotline_core::{Catalog, Project, user_dir};
 use shotline_plugin::conformance::{self, Options};
 use shotline_plugin::discovery::{self, Entry, Source};
+use shotline_plugin::{Plugin, protocol::PROTOCOL_VERSION};
+
+pub enum Origin {
+    Builtin,
+    External(Entry),
+}
+
+pub struct Available {
+    pub name: String,
+    pub description: Result<Description, String>,
+    pub origin: Origin,
+}
 
 pub struct Installed {
-    pub entries: Vec<Entry>,
+    pub plugins: Vec<Available>,
     pub problems: Vec<String>,
 }
 
@@ -15,6 +31,18 @@ pub fn runtime() -> tokio::runtime::Runtime {
         .expect("tokio runtime")
 }
 
+fn fal_description() -> Description {
+    Description {
+        name: "fal".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        protocol: PROTOCOL_VERSION,
+        env: vec![fal::KEY_VAR.into()],
+        models: fal::models(),
+    }
+}
+
+/// Installed external plugins plus the built-in ones. An external plugin with a built-in's name
+/// replaces it.
 pub fn load() -> Installed {
     let home = user_dir();
     let (found, problems) = discovery::discover(&home, std::env::var_os("PATH").as_deref());
@@ -22,14 +50,50 @@ pub fn load() -> Installed {
         found,
         &home.join("cache").join("describe"),
     ));
-    Installed { entries, problems }
+    let mut plugins: Vec<Available> = entries
+        .into_iter()
+        .map(|e| Available {
+            name: e.found.name.clone(),
+            description: e.description.clone(),
+            origin: Origin::External(e),
+        })
+        .collect();
+    if !plugins.iter().any(|p| p.name == "fal") {
+        plugins.insert(
+            0,
+            Available {
+                name: "fal".into(),
+                description: Ok(fal_description()),
+                origin: Origin::Builtin,
+            },
+        );
+    }
+    Installed { plugins, problems }
+}
+
+fn dotenv() -> std::path::PathBuf {
+    user_dir().join(".env")
+}
+
+/// A plugin ready to work, with its keys. Drop it before the runtime it's used on.
+pub fn open(installed: &Installed, name: &str) -> Result<Box<dyn Plugin>> {
+    let Some(p) = installed.plugins.iter().find(|p| p.name == name) else {
+        bail!("no plugin called {name}; `shotline plugin ls` shows what's installed");
+    };
+    Ok(match &p.origin {
+        Origin::Builtin => {
+            let (vals, _) = discovery::resolve_env(&[fal::KEY_VAR.to_string()], &dotenv());
+            Box::new(Fal::from_env(vals.into_iter().next().map(|(_, v)| v)))
+        }
+        Origin::External(e) => Box::new(discovery::open(e, &dotenv()).map_err(anyhow::Error::msg)?),
+    })
 }
 
 /// Built-in models, then installed plugins, then the project's models.toml.
 pub fn catalog(project: &Project, installed: &Installed) -> Result<Catalog> {
     let mut c = Catalog::builtin();
-    for e in &installed.entries {
-        if let Ok(d) = &e.description {
+    for p in &installed.plugins {
+        if let Ok(d) = &p.description {
             c.add_plugin(&d.name, d.models.clone());
         }
     }
@@ -42,66 +106,85 @@ fn warn_problems(installed: &Installed) {
     }
 }
 
-pub fn ls(installed: &Installed) {
-    warn_problems(installed);
-    if installed.entries.is_empty() {
-        println!(
-            "no plugins in {} or on PATH",
-            user_dir().join("plugins").display()
-        );
-        return;
-    }
-    let dotenv = user_dir().join(".env");
-    for e in &installed.entries {
-        let place = match &e.found.source {
+fn place(p: &Available) -> String {
+    match &p.origin {
+        Origin::Builtin => "built in".into(),
+        Origin::External(e) => match &e.found.source {
             Source::Dir(d) => d.display().to_string(),
             Source::Path => e.found.exec.display().to_string(),
-        };
-        match &e.description {
-            Err(msg) => println!("{}  broken: {msg}\n  {place}", e.found.name),
+        },
+    }
+}
+
+pub fn ls(installed: &Installed) {
+    warn_problems(installed);
+    let env_file = dotenv();
+    for p in &installed.plugins {
+        match &p.description {
+            Err(msg) => println!("{}  broken: {msg}\n  {}", p.name, place(p)),
             Ok(d) => {
-                println!("{} {}  {place}", d.name, d.version);
+                println!("{} {}  {}", d.name, d.version, place(p));
                 for m in &d.models {
                     println!("  {:<18} {}", m.op, m.id);
                 }
-                let (_, missing) = discovery::resolve_env(&d.env, &dotenv);
-                for v in &d.env {
-                    let state = if missing.contains(v) {
-                        "missing"
-                    } else {
-                        "set"
-                    };
-                    println!("  env {v} ({state})");
-                }
+                print_env(&d.env, &env_file);
             }
         }
+    }
+    if !installed
+        .plugins
+        .iter()
+        .any(|p| matches!(p.origin, Origin::External(_)))
+    {
+        println!(
+            "\nno other plugins in {} or on PATH",
+            user_dir().join("plugins").display()
+        );
+    }
+}
+
+fn print_env(declared: &[String], env_file: &Path) {
+    let (_, missing) = discovery::resolve_env(declared, env_file);
+    for v in declared {
+        let state = if missing.contains(v) {
+            "missing"
+        } else {
+            "set"
+        };
+        println!("  env {v} ({state})");
     }
 }
 
 /// Describe, env and offline conformance checks. Only calls `quote`, which plugins must keep free.
 pub fn doctor(installed: &Installed, name: &str) -> Result<()> {
     warn_problems(installed);
-    let Some(entry) = installed.entries.iter().find(|e| e.found.name == name) else {
+    let Some(p) = installed.plugins.iter().find(|p| p.name == name) else {
         bail!("no plugin called {name}; `shotline plugin ls` shows what's installed");
     };
-    let desc = match &entry.description {
+    let desc = match &p.description {
         Ok(d) => d,
         Err(msg) => bail!("{name} doesn't describe itself: {msg}"),
     };
     println!("{} {}, protocol {}", desc.name, desc.version, desc.protocol);
 
-    let dotenv = user_dir().join(".env");
-    let (_, missing) = discovery::resolve_env(&desc.env, &dotenv);
+    let env_file = dotenv();
+    let (_, missing) = discovery::resolve_env(&desc.env, &env_file);
     for v in &missing {
-        println!("missing env {v} (set it or put it in {})", dotenv.display());
+        println!(
+            "missing env {v} (set it or put it in {})",
+            env_file.display()
+        );
     }
 
     // The runtime must outlive the plugin: on Windows, shutting it down waits on the thread
     // reading the plugin's stderr, which only ends once the plugin is dropped and exits.
     let rt = runtime();
-    let plugin = discovery::open(entry, &dotenv).map_err(anyhow::Error::msg)?;
+    let plugin = open(installed, name)?;
     let work = std::env::temp_dir().join(format!("shotline-doctor-{name}-{}", std::process::id()));
-    let checks = rt.block_on(conformance::check(&plugin, &Options::offline(&work)));
+    let checks = rt.block_on(conformance::check(
+        plugin.as_ref(),
+        &Options::offline(&work),
+    ));
     let _ = std::fs::remove_dir_all(&work);
     for c in &checks {
         match &c.problem {

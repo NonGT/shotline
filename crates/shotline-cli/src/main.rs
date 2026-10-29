@@ -7,6 +7,7 @@ use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, bui
 
 mod cost;
 mod plugins;
+mod shoot;
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +42,15 @@ enum Cmd {
     Shot(ShotCmd),
     /// Show the exact prompt and references a shot would send, without spending anything
     Prompt { shot: ShotRef },
+    /// Price a shot (01-010) or a whole chapter (1) without spending anything
+    Quote { target: String },
+    /// Quote, ask, then generate a take of a shot
+    Take {
+        shot: ShotRef,
+        /// Don't ask before spending
+        #[arg(long)]
+        yes: bool,
+    },
     /// List a shot's takes
     Takes { shot: ShotRef },
     /// Pick the take a shot uses: `select 01-010 3` or `select 01-010#3`
@@ -293,6 +303,9 @@ fn run(cli: Cli) -> Result<()> {
             }
             println!("\n{}", b.text);
         }
+
+        Cmd::Quote { ref target } => shoot::quote(&open()?, target)?,
+        Cmd::Take { shot, yes } => shoot::take(&open()?, shot, yes)?,
 
         Cmd::Takes { shot } => {
             let p = open()?;

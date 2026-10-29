@@ -213,8 +213,15 @@ impl Project {
         self.clock.ulid()
     }
 
+    /// Writes a new pending job. It gets an id unless it already has one (callers that need the id
+    /// before the job exists, e.g. for a ledger reservation, take one from `self.clock`).
     pub fn create_job(&self, mut job: Job) -> Result<Job> {
-        job.id = self.clock.ulid();
+        if job.id.is_nil() {
+            job.id = self.clock.ulid();
+        }
+        if self.job_dir(job.id).join("job.toml").exists() {
+            return invalid(format!("job {} already exists", job.id));
+        }
         job.created = self.clock.now();
         job.status = JobStatus::Pending;
         fsx::write_toml(&self.job_dir(job.id).join("job.toml"), &job)?;

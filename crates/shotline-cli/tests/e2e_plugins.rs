@@ -37,7 +37,14 @@ fn plugin_ls_shows_models_and_env() {
         .args(["plugin", "ls"])
         .assert()
         .success()
-        .stdout(predicate::str::starts_with("no plugins in"));
+        .stdout(
+            predicate::str::starts_with("fal ")
+                .and(predicate::str::contains("built in"))
+                .and(predicate::str::contains(
+                    "video.generate     minimax/h3-max/reference-to-video",
+                ))
+                .and(predicate::str::contains("no other plugins in")),
+        );
 
     home_with_fake(&tmp);
     shotline(&tmp)
