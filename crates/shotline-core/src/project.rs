@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use shotline_ledger::Budgets;
 
 use crate::error::invalid;
 use crate::job::{Clock, SystemClock};
@@ -20,7 +22,11 @@ pub struct Config {
     pub aspect: String,
     /// Seconds, used when a shot doesn't set its own.
     pub duration: f64,
-    pub budget: Budget,
+    pub money: Money,
+    pub budget: Budgets,
+    /// `unit = "amount CURRENCY"`, e.g. `venice-credit = "0.004 USD"`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub rates: BTreeMap<String, String>,
     pub prompt: PromptLayers,
 }
 
@@ -33,25 +39,25 @@ impl Default for Config {
             resolution: "768P".into(),
             aspect: "9:16".into(),
             duration: 8.0,
-            budget: Budget::default(),
+            money: Money::default(),
+            budget: Budgets::default(),
+            rates: BTreeMap::new(),
             prompt: PromptLayers::default(),
         }
     }
 }
 
-/// USD. Spending stops hard at these.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Budget {
-    pub per_take: f64,
-    pub per_day: f64,
+pub struct Money {
+    /// Budgets and totals are in this.
+    pub currency: String,
 }
 
-impl Default for Budget {
+impl Default for Money {
     fn default() -> Self {
         Self {
-            per_take: 2.0,
-            per_day: 10.0,
+            currency: "USD".into(),
         }
     }
 }
@@ -121,6 +127,11 @@ impl Project {
         };
         let config = Config {
             name: name.clone(),
+            budget: Budgets {
+                per_take: Some(2.0),
+                per_day: Some(10.0),
+                ..Budgets::default()
+            },
             ..Config::default()
         };
         fsx::write_toml(&dir.join(CONFIG_FILE), &config)?;
@@ -228,8 +239,9 @@ mod tests {
         let c: Config =
             toml::from_str("name = \"x\"\nduration = 5\n[budget]\nper_day = 3").unwrap();
         assert_eq!(c.duration, 5.0);
-        assert_eq!(c.budget.per_day, 3.0);
-        assert_eq!(c.budget.per_take, 2.0);
+        assert_eq!(c.budget.per_day, Some(3.0));
+        assert_eq!(c.budget.per_take, None);
+        assert_eq!(c.money.currency, "USD");
         assert_eq!(c.plugin, "fal");
     }
 }

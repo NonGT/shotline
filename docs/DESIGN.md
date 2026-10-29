@@ -245,8 +245,9 @@ including music and sfx tracks.
 Anything that costs anything is quoted first and waits for a yes (`--yes` to skip).
 
 The ledger, `.shotline/ledger.jsonl`, is append-only. Lines are never changed; corrections are new
-lines. Each line has the hash of the one before it, so `shotline cost verify` can tell if anything
-was edited or removed.
+lines. Each line has the hash of the one before it, and `.shotline/ledger.head` holds the last seq
+and hash, so `shotline cost verify` can tell if anything was edited, removed, reordered or cut off.
+Writes hold a lock, and the budget check happens inside it.
 
 ```json
 {"seq":57,"time":"2026-10-30T10:12:03Z","type":"charge","job":"01JBX9Q3...","take":"01JBX9Q0...",
@@ -266,8 +267,9 @@ Entry types:
 ### Currencies and credits
 
 Every amount is stored in the unit the provider used (USD, Venice credits, whatever) along with
-what it came to in the project's currency and the rate used at the time. Old lines are never
-recalculated when rates change.
+what it came to in the project's currency and the rate used at the time (a charge uses the rate of
+the day it's charged). Old lines are never recalculated when rates change. If the film's currency
+is changed later, reports convert older lines at today's rates.
 
 ```toml
 [money]
@@ -278,16 +280,18 @@ venice-credit = "0.004 USD"
 USD = "36.5 THB"
 ```
 
-Rates come from shotline.toml or from a plugin's `rates`; the config wins, since what you actually
+Rates come from the plugin's `rates`, then `~/.config/shotline/config.toml`, then shotline.toml;
+later ones win, since what you actually
 paid for credits can differ from list price. Rates chain (credit -> USD -> THB). If a cost can't be
 converted to the project currency, the job doesn't run until a rate is set, so nothing gets spent
 uncounted.
 
 ### Budgets
 
-Hard stops, in the project currency: per job, per take, per chapter, per day and for the whole
-project. Per-day spend is also tracked across projects in `~/.config/shotline/spend.jsonl`, since
-it's all the same wallet.
+Hard stops, in the project currency: `per_job`, `per_take`, `per_chapter`, `per_day` and `total`
+under `[budget]`. Money held by running jobs counts. Every line is also written to
+`~/.config/shotline/spend.jsonl`, and `[budget] per_day` in `~/.config/shotline/config.toml` (in
+that file's `[money] currency`) stops spending across all films, since it's all the same wallet.
 
 ### Reports
 
@@ -323,7 +327,9 @@ shotline select <shot> <take>
 shotline run <op> [--plugin p] [--model m] [inputs...]   one-off operation outside a shot
 shotline timeline render [--no-colormatch]
 shotline cost [--by chapter|shot|op|plugin|day] [--csv]
-shotline cost verify | reconcile
+shotline cost verify | reconcile [--plugin p]
+shotline cost adjust <amount> <unit> --note ...
+shotline cost refund <job> <amount> <unit> [--note ...]
 shotline mcp
 shotline ui
 ```
@@ -401,7 +407,7 @@ windows.
 
 1. workspace, data model, init/element/shot/prompt (no network) - done
 2. plugin protocol, Plugin trait, fake plugin, conformance kit, jobs and takes - done
-3. ledger: reserve/charge, budgets, rates and currencies, `cost`, `verify`
+3. ledger: reserve/charge, budgets, rates and currencies, `cost`, `verify` - done
 4. fal built in: quote, take, select, errors
 5. external plugins: Venice, ElevenLabs (voices, lines), WaveSpeed lip sync; recipes
 6. continuity: last frame chaining, colour match, timeline render with audio tracks

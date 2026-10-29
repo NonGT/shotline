@@ -2,8 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use shotline_core::ledger::report::By;
 use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, build};
 
+mod cost;
 mod plugins;
 
 #[derive(Parser)]
@@ -46,9 +48,47 @@ enum Cmd {
     /// Installed plugins
     #[command(subcommand)]
     Plugin(PluginCmd),
+    /// What the film has cost
+    #[command(args_conflicts_with_subcommands = true)]
+    Cost {
+        #[command(subcommand)]
+        cmd: Option<CostCmd>,
+        /// chapter, shot, take, op, plugin or day
+        #[arg(long, default_value = "shot")]
+        by: By,
+        #[arg(long)]
+        csv: bool,
+    },
     /// Serves the built-in fake plugin over stdio, for tests and dry runs
     #[command(name = "__fake-plugin", hide = true)]
     FakePlugin,
+}
+
+#[derive(Subcommand)]
+enum CostCmd {
+    /// Check nobody edited the ledger
+    Verify,
+    /// Compare the ledger with what providers say they charged
+    Reconcile {
+        #[arg(long)]
+        plugin: Option<String>,
+    },
+    /// Record a correction, e.g. a fee or promo credit (negative)
+    Adjust {
+        #[arg(allow_hyphen_values = true)]
+        amount: f64,
+        unit: String,
+        #[arg(long)]
+        note: String,
+    },
+    /// Record money back for a job
+    Refund {
+        job: String,
+        amount: f64,
+        unit: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -288,6 +328,25 @@ fn run(cli: Cli) -> Result<()> {
             println!("{t} selected");
         }
 
+        Cmd::Cost { ref cmd, by, csv } => {
+            let p = open()?;
+            match cmd {
+                None => cost::show(&p, by, csv)?,
+                Some(CostCmd::Verify) => cost::verify(&p)?,
+                Some(CostCmd::Reconcile { plugin }) => {
+                    cost::reconcile_cmd(&p, &plugins::load(), plugin.as_deref())?
+                }
+                Some(CostCmd::Adjust { amount, unit, note }) => {
+                    cost::adjust(&p, *amount, unit, note)?
+                }
+                Some(CostCmd::Refund {
+                    job,
+                    amount,
+                    unit,
+                    note,
+                }) => cost::refund(&p, job, *amount, unit, note)?,
+            }
+        }
         Cmd::Plugin(PluginCmd::Ls) => plugins::ls(&plugins::load()),
         Cmd::Plugin(PluginCmd::Doctor { ref name }) => plugins::doctor(&plugins::load(), name)?,
         Cmd::FakePlugin => {

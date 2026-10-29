@@ -1,0 +1,16 @@
+[package]
+name = "shotline-ledger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jiff = { version = "0.2.38", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+shotline-protocol = { version = "0.1.0", path = "../shotline-protocol" }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"

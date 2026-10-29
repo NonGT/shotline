@@ -5,6 +5,9 @@
 //! - `fake_fail = "<kind>"`: the job runs, then fails with that kind
 //! - `fake_charge_on_fail = true`: a failed job still reports a cost
 //! - `fake_polls = n`: polls that say running before it finishes (default 1)
+//!
+//! `usage` answers with the contents of `shotline-fake-usage.json` in the working directory, if
+//! there is one.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,7 +17,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use shotline_protocol::{
     Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs, PROTOCOL_VERSION,
-    PluginError, Quote, Rate, Rates, Request, State, Status,
+    PluginError, Quote, Rate, Rates, Request, State, Status, Usage,
 };
 
 use crate::{Plugin, Result};
@@ -283,5 +286,13 @@ impl Plugin for FakePlugin {
                 currency: "USD".into(),
             }],
         })
+    }
+
+    async fn usage(&self, _since: &str) -> Result<Usage> {
+        match std::fs::read_to_string("shotline-fake-usage.json") {
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|e| PluginError::new(ErrorKind::Other, e.to_string()).into()),
+            Err(_) => Ok(Usage::default()),
+        }
     }
 }

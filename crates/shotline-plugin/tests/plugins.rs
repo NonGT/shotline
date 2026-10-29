@@ -106,10 +106,13 @@ async fn errors_keep_their_shape_over_stdio() {
         Err(Error::Plugin(e)) => assert_eq!(e.field.as_deref(), Some("references[4]")),
         other => panic!("{other:?}"),
     }
-    assert!(matches!(
-        p.usage("2026-01-01T00:00:00Z").await,
-        Err(Error::Unsupported(_))
-    ));
+    assert!(
+        p.usage("2026-01-01T00:00:00Z")
+            .await
+            .unwrap()
+            .charges
+            .is_empty()
+    );
     assert_eq!(p.rates().await.unwrap().rates[0].unit, "fake-credit");
 }
 
@@ -163,6 +166,13 @@ mod broken {
         p.timeout_scale = 0.002;
         let m = message(p.describe().await);
         assert!(m.contains("no reply to describe"), "{m}");
+    }
+
+    #[tokio::test]
+    async fn method_not_found_is_unsupported() {
+        let p =
+            sh(r#"read l; echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no"}}'"#);
+        assert!(matches!(p.usage("x").await, Err(Error::Unsupported(m)) if m == "usage"));
     }
 
     #[tokio::test]
