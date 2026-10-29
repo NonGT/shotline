@@ -35,6 +35,8 @@ const BASE_ENV: &[&str] = &[
 
 const STDERR_LINES: usize = 20;
 
+/// Drop it before the tokio runtime it was used on. On Windows, runtime shutdown waits for the
+/// thread reading the plugin's stderr, which only finishes once the plugin has exited.
 pub struct ProcessPlugin {
     name: String,
     exec: PathBuf,

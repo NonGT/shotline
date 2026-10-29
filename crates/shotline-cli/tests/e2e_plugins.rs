@@ -25,6 +25,7 @@ fn shotline(tmp: &TempDir) -> Command {
     cmd.current_dir(tmp.path())
         .env("SHOTLINE_HOME", tmp.path().join(".home"))
         .env("PATH", "")
+        .timeout(std::time::Duration::from_secs(60))
         .env_remove("SHOTLINE_FAKE_KEY");
     cmd
 }

@@ -8,7 +8,8 @@ fn shotline(dir: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("shotline").unwrap();
     cmd.current_dir(dir.path())
         .env("SHOTLINE_HOME", dir.path().join(".home"))
-        .env("PATH", "");
+        .env("PATH", "")
+        .timeout(std::time::Duration::from_secs(60));
     cmd
 }
 

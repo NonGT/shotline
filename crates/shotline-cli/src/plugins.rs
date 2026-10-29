@@ -96,9 +96,12 @@ pub fn doctor(installed: &Installed, name: &str) -> Result<()> {
         println!("missing env {v} (set it or put it in {})", dotenv.display());
     }
 
+    // The runtime must outlive the plugin: on Windows, shutting it down waits on the thread
+    // reading the plugin's stderr, which only ends once the plugin is dropped and exits.
+    let rt = runtime();
     let plugin = discovery::open(entry, &dotenv).map_err(anyhow::Error::msg)?;
     let work = std::env::temp_dir().join(format!("shotline-doctor-{name}-{}", std::process::id()));
-    let checks = runtime().block_on(conformance::check(&plugin, &Options::offline(&work)));
+    let checks = rt.block_on(conformance::check(&plugin, &Options::offline(&work)));
     let _ = std::fs::remove_dir_all(&work);
     for c in &checks {
         match &c.problem {
