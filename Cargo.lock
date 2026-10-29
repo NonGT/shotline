@@ -1769,6 +1769,7 @@ name = "shotline-plugin"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "serde",
  "serde_json",
  "shotline-protocol",
@@ -1776,6 +1777,45 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "shotline-plugin-elevenlabs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde_json",
+ "shotline-plugin",
+ "tempfile",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "shotline-plugin-venice"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde_json",
+ "shotline-plugin",
+ "tempfile",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "shotline-plugin-wavespeed"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde_json",
+ "shotline-plugin",
+ "tempfile",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

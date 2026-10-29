@@ -89,12 +89,13 @@ pub async fn check(plugin: &dyn Plugin, opts: &Options<'_>) -> Vec<Check> {
         }
     }
 
-    let bogus = Request {
-        op: Op::VideoGenerate,
-        model: "no/such-model".into(),
-        prompt: Some("x".into()),
-        ..Request::default()
-    };
+    // A sample request for an operation the plugin does, with a model it doesn't have.
+    let mut bogus = desc
+        .models
+        .first()
+        .and_then(|m| sample_request(m, opts.work_dir).ok())
+        .unwrap_or_default();
+    bogus.model = "no/such-model".into();
     r.add(
         "unknown model is a validation error on `model`",
         match plugin.quote(&bogus).await {
@@ -175,7 +176,7 @@ fn sample_request(m: &ModelInfo, dir: &Path) -> std::io::Result<Request> {
     let mut req = Request {
         op: m.op.clone(),
         model: m.id.clone(),
-        duration: m.min_duration,
+        duration: m.min_duration.or(Some(5.0)),
         resolution: m.resolutions.first().cloned(),
         aspect: m.aspects.first().cloned(),
         ..Request::default()

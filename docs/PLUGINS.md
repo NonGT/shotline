@@ -197,7 +197,9 @@ Leave out optional methods; answer with error code -32601 (method not found).
 }
 ```
 
-Only `op` and `model` are always there. Paths are absolute and local; uploading them, or turning
+Only `op` and `model` are always there, plus `duration` (the planned length of the shot) for
+video and lip sync ops. A quote may refer to input files that don't exist yet, because later steps
+of a take are priced before earlier ones have run; don't read files in `quote`. Paths are absolute and local; uploading them, or turning
 them into data URLs, is the plugin's job. References are in the order the prompt numbers them.
 `params` comes straight from the user's shot or command line; validate it.
 

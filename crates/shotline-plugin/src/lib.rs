@@ -12,6 +12,7 @@ pub mod discovery;
 pub mod fake;
 mod process;
 mod serve;
+pub mod util;
 
 pub use process::ProcessPlugin;
 pub use serve::serve;
