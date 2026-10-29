@@ -68,8 +68,20 @@ pub struct Shot {
     pub elements: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_take: Option<String>,
+    /// Name of a recipe in shotline.toml; without one a take is a single video.generate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<Line>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelOverride>,
+}
+
+/// Something a cast member says in the shot.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Line {
+    pub who: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +273,24 @@ impl Project {
             }
         }
         Ok(out)
+    }
+
+    pub fn add_line(&self, r: ShotRef, who: &str, text: &str) -> Result<Shot> {
+        let who = who.trim_start_matches('@');
+        let el = self.element(who)?;
+        if el.kind != crate::Kind::Cast {
+            return invalid(format!("@{who} is a {}, only cast speak", el.kind));
+        }
+        if text.trim().is_empty() {
+            return invalid("the line is empty");
+        }
+        let mut shot = self.shot(r)?;
+        shot.lines.push(Line {
+            who: who.to_string(),
+            text: text.to_string(),
+        });
+        self.save_shot(r, &shot)?;
+        Ok(shot)
     }
 
     /// The shot before `r` in film order, crossing chapter boundaries.

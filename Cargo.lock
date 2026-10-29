@@ -1716,6 +1716,7 @@ dependencies = [
  "shotline-engine",
  "shotline-plugin",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -1745,6 +1746,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "ulid",
 ]
 
 [[package]]

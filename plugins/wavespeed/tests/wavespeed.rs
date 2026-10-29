@@ -29,30 +29,44 @@ async fn mock() -> MockServer {
         .and(path("/api/v3/sync/lipsync-3"))
         .and(header("Authorization", "Bearer k"))
         .and(body_partial_json(json!({"sync_mode": "silence"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code": 200, "data": {"id": "p1", "status": "created"}})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code": 200, "data": {"id": "p1", "status": "created"}})),
+        )
         .mount(&s)
         .await;
     Mock::given(method("POST"))
         .and(path("/api/v3/sync/lipsync-3"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code": 200, "data": {"id": "p1", "status": "created"}})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code": 200, "data": {"id": "p1", "status": "created"}})),
+        )
         .mount(&s)
         .await;
     Mock::given(method("GET"))
         .and(path("/api/v3/predictions/p1/result"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code": 200, "data": {"status": "processing"}})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code": 200, "data": {"status": "processing"}})),
+        )
         .up_to_n_times(1)
         .mount(&s)
         .await;
     Mock::given(method("GET"))
         .and(path("/api/v3/predictions/p1/result"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"code": 200, "data": {
-            "status": "completed", "outputs": [format!("{}/files/o.mp4", s.uri())]
-        }})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"code": 200, "data": {
+                "status": "completed", "outputs": [format!("{}/files/o.mp4", s.uri())]
+            }})),
+        )
         .mount(&s)
         .await;
     Mock::given(method("GET"))
         .and(path("/api/v3/predictions/no-such-job/result"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"code": 404, "message": "prediction not found"})))
+        .respond_with(
+            ResponseTemplate::new(404)
+                .set_body_json(json!({"code": 404, "message": "prediction not found"})),
+        )
         .mount(&s)
         .await;
     Mock::given(method("GET"))
@@ -87,7 +101,10 @@ async fn syncs() {
     assert_eq!(w.poll(&job).await.unwrap().state, State::Running);
     assert_eq!(w.poll(&job).await.unwrap().state, State::Done);
     let out = w.fetch(&job, &dir.path().join("o")).await.unwrap();
-    assert_eq!(std::fs::read(dir.path().join("o").join(&out.outputs[0].file)).unwrap(), b"synced");
+    assert_eq!(
+        std::fs::read(dir.path().join("o").join(&out.outputs[0].file)).unwrap(),
+        b"synced"
+    );
 }
 
 #[test]
@@ -96,7 +113,10 @@ fn errors() {
         wavespeed::map_error(400, &json!({"message": "Insufficient balance"})).kind,
         ErrorKind::Quota
     );
-    assert_eq!(wavespeed::map_error(401, &json!({"message": "bad key"})).kind, ErrorKind::Auth);
+    assert_eq!(
+        wavespeed::map_error(401, &json!({"message": "bad key"})).kind,
+        ErrorKind::Auth
+    );
 }
 
 #[tokio::test]
@@ -105,7 +125,11 @@ async fn conforms() {
     let dir = tempfile::tempdir().unwrap();
     let mut opts = Options::offline(dir.path());
     opts.run_jobs = true;
-    let checks = conformance::check(&WaveSpeed::new(Some("k".into()), &format!("{}/api/v3", s.uri())), &opts).await;
+    let checks = conformance::check(
+        &WaveSpeed::new(Some("k".into()), &format!("{}/api/v3", s.uri())),
+        &opts,
+    )
+    .await;
     let failed: Vec<_> = checks.iter().filter(|c| c.problem.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
 }

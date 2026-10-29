@@ -89,10 +89,12 @@ impl Venice {
     }
 
     async fn post(&self, path: &str, body: &Value) -> Result<Resp> {
-        let key = self
-            .key
-            .as_deref()
-            .ok_or_else(|| Error::from(PluginError::new(ErrorKind::Auth, format!("{KEY_VAR} isn't set"))))?;
+        let key = self.key.as_deref().ok_or_else(|| {
+            Error::from(PluginError::new(
+                ErrorKind::Auth,
+                format!("{KEY_VAR} isn't set"),
+            ))
+        })?;
         let r = self
             .http
             .post(format!("{}{path}", self.base))
@@ -163,18 +165,18 @@ fn first_detail(v: &Value, path: &mut Vec<String>) -> Option<(Vec<String>, Strin
 
 pub fn map_error(status: u16, body: &Value, refs: &[usize]) -> PluginError {
     let text = body.to_string().to_lowercase();
-    let kind = if text.contains("content policy") || text.contains("content_policy") || status == 422
-    {
-        ErrorKind::ContentPolicy
-    } else {
-        match status {
-            401 | 403 => ErrorKind::Auth,
-            402 | 429 => ErrorKind::Quota,
-            404 => ErrorKind::NotFound,
-            400 => ErrorKind::Validation,
-            _ => ErrorKind::Other,
-        }
-    };
+    let kind =
+        if text.contains("content policy") || text.contains("content_policy") || status == 422 {
+            ErrorKind::ContentPolicy
+        } else {
+            match status {
+                401 | 403 => ErrorKind::Auth,
+                402 | 429 => ErrorKind::Quota,
+                404 => ErrorKind::NotFound,
+                400 => ErrorKind::Validation,
+                _ => ErrorKind::Other,
+            }
+        };
     let top = body
         .get("error")
         .and_then(Value::as_str)
@@ -183,7 +185,9 @@ pub fn map_error(status: u16, body: &Value, refs: &[usize]) -> PluginError {
             Value::String(s) if !s.is_empty() => s.chars().take(300).collect(),
             _ => format!("Venice answered HTTP {status}"),
         });
-    let detail = body.get("details").and_then(|d| first_detail(d, &mut vec![]));
+    let detail = body
+        .get("details")
+        .and_then(|d| first_detail(d, &mut vec![]));
     let Some((path, msg)) = detail else {
         return PluginError::new(kind, top);
     };
@@ -236,14 +240,19 @@ pub fn body(req: &Request) -> Result<(Map<String, Value>, Vec<usize>)> {
             }
             MediaKind::Audio if audio.is_none() => audio = Some(data_url(&r.path, &f)?),
             MediaKind::Audio => {
-                return Err(PluginError::new(ErrorKind::Validation, "Venice takes one audio clip")
-                    .field(f)
-                    .into());
+                return Err(
+                    PluginError::new(ErrorKind::Validation, "Venice takes one audio clip")
+                        .field(f)
+                        .into(),
+                );
             }
             _ => {
-                return Err(PluginError::new(ErrorKind::Validation, "Venice takes images and audio")
-                    .field(f)
-                    .into());
+                return Err(PluginError::new(
+                    ErrorKind::Validation,
+                    "Venice takes images and audio",
+                )
+                .field(f)
+                .into());
             }
         }
     }
@@ -347,7 +356,13 @@ impl Plugin for Venice {
         }
         let v = r.json();
         if r.status >= 300 {
-            let refs = self.refs.lock().unwrap().get(job).cloned().unwrap_or_default();
+            let refs = self
+                .refs
+                .lock()
+                .unwrap()
+                .get(job)
+                .cloned()
+                .unwrap_or_default();
             let e = map_error(r.status, &v, &refs);
             if e.kind == ErrorKind::NotFound {
                 return Err(e.into());
@@ -397,12 +412,12 @@ impl Plugin for Venice {
     }
 
     async fn fetch(&self, job: &str, output_dir: &Path) -> Result<Outputs> {
-        let done = self
-            .done
-            .lock()
-            .unwrap()
-            .remove(job)
-            .ok_or_else(|| Error::from(PluginError::new(ErrorKind::NotFound, format!("{job} isn't done"))))?;
+        let done = self.done.lock().unwrap().remove(job).ok_or_else(|| {
+            Error::from(PluginError::new(
+                ErrorKind::NotFound,
+                format!("{job} isn't done"),
+            ))
+        })?;
         let bytes = match done {
             Done::Bytes(b) => b,
             Done::Url(u) => self

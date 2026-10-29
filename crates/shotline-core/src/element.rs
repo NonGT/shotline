@@ -55,8 +55,26 @@ pub struct Element {
     pub handle: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<Voice>,
     #[serde(skip, default = "default_kind")]
     pub kind: Kind,
+}
+
+/// How a cast member sounds: which TTS plugin and voice to use for their lines.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Voice {
+    pub plugin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_id: Option<String>,
+    /// A recording to clone from, for plugins that do that. Relative to the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<String>,
+    /// Passed to the plugin as is, e.g. stability.
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub settings: toml::Table,
 }
 
 fn default_kind() -> Kind {
@@ -115,6 +133,7 @@ impl Project {
             name: name.to_string(),
             handle,
             description: description.to_string(),
+            voice: None,
             kind,
         };
         fsx::write_toml(&self.element_file(kind, &el.handle), &el)?;
@@ -148,6 +167,19 @@ impl Project {
                 handle.trim_start_matches('@')
             )),
         }
+    }
+
+    pub fn set_voice(&self, handle: &str, voice: Voice) -> Result<Element> {
+        let mut el = self.element(handle)?;
+        if el.kind != Kind::Cast {
+            return invalid(format!(
+                "@{} is a {}, only cast have voices",
+                el.handle, el.kind
+            ));
+        }
+        el.voice = Some(voice);
+        fsx::write_toml(&self.element_file(el.kind, &el.handle), &el)?;
+        Ok(el)
     }
 
     pub fn anchors(&self, el: &Element) -> Result<Vec<PathBuf>> {

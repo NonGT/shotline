@@ -174,6 +174,34 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
         parts.push(render(&t, &[]));
     }
 
+    for line in &shot.lines {
+        match project.find_element(&line.who)? {
+            Some(el) if el.voice.is_some() => {}
+            Some(_) => warnings.push(format!("@{} has a line but no voice", line.who)),
+            None => warnings.push(format!("a line is by @{}, who doesn't exist", line.who)),
+        }
+    }
+    let steps = project.steps(&shot)?;
+    if !shot.lines.is_empty() && !steps.iter().any(|s| s.op == Op::AudioTts) {
+        warnings.push("the lines won't be spoken: the shot's recipe has no audio.tts step".into());
+    }
+    if steps.iter().any(|s| s.op == Op::VideoGenerate && s.audio) {
+        if !spec.audio_input {
+            warnings.push(format!(
+                "{} doesn't take audio, use a video.lipsync step",
+                spec.id
+            ));
+        } else if let Some(max) = spec.max_audio
+            && shot.lines.len() > max
+        {
+            warnings.push(format!(
+                "{} lines but {} takes at most {max} audio clips",
+                shot.lines.len(),
+                spec.id
+            ));
+        }
+    }
+
     let (lo, hi) = (
         spec.min_duration.unwrap_or(0.0),
         spec.max_duration.unwrap_or(f64::INFINITY),

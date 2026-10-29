@@ -1,75 +1,86 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use shotline_core::ledger::{Books, money};
-use shotline_core::protocol::{Rate, State};
+use shotline_core::protocol::{MediaKind, Op, Rate, Reference, Request, State};
 use shotline_core::{Project, ShotRef, UserConfig, user_dir};
-use shotline_engine::{Event, Options, Plan};
+use shotline_engine::{Event, Options, Plan, Plugins, price};
 use shotline_plugin::Plugin;
 use tokio::runtime::Runtime;
 
 use crate::plugins::{self, Installed};
 
-fn plugin_name(p: &Project, r: ShotRef) -> Result<String> {
-    Ok(p.shot(r)?
-        .model
-        .and_then(|m| m.plugin)
-        .unwrap_or_else(|| p.config.plugin.clone()))
+/// Every installed plugin, opened (which costs nothing until one is called), plus the rates of
+/// the ones a command actually uses.
+struct Opened {
+    plugins: BTreeMap<String, Box<dyn Plugin>>,
+    rates: Vec<Rate>,
+}
+
+impl Opened {
+    fn new(installed: &Installed) -> Result<Self> {
+        let mut plugins = BTreeMap::new();
+        for p in &installed.plugins {
+            if p.description.is_ok() {
+                plugins.insert(p.name.clone(), plugins::open(installed, &p.name)?);
+            }
+        }
+        Ok(Self {
+            plugins,
+            rates: vec![],
+        })
+    }
+
+    fn load_rates<'a>(&mut self, rt: &Runtime, names: impl IntoIterator<Item = &'a String>) {
+        for n in names {
+            if let Some(p) = self.plugins.get(n)
+                && let Ok(r) = rt.block_on(p.rates())
+            {
+                self.rates.extend(r.rates);
+            }
+        }
+    }
+}
+
+impl Plugins for Opened {
+    fn plugin(&self, name: &str) -> Result<&dyn Plugin> {
+        self.plugins.get(name).map(|p| p.as_ref()).with_context(|| {
+            format!("no plugin called {name}; `shotline plugin ls` shows what's installed")
+        })
+    }
+}
+
+/// Plugins a take of `r` would call, so their rates can be loaded before quoting.
+fn needed(p: &Project, r: ShotRef) -> Result<BTreeSet<String>> {
+    let shot = p.shot(r)?;
+    let mut names = BTreeSet::new();
+    names.insert(
+        shot.model
+            .as_ref()
+            .and_then(|m| m.plugin.clone())
+            .unwrap_or_else(|| p.config.plugin.clone()),
+    );
+    for step in p.steps(&shot)? {
+        if let Some(n) = step.plugin {
+            names.insert(n);
+        } else if step.op == Op::AudioTts {
+            for line in &shot.lines {
+                if let Some(v) = p.find_element(&line.who)?.and_then(|e| e.voice) {
+                    names.insert(v.plugin);
+                }
+            }
+        }
+    }
+    Ok(names)
 }
 
 fn books(p: &Project, rates: &[Rate]) -> Result<Books> {
     let dir = user_dir();
     Ok(p.books(&dir, &UserConfig::load(&dir)?, rates)?)
-}
-
-/// Opened plugins by name, with whatever rates they publish.
-struct Opened<'a> {
-    installed: &'a Installed,
-    plugins: BTreeMap<String, Box<dyn Plugin>>,
-    rates: Vec<Rate>,
-}
-
-impl<'a> Opened<'a> {
-    fn new(installed: &'a Installed) -> Self {
-        Self {
-            installed,
-            plugins: BTreeMap::new(),
-            rates: vec![],
-        }
-    }
-
-    fn open(&mut self, rt: &Runtime, name: &str) -> Result<()> {
-        if !self.plugins.contains_key(name) {
-            let p = plugins::open(self.installed, name)?;
-            if let Ok(r) = rt.block_on(p.rates()) {
-                self.rates.extend(r.rates);
-            }
-            self.plugins.insert(name.to_string(), p);
-        }
-        Ok(())
-    }
-
-    fn get(&self, name: &str) -> &dyn Plugin {
-        self.plugins[name].as_ref()
-    }
-}
-
-fn price(plan: &Plan) -> String {
-    let q = &plan.quote;
-    if q.unit == plan.currency {
-        format!("{} {}", money(q.amount), q.unit)
-    } else {
-        format!(
-            "{} {} ({} {})",
-            money(q.amount),
-            q.unit,
-            money(plan.base),
-            plan.currency
-        )
-    }
 }
 
 fn targets(p: &Project, target: &str) -> Result<Vec<ShotRef>> {
@@ -79,32 +90,50 @@ fn targets(p: &Project, target: &str) -> Result<Vec<ShotRef>> {
     Ok(p.shots(Some(target))?.into_iter().map(|(r, _)| r).collect())
 }
 
+fn print_steps(plan: &Plan) {
+    for (i, s) in plan.steps.iter().enumerate() {
+        let cost = match &s.reused {
+            Some(j) => format!("reused from {}", j.id),
+            None => price(&s.quote, s.base, &plan.currency),
+        };
+        println!("  {i}  {:<18} {} {}  {cost}", s.what, s.plugin, s.model);
+    }
+}
+
 /// Prices a shot or a whole chapter without spending anything.
 pub fn quote(p: &Project, target: &str) -> Result<()> {
     let installed = plugins::load();
     let catalog = plugins::catalog(p, &installed)?;
     let rt = plugins::runtime();
-    let mut opened = Opened::new(&installed);
+    let mut opened = Opened::new(&installed)?;
+    let shots = targets(p, target)?;
     let mut total = 0.0;
     let mut currency = p.config.money.currency.clone();
-    let shots = targets(p, target)?;
     for r in &shots {
-        let name = plugin_name(p, *r)?;
-        opened.open(&rt, &name)?;
-        let plugin = opened.get(&name);
+        opened.load_rates(&rt, &needed(p, *r)?);
         let b = books(p, &opened.rates)?;
-        let plan = rt.block_on(shotline_engine::plan(p, &catalog, &b, plugin, *r))?;
+        let plan = rt.block_on(shotline_engine::plan(p, &catalog, &b, &opened, *r, None))?;
         for w in &plan.built.warnings {
             eprintln!("warning: {r}: {w}");
         }
-        println!(
-            "{r}  {} {}  {}s  {}",
-            plan.built.plugin,
-            plan.built.model,
-            money(plan.built.duration),
-            price(&plan)
-        );
-        total += plan.base;
+        if let [only] = plan.steps.as_slice() {
+            println!(
+                "{r}  {} {}  {}s  {}",
+                only.plugin,
+                only.model,
+                money(plan.built.duration),
+                price(&only.quote, only.base, &plan.currency)
+            );
+        } else {
+            println!(
+                "{r}  {}s  {} {}",
+                money(plan.built.duration),
+                money(plan.total),
+                plan.currency
+            );
+            print_steps(&plan);
+        }
+        total += plan.total;
         currency = plan.currency;
     }
     if shots.len() > 1 {
@@ -122,25 +151,100 @@ fn confirm(question: &str) -> Result<bool> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-fn poll_every() -> Duration {
-    std::env::var("SHOTLINE_POLL_MS")
+fn options() -> Options {
+    let poll_every = std::env::var("SHOTLINE_POLL_MS")
         .ok()
         .and_then(|v| v.parse().ok())
         .map(Duration::from_millis)
-        .unwrap_or(Duration::from_secs(5))
+        .unwrap_or(Duration::from_secs(5));
+    Options {
+        poll_every,
+        ..Options::default()
+    }
 }
 
-/// Quotes, asks, then runs one take of a shot.
-pub fn take(p: &Project, r: ShotRef, yes: bool) -> Result<()> {
+/// Prints progress; remembers the last state so it isn't repeated every poll.
+fn printer(name: String) -> impl FnMut(Event) {
+    let mut last: Option<State> = None;
+    move |ev| match ev {
+        Event::Reserved { total, currency } => {
+            println!("reserved {} {currency}", money(total))
+        }
+        Event::Step {
+            index,
+            of,
+            what,
+            plugin,
+            model,
+            reused,
+        } => {
+            last = None;
+            if of > 1 {
+                let r = if reused { " (reused)" } else { "" };
+                println!("step {}/{of}: {what} · {plugin} {model}{r}", index + 1);
+            }
+        }
+        Event::Submitted { plugin_job } => println!("sent to {name} ({plugin_job})"),
+        Event::Cancelling => println!("cancelling..."),
+        Event::Status(s) => {
+            if last != Some(s.state) {
+                match s.progress {
+                    Some(pr) if s.state == State::Running => {
+                        println!("running ({}%)", (pr * 100.0).round())
+                    }
+                    _ => println!("{}", format!("{:?}", s.state).to_lowercase()),
+                }
+                last = Some(s.state);
+            }
+        }
+    }
+}
+
+fn on_ctrl_c(opts: &Options) {
+    let cancel = Arc::clone(&opts.cancel);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel.notify_one();
+        }
+    });
+}
+
+/// Quotes, asks, then runs a take of a shot. `from` reuses the steps before it from an earlier
+/// take (the latest by default).
+pub fn take(
+    p: &Project,
+    r: ShotRef,
+    yes: bool,
+    from: Option<usize>,
+    of: Option<&str>,
+) -> Result<()> {
     let installed = plugins::load();
     let catalog = plugins::catalog(p, &installed)?;
     let rt = plugins::runtime();
-    let mut opened = Opened::new(&installed);
-    let name = plugin_name(p, r)?;
-    opened.open(&rt, &name)?;
-    let plugin = opened.get(&name);
+    let mut opened = Opened::new(&installed)?;
+    opened.load_rates(&rt, &needed(p, r)?);
     let b = books(p, &opened.rates)?;
-    let plan = rt.block_on(shotline_engine::plan(p, &catalog, &b, plugin, r))?;
+    let reuse = match from {
+        None => None,
+        Some(n) => {
+            let t = match of {
+                Some(spec) => p.take(r, spec)?,
+                None => p
+                    .takes(r)?
+                    .pop()
+                    .with_context(|| format!("{r} has no take to reuse steps from"))?,
+            };
+            Some((t, n))
+        }
+    };
+    let plan = rt.block_on(shotline_engine::plan(
+        p,
+        &catalog,
+        &b,
+        &opened,
+        r,
+        reuse.as_ref().map(|(t, n)| (t, *n)),
+    ))?;
 
     for w in &plan.built.warnings {
         eprintln!("warning: {w}");
@@ -159,49 +263,43 @@ pub fn take(p: &Project, r: ShotRef, yes: bool) -> Result<()> {
             ""
         }
     );
-    if !yes && !confirm(&format!("spend {} on {r}?", price(&plan)))? {
+    let cost = if let [only] = plan.steps.as_slice() {
+        price(&only.quote, only.base, &plan.currency)
+    } else {
+        print_steps(&plan);
+        format!("{} {}", money(plan.total), plan.currency)
+    };
+    if !yes && !confirm(&format!("spend {cost} on {r}?"))? {
         println!("nothing spent");
         return Ok(());
     }
 
-    let opts = Options {
-        poll_every: poll_every(),
-        ..Options::default()
-    };
-    let cancel = Arc::clone(&opts.cancel);
-    let mut last: Option<State> = None;
+    let opts = options();
     let outcome = rt.block_on(async {
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                cancel.notify_one();
-            }
-        });
-        shotline_engine::take(p, &b, plugin, &plan, &opts, |ev| match ev {
-            Event::Reserved(e) => println!("reserved {} {}", money(e.base), e.base_currency),
-            Event::Submitted { plugin_job } => println!("sent to {name} ({plugin_job})"),
-            Event::Cancelling => println!("cancelling..."),
-            Event::Status(s) => {
-                if last != Some(s.state) {
-                    match s.progress {
-                        Some(pr) if s.state == State::Running => {
-                            println!("running ({}%)", (pr * 100.0).round())
-                        }
-                        _ => println!("{}", format!("{:?}", s.state).to_lowercase()),
-                    }
-                    last = Some(s.state);
-                }
-            }
-        })
+        on_ctrl_c(&opts);
+        shotline_engine::take(
+            p,
+            &b,
+            &opened,
+            &plan,
+            &opts,
+            printer(plan.built.plugin.clone()),
+        )
         .await
     })?;
     drop(opened);
 
-    let cost = outcome
-        .job
-        .cost
-        .as_ref()
+    let spent: Vec<String> = outcome
+        .take
+        .costs()
+        .iter()
         .map(|c| format!("{} {}", money(c.amount), c.unit))
-        .unwrap_or_else(|| "nothing charged".into());
+        .collect();
+    let spent = if spent.is_empty() {
+        "nothing charged".to_string()
+    } else {
+        spent.join(" + ")
+    };
     match &outcome.error {
         None => {
             let file = outcome
@@ -210,12 +308,116 @@ pub fn take(p: &Project, r: ShotRef, yes: bool) -> Result<()> {
                 .first()
                 .map(|f| p.rel(&p.job_dir(outcome.job.id).join(f)))
                 .unwrap_or_default();
-            println!("{} done · {cost} · {file}", outcome.take);
+            println!("{} done · {spent} · {file}", outcome.take);
             if p.shot(r)?.selected_take.is_none() {
                 println!("pick it with `shotline select {}`", outcome.take);
             }
             Ok(())
         }
-        Some(e) => bail!("{} {}: {e} ({cost})", outcome.take, outcome.job.status),
+        Some(e) => bail!("{} {}: {e} ({spent})", outcome.take, outcome.job.status),
+    }
+}
+
+pub struct RunArgs {
+    pub op: Op,
+    pub plugin: String,
+    pub model: String,
+    pub prompt: Option<String>,
+    pub duration: Option<f64>,
+    pub inputs: Vec<(String, PathBuf)>,
+    pub refs: Vec<PathBuf>,
+    pub params: Vec<(String, String)>,
+    pub yes: bool,
+}
+
+fn guess_kind(path: &std::path::Path) -> MediaKind {
+    let m = shotline_plugin::util::mime(path);
+    if m.starts_with("image/") {
+        MediaKind::Image
+    } else if m.starts_with("audio/") {
+        MediaKind::Audio
+    } else if m.starts_with("video/") {
+        MediaKind::Video
+    } else {
+        MediaKind::Data
+    }
+}
+
+/// One operation outside any shot: an upscale, a test line of speech, someone's x.* tool.
+pub fn run(p: &Project, a: RunArgs) -> Result<()> {
+    let installed = plugins::load();
+    let rt = plugins::runtime();
+    let mut opened = Opened::new(&installed)?;
+    opened.load_rates(&rt, [&a.plugin]);
+    let b = books(p, &opened.rates)?;
+    let abs = |path: &PathBuf| -> Result<PathBuf> {
+        let full = std::env::current_dir()?.join(path);
+        if !full.is_file() {
+            bail!("{} doesn't exist", path.display());
+        }
+        Ok(full)
+    };
+    let mut req = Request {
+        op: a.op.clone(),
+        model: a.model.clone(),
+        prompt: a.prompt.clone(),
+        duration: a.duration,
+        ..Request::default()
+    };
+    for (name, path) in &a.inputs {
+        req.inputs.insert(name.clone(), abs(path)?);
+    }
+    for path in &a.refs {
+        let path = abs(path)?;
+        req.references.push(Reference {
+            kind: guess_kind(&path),
+            path,
+        });
+    }
+    for (k, v) in &a.params {
+        let v = serde_json::from_str(v).unwrap_or(serde_json::Value::String(v.clone()));
+        req.params.insert(k.clone(), v);
+    }
+    let plugin = opened.plugin(&a.plugin)?;
+    let quote = rt.block_on(plugin.quote(&req))?;
+    let base = b
+        .rates
+        .convert(quote.amount, &quote.unit, &b.currency)?
+        .amount;
+    let cost = price(&quote, base, &b.currency);
+    println!("{} · {} {} · {cost}", a.op, a.plugin, a.model);
+    if !a.yes && !confirm(&format!("spend {cost}?"))? {
+        println!("nothing spent");
+        return Ok(());
+    }
+    let opts = options();
+    let (job, err) = rt.block_on(async {
+        on_ctrl_c(&opts);
+        shotline_engine::run_once(
+            p,
+            &b,
+            (&a.plugin, plugin),
+            &req,
+            &quote,
+            &opts,
+            printer(a.plugin.clone()),
+        )
+        .await
+    })?;
+    drop(opened);
+    let cost = job
+        .cost
+        .as_ref()
+        .map(|c| format!("{} {}", money(c.amount), c.unit))
+        .unwrap_or_else(|| "nothing charged".into());
+    match err {
+        None => {
+            for f in &job.outputs {
+                println!("{}", p.rel(&p.job_dir(job.id).join(f)));
+            }
+            println!("done · {cost} · job {}", job.id);
+            Ok(())
+        }
+        Some(e) => bail!("job {} {}: {e} ({cost})", job.id, job.status),
     }
 }

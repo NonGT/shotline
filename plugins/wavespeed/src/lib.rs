@@ -48,20 +48,37 @@ fn other(msg: impl Into<String>) -> Error {
 
 fn check(req: &Request) -> Result<f64> {
     if req.op != Op::VideoLipsync {
-        return Err(bad(ErrorKind::Unsupported, format!("only video.lipsync, not {}", req.op), "op"));
+        return Err(bad(
+            ErrorKind::Unsupported,
+            format!("only video.lipsync, not {}", req.op),
+            "op",
+        ));
     }
     if !models().iter().any(|m| m.id == req.model) {
-        return Err(bad(ErrorKind::Validation, format!("no model {}", req.model), "model"));
+        return Err(bad(
+            ErrorKind::Validation,
+            format!("no model {}", req.model),
+            "model",
+        ));
     }
     for name in ["video", "audio"] {
         if !req.inputs.contains_key(name) {
-            return Err(bad(ErrorKind::Validation, format!("needs {name}"), &format!("inputs.{name}")));
+            return Err(bad(
+                ErrorKind::Validation,
+                format!("needs {name}"),
+                &format!("inputs.{name}"),
+            ));
         }
     }
     // The price is per second of video; the conformance kit and quotes before the video exists
     // pass the planned duration.
-    req.duration
-        .ok_or_else(|| bad(ErrorKind::Validation, "needs the duration to quote", "duration"))
+    req.duration.ok_or_else(|| {
+        bad(
+            ErrorKind::Validation,
+            "needs the duration to quote",
+            "duration",
+        )
+    })
 }
 
 pub fn map_error(status: u16, body: &Value) -> PluginError {
@@ -97,10 +114,12 @@ impl WaveSpeed {
     }
 
     async fn send(&self, rb: reqwest::RequestBuilder) -> Result<Value> {
-        let key = self
-            .key
-            .as_deref()
-            .ok_or_else(|| Error::from(PluginError::new(ErrorKind::Auth, format!("{KEY_VAR} isn't set"))))?;
+        let key = self.key.as_deref().ok_or_else(|| {
+            Error::from(PluginError::new(
+                ErrorKind::Auth,
+                format!("{KEY_VAR} isn't set"),
+            ))
+        })?;
         let r = rb
             .bearer_auth(key)
             .send()
@@ -141,13 +160,23 @@ impl Plugin for WaveSpeed {
     async fn run(&self, req: &Request, _output_dir: &Path) -> Result<String> {
         check(req)?;
         let mut body = Map::new();
-        body.insert("video".into(), json!(data_url(&req.inputs["video"], "inputs.video")?));
-        body.insert("audio".into(), json!(data_url(&req.inputs["audio"], "inputs.audio")?));
+        body.insert(
+            "video".into(),
+            json!(data_url(&req.inputs["video"], "inputs.video")?),
+        );
+        body.insert(
+            "audio".into(),
+            json!(data_url(&req.inputs["audio"], "inputs.audio")?),
+        );
         for (k, v) in &req.params {
             body.insert(k.clone(), v.clone());
         }
         let v = self
-            .send(self.http.post(format!("{}/{}", self.base, req.model)).json(&body))
+            .send(
+                self.http
+                    .post(format!("{}/{}", self.base, req.model))
+                    .json(&body),
+            )
             .await?;
         v.get("id")
             .and_then(Value::as_str)
@@ -157,9 +186,16 @@ impl Plugin for WaveSpeed {
 
     async fn poll(&self, job: &str) -> Result<Status> {
         let v = self
-            .send(self.http.get(format!("{}/predictions/{job}/result", self.base)))
+            .send(
+                self.http
+                    .get(format!("{}/predictions/{job}/result", self.base)),
+            )
             .await?;
-        let st = v.get("status").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let st = v
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
         let status = |state| Status {
             state,
             progress: None,
@@ -184,9 +220,15 @@ impl Plugin for WaveSpeed {
 
     async fn fetch(&self, job: &str, output_dir: &Path) -> Result<Outputs> {
         let v = self
-            .send(self.http.get(format!("{}/predictions/{job}/result", self.base)))
+            .send(
+                self.http
+                    .get(format!("{}/predictions/{job}/result", self.base)),
+            )
             .await?;
-        let first = v.get("outputs").and_then(Value::as_array).and_then(|a| a.first());
+        let first = v
+            .get("outputs")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first());
         let url = first
             .and_then(|o| o.as_str().or_else(|| o.get("url").and_then(Value::as_str)))
             .ok_or_else(|| other(format!("WaveSpeed's result has no output: {v}")))?;

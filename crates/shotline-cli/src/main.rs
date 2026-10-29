@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use shotline_core::ledger::report::By;
-use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, build};
+use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voice, build};
 
 mod cost;
 mod plugins;
@@ -48,6 +48,35 @@ enum Cmd {
     Take {
         shot: ShotRef,
         /// Don't ask before spending
+        #[arg(long)]
+        yes: bool,
+        /// Reuse the steps before this one from an earlier take and run the rest
+        #[arg(long)]
+        from_step: Option<usize>,
+        /// Which take to reuse from (default: the latest)
+        #[arg(long, requires = "from_step")]
+        of: Option<String>,
+    },
+    /// Run one operation outside any shot, e.g. `run video.upscale --plugin p --model m --input video=a.mp4`
+    Run {
+        op: shotline_core::protocol::Op,
+        #[arg(long)]
+        plugin: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long)]
+        duration: Option<f64>,
+        /// Named input file: --input video=take.mp4
+        #[arg(long = "input", value_parser = key_path)]
+        inputs: Vec<(String, PathBuf)>,
+        /// Reference file (image, audio or video)
+        #[arg(long = "ref")]
+        refs: Vec<PathBuf>,
+        /// Plugin parameter: --param seed=7 (JSON values are parsed)
+        #[arg(long = "param", value_parser = key_value)]
+        params: Vec<(String, String)>,
         #[arg(long)]
         yes: bool,
     },
@@ -129,6 +158,22 @@ enum ElementCmd {
         #[arg(long)]
         generate: bool,
     },
+    /// Give a cast member a voice for their lines
+    Voice {
+        handle: String,
+        #[arg(long)]
+        plugin: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        voice_id: Option<String>,
+        /// A recording to clone from, for plugins that do that
+        #[arg(long)]
+        sample: Option<PathBuf>,
+        /// Voice setting passed to the plugin, e.g. --set stability=0.5
+        #[arg(long = "set", value_parser = key_value)]
+        settings: Vec<(String, String)>,
+    },
     Ls,
 }
 
@@ -161,6 +206,15 @@ enum ShotCmd {
         /// Model for this shot instead of the project default
         #[arg(long)]
         model: Option<String>,
+        /// Recipe from shotline.toml, e.g. talking
+        #[arg(long)]
+        recipe: Option<String>,
+    },
+    /// Add a line of dialogue: `shot line 01-010 paka "..."`
+    Line {
+        shot: ShotRef,
+        who: String,
+        text: String,
     },
     Ls {
         chapter: Option<String>,
@@ -212,6 +266,44 @@ fn run(cli: Cli) -> Result<()> {
             let dest = p.add_anchor(handle, file.as_ref().unwrap())?;
             println!("{}", p.rel(&dest));
         }
+        Cmd::Element(ElementCmd::Voice {
+            ref handle,
+            ref plugin,
+            ref model,
+            ref voice_id,
+            ref sample,
+            ref settings,
+        }) => {
+            let p = open()?;
+            let sample = match sample {
+                Some(f) => {
+                    let full = std::env::current_dir()?.join(f);
+                    if !full.is_file() {
+                        bail!("{} doesn't exist", f.display());
+                    }
+                    Some(p.rel(&full))
+                }
+                None => None,
+            };
+            let mut set = toml::Table::new();
+            for (k, v) in settings {
+                let v = v
+                    .parse::<toml::Value>()
+                    .unwrap_or_else(|_| toml::Value::String(v.clone()));
+                set.insert(k.clone(), v);
+            }
+            let el = p.set_voice(
+                handle,
+                Voice {
+                    plugin: plugin.clone(),
+                    model: model.clone(),
+                    voice_id: voice_id.clone(),
+                    sample,
+                    settings: set,
+                },
+            )?;
+            println!("@{} speaks with {plugin}", el.handle);
+        }
         Cmd::Element(ElementCmd::Ls) => {
             let p = open()?;
             for el in p.elements()? {
@@ -245,6 +337,7 @@ fn run(cli: Cli) -> Result<()> {
             transition,
             ref plugin,
             ref model,
+            ref recipe,
         }) => {
             let after = after.as_deref().map(parse_shot_number).transpose()?;
             let model = (plugin.is_some() || model.is_some()).then(|| ModelOverride {
@@ -259,9 +352,22 @@ fn run(cli: Cli) -> Result<()> {
                 duration,
                 transition,
                 model,
+                recipe: recipe.clone(),
                 ..Shot::default()
             };
             println!("{}", open()?.add_shot(chapter, after, shot)?);
+        }
+        Cmd::Shot(ShotCmd::Line {
+            shot,
+            ref who,
+            ref text,
+        }) => {
+            let s = open()?.add_line(shot, who, text)?;
+            println!(
+                "{shot} has {} line{}",
+                s.lines.len(),
+                if s.lines.len() == 1 { "" } else { "s" }
+            );
         }
         Cmd::Shot(ShotCmd::Ls { ref chapter }) => {
             let p = open()?;
@@ -305,7 +411,36 @@ fn run(cli: Cli) -> Result<()> {
         }
 
         Cmd::Quote { ref target } => shoot::quote(&open()?, target)?,
-        Cmd::Take { shot, yes } => shoot::take(&open()?, shot, yes)?,
+        Cmd::Take {
+            shot,
+            yes,
+            from_step,
+            ref of,
+        } => shoot::take(&open()?, shot, yes, from_step, of.as_deref())?,
+        Cmd::Run {
+            ref op,
+            ref plugin,
+            ref model,
+            ref prompt,
+            duration,
+            ref inputs,
+            ref refs,
+            ref params,
+            yes,
+        } => shoot::run(
+            &open()?,
+            shoot::RunArgs {
+                op: op.clone(),
+                plugin: plugin.clone(),
+                model: model.clone(),
+                prompt: prompt.clone(),
+                duration,
+                inputs: inputs.clone(),
+                refs: refs.clone(),
+                params: params.clone(),
+                yes,
+            },
+        )?,
 
         Cmd::Takes { shot } => {
             let p = open()?;
@@ -319,7 +454,7 @@ fn run(cli: Cli) -> Result<()> {
                 let cost = t
                     .costs()
                     .iter()
-                    .map(|c| format!("{} {}", c.amount, c.unit))
+                    .map(|c| format!("{} {}", shotline_core::ledger::money(c.amount), c.unit))
                     .collect::<Vec<_>>()
                     .join(" + ");
                 let steps = t.jobs.len();
@@ -369,6 +504,16 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn key_value(s: &str) -> Result<(String, String), String> {
+    s.split_once('=')
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .ok_or_else(|| format!("expected key=value, got {s:?}"))
+}
+
+fn key_path(s: &str) -> Result<(String, PathBuf), String> {
+    key_value(s).map(|(k, v)| (k, PathBuf::from(v)))
 }
 
 /// "010" or "01-010" -> 10

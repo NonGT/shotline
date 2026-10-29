@@ -183,8 +183,10 @@ audio, video), start/end frame, seed, and `params` passed through from the shot.
 
 What a plugin says about its models can be overridden in the project's `models.toml`.
 
-First plugins: fal (built in, video), ElevenLabs (TTS), Venice (video, as an external plugin to prove
-the protocol), WaveSpeed (`sync/lipsync-3` for lip sync).
+First plugins: fal (built in, video), and in `plugins/` Venice (video), ElevenLabs (TTS) and
+WaveSpeed (`sync/lipsync-3` for lip sync), installed with `cargo install --path plugins/<name>`.
+ElevenLabs quotes in `elevenlabs-credit` (one per character) and WaveSpeed in `wavespeed-second`,
+since neither has a price endpoint; what those cost on your plan goes under `[rates]`.
 
 ## Jobs and takes
 
@@ -216,19 +218,32 @@ is worked out from the ULIDs and never stored, so it can't clash between two cop
 
 ## Recipes
 
-Named in shotline.toml, picked per shot:
+Named in shotline.toml, picked per shot with `recipe = "talking"`. A shot without one runs a single
+video.generate.
 
 ```toml
-[recipe.talking]
-steps = ["audio.tts:lines", "video.generate:with-audio", "video.lipsync", "video.upscale"]
+[[recipe.talking]]
+op = "audio.tts"              # one job per line, with the speaker's voice
 
-[recipe.broll]
-steps = ["video.generate"]
+[[recipe.talking]]
+op = "video.generate"         # always the shot's own model
+audio = true                  # send the lines' audio along
+
+[[recipe.talking]]
+op = "video.lipsync"
+plugin = "wavespeed"
+model = "sync/lipsync-3"
+params = { sync_mode = "silence" }
 ```
 
-Before a take runs, every step is quoted and the total is shown ($0.02 tts + $0.40 video + $0.38
-lipsync + $0.10 upscale = $0.90) and it waits for a yes. Steps can be skipped when the model already
-does the job, e.g. no lipsync step when the video model takes audio input.
+Before a take runs, every step is quoted and listed with the total, then it waits for a yes. All
+steps are reserved up front, so a take that wouldn't fit the budget never starts. Each step's
+output feeds the next; the first failure ends the take and releases what the rest held.
+`shotline take 01-010 --from-step 2` reuses the earlier steps of the latest take (or `--of 3`) and
+only pays for the rest.
+
+Lip sync takes one audio clip, so for now it needs a shot with one line; joining several comes
+with the media work.
 
 ## Continuity
 
@@ -311,20 +326,22 @@ shotline doctor
 shotline plugin ls | doctor <name>
 shotline element add <kind> <name> [--handle h] [--desc ...]
 shotline element anchor <handle> (--file img | --generate)
-shotline element voice <handle> --plugin p --voice-id id
+shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--sample f] [--set k=v]
 shotline element ls
 shotline chapter add <title>
 shotline chapter ls
 shotline shot add <chapter> [--after id] --plot ... --prompt ... [--duration n] [--transition cut|continue]
+shotline shot add ... [--plugin p] [--model m] [--recipe r]
 shotline shot line <shot> <who> <text>
 shotline shot ls [chapter]
 shotline shot show <id>
 shotline prompt <shot>
 shotline quote <shot|chapter>
-shotline take <shot> [--recipe r] [--from-step n] [--yes]
+shotline take <shot> [--from-step n [--of take]] [--yes]
 shotline takes <shot>
 shotline select <shot> <take>
-shotline run <op> [--plugin p] [--model m] [inputs...]   one-off operation outside a shot
+shotline run <op> --plugin p --model m [--prompt ..] [--duration s] [--input name=file]
+             [--ref file] [--param k=v] [--yes]          one-off operation outside a shot
 shotline timeline render [--no-colormatch]
 shotline cost [--by chapter|shot|op|plugin|day] [--csv]
 shotline cost verify | reconcile [--plugin p]
@@ -410,7 +427,7 @@ windows.
 2. plugin protocol, Plugin trait, fake plugin, conformance kit, jobs and takes - done
 3. ledger: reserve/charge, budgets, rates and currencies, `cost`, `verify` - done
 4. fal built in: quote, take, select, errors - done
-5. external plugins: Venice, ElevenLabs (voices, lines), WaveSpeed lip sync; recipes
+5. external plugins: Venice, ElevenLabs (voices, lines), WaveSpeed lip sync; recipes - done
 6. continuity: last frame chaining, colour match, timeline render with audio tracks
 7. mcp server and the co-director notes
 8. anchor image generation, storyboard frames, upscale/interpolate

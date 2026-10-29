@@ -59,10 +59,18 @@ fn bad(kind: ErrorKind, msg: impl Into<String>, field: &str) -> Error {
 
 fn check(req: &Request) -> Result<()> {
     if req.op != Op::AudioTts {
-        return Err(bad(ErrorKind::Unsupported, format!("only audio.tts, not {}", req.op), "op"));
+        return Err(bad(
+            ErrorKind::Unsupported,
+            format!("only audio.tts, not {}", req.op),
+            "op",
+        ));
     }
     if !MODELS.contains(&req.model.as_str()) {
-        return Err(bad(ErrorKind::Validation, format!("no model {}", req.model), "model"));
+        return Err(bad(
+            ErrorKind::Validation,
+            format!("no model {}", req.model),
+            "model",
+        ));
     }
     if req.prompt.as_deref().unwrap_or("").trim().is_empty() {
         return Err(bad(ErrorKind::Validation, "nothing to say", "prompt"));
@@ -117,7 +125,12 @@ pub fn map_error(status: u16, body: &Value) -> PluginError {
         let loc: Vec<&str> = first
             .and_then(|d| d.get("loc"))
             .and_then(Value::as_array)
-            .map(|l| l.iter().filter_map(Value::as_str).filter(|s| *s != "body").collect())
+            .map(|l| {
+                l.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|s| *s != "body")
+                    .collect()
+            })
             .unwrap_or_default();
         let field = loc.first().map(|f| match *f {
             "text" => "prompt".to_string(),
@@ -185,10 +198,12 @@ impl Plugin for ElevenLabs {
     async fn run(&self, req: &Request, _output_dir: &Path) -> Result<String> {
         check(req)?;
         let voice = voice_id(req)?;
-        let key = self
-            .key
-            .as_deref()
-            .ok_or_else(|| Error::from(PluginError::new(ErrorKind::Auth, format!("{KEY_VAR} isn't set"))))?;
+        let key = self.key.as_deref().ok_or_else(|| {
+            Error::from(PluginError::new(
+                ErrorKind::Auth,
+                format!("{KEY_VAR} isn't set"),
+            ))
+        })?;
         let r = self
             .http
             .post(format!(
@@ -199,7 +214,9 @@ impl Plugin for ElevenLabs {
             .json(&Value::Object(body(req)?))
             .send()
             .await
-            .map_err(|e| PluginError::new(ErrorKind::Other, format!("can't reach ElevenLabs: {e}")))?;
+            .map_err(|e| {
+                PluginError::new(ErrorKind::Other, format!("can't reach ElevenLabs: {e}"))
+            })?;
         let status = r.status().as_u16();
         let bytes = r
             .bytes()
@@ -212,7 +229,10 @@ impl Plugin for ElevenLabs {
         let mut n = self.next.lock().unwrap();
         *n += 1;
         let job = format!("tts-{n}");
-        self.jobs.lock().unwrap().insert(job.clone(), bytes.to_vec());
+        self.jobs
+            .lock()
+            .unwrap()
+            .insert(job.clone(), bytes.to_vec());
         Ok(job)
     }
 
@@ -229,7 +249,12 @@ impl Plugin for ElevenLabs {
     }
 
     async fn fetch(&self, job: &str, output_dir: &Path) -> Result<Outputs> {
-        let bytes = self.jobs.lock().unwrap().remove(job).ok_or_else(|| not_found(job))?;
+        let bytes = self
+            .jobs
+            .lock()
+            .unwrap()
+            .remove(job)
+            .ok_or_else(|| not_found(job))?;
         let io = |e: std::io::Error| Error::from(PluginError::new(ErrorKind::Other, e.to_string()));
         std::fs::create_dir_all(output_dir).map_err(io)?;
         std::fs::write(output_dir.join("out.mp3"), bytes).map_err(io)?;
@@ -243,7 +268,11 @@ impl Plugin for ElevenLabs {
     }
 
     async fn cancel(&self, job: &str) -> Result<()> {
-        self.jobs.lock().unwrap().remove(job).ok_or_else(|| not_found(job))?;
+        self.jobs
+            .lock()
+            .unwrap()
+            .remove(job)
+            .ok_or_else(|| not_found(job))?;
         Ok(())
     }
 }

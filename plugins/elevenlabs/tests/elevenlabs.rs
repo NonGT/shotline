@@ -35,13 +35,31 @@ async fn quotes_by_character() {
 
 #[test]
 fn errors() {
-    let e = elevenlabs::map_error(401, &json!({"detail": {"status": "invalid_api_key", "message": "Invalid API key"}}));
-    assert_eq!((e.kind, e.message.as_str()), (ErrorKind::Auth, "Invalid API key"));
-    let e = elevenlabs::map_error(401, &json!({"detail": {"status": "quota_exceeded", "message": "You have 3 credits left"}}));
+    let e = elevenlabs::map_error(
+        401,
+        &json!({"detail": {"status": "invalid_api_key", "message": "Invalid API key"}}),
+    );
+    assert_eq!(
+        (e.kind, e.message.as_str()),
+        (ErrorKind::Auth, "Invalid API key")
+    );
+    let e = elevenlabs::map_error(
+        401,
+        &json!({"detail": {"status": "quota_exceeded", "message": "You have 3 credits left"}}),
+    );
     assert_eq!(e.kind, ErrorKind::Quota);
-    let e = elevenlabs::map_error(404, &json!({"detail": {"status": "voice_not_found", "message": "Voice not found"}}));
-    assert_eq!((e.kind, e.field.as_deref()), (ErrorKind::Validation, Some("voice")));
-    let e = elevenlabs::map_error(422, &json!({"detail": [{"loc": ["body", "voice_settings", "stability"], "msg": "bad"}]}));
+    let e = elevenlabs::map_error(
+        404,
+        &json!({"detail": {"status": "voice_not_found", "message": "Voice not found"}}),
+    );
+    assert_eq!(
+        (e.kind, e.field.as_deref()),
+        (ErrorKind::Validation, Some("voice"))
+    );
+    let e = elevenlabs::map_error(
+        422,
+        &json!({"detail": [{"loc": ["body", "voice_settings", "stability"], "msg": "bad"}]}),
+    );
     assert_eq!(e.field.as_deref(), Some("voice"));
 }
 
@@ -51,8 +69,14 @@ async fn mock() -> MockServer {
         .and(path("/v1/text-to-speech/v1"))
         .and(query_param("output_format", "mp3_44100_128"))
         .and(header("xi-api-key", "k"))
-        .and(body_partial_json(json!({"model_id": "eleven_v4", "voice_settings": {"stability": 0.5}})))
-        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "audio/mpeg").set_body_bytes(b"mp3".to_vec()))
+        .and(body_partial_json(
+            json!({"model_id": "eleven_v4", "voice_settings": {"stability": 0.5}}),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "audio/mpeg")
+                .set_body_bytes(b"mp3".to_vec()),
+        )
         .mount(&s)
         .await;
     s
@@ -66,7 +90,10 @@ async fn speaks() {
     let job = el.run(&line("hello"), dir.path()).await.unwrap();
     assert_eq!(el.poll(&job).await.unwrap().state, State::Done);
     let out = el.fetch(&job, dir.path()).await.unwrap();
-    assert_eq!(std::fs::read(dir.path().join(&out.outputs[0].file)).unwrap(), b"mp3");
+    assert_eq!(
+        std::fs::read(dir.path().join(&out.outputs[0].file)).unwrap(),
+        b"mp3"
+    );
 
     let mut no_voice = line("hello");
     no_voice.voice = None;

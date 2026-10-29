@@ -12,7 +12,8 @@ drive it. It always asks before spending credits.
 
 Very early. So far you can set up a project, add cast/sets/props with anchor images, break it
 into chapters and shots, preview the exact prompt each shot would send, and install and check
-plugins. Nothing generates anything yet. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
+plugins, then quote and generate takes (fal, Venice, ElevenLabs voices, WaveSpeed lip sync) with
+every cost on record. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ```
 cargo install --path crates/shotline-cli
@@ -28,6 +29,10 @@ Video models, TTS, lip sync, upscalers and anything else are plugins: small prog
 language that speak a JSON protocol over stdio ([docs/PLUGINS.md](docs/PLUGINS.md)). fal is built in. Every paid step is quoted first
 and recorded in an append-only ledger per film.
 
-Needs ffmpeg. API keys go in your environment.
+The plugins in `plugins/` install with `cargo install --path plugins/venice` (and so on) and are
+found on PATH. `shotline plugin ls` shows what's there and `shotline plugin doctor <name>` checks
+one without spending anything.
+
+Needs ffmpeg. API keys go in your environment or `~/.config/shotline/.env`.
 
 MIT licensed.

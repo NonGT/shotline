@@ -27,6 +27,9 @@ pub struct Config {
     /// `unit = "amount CURRENCY"`, e.g. `venice-credit = "0.004 USD"`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub rates: BTreeMap<String, String>,
+    /// Named lists of steps a take runs through, e.g. tts, video, lip sync.
+    #[serde(rename = "recipe", skip_serializing_if = "BTreeMap::is_empty")]
+    pub recipes: BTreeMap<String, Vec<Step>>,
     pub prompt: PromptLayers,
 }
 
@@ -42,6 +45,7 @@ impl Default for Config {
             money: Money::default(),
             budget: Budgets::default(),
             rates: BTreeMap::new(),
+            recipes: BTreeMap::new(),
             prompt: PromptLayers::default(),
         }
     }
@@ -60,6 +64,22 @@ impl Default for Money {
             currency: "USD".into(),
         }
     }
+}
+
+/// One step of a recipe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Step {
+    pub op: shotline_protocol::Op,
+    /// Defaults: the speaker's voice for audio.tts, the shot's model for video.generate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// For video.generate: send the lines' audio along for the model to lip sync itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub audio: bool,
+    #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
+    pub params: toml::Table,
 }
 
 /// Which extra parts get added to a shot's prompt.
@@ -172,6 +192,24 @@ impl Project {
             dir = d.parent();
         }
         Err(Error::NotAProject(start.to_path_buf()))
+    }
+
+    /// The steps a take of `shot` runs: its recipe, or just video.generate.
+    pub fn steps(&self, shot: &crate::Shot) -> Result<Vec<Step>> {
+        let Some(name) = &shot.recipe else {
+            return Ok(vec![Step {
+                op: shotline_protocol::Op::VideoGenerate,
+                plugin: None,
+                model: None,
+                audio: false,
+                params: toml::Table::new(),
+            }]);
+        };
+        match self.config.recipes.get(name) {
+            Some(steps) if !steps.is_empty() => Ok(steps.clone()),
+            Some(_) => invalid(format!("recipe {name} has no steps")),
+            None => invalid(format!("no recipe called {name} in {CONFIG_FILE}")),
+        }
     }
 
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Project {

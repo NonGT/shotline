@@ -8,6 +8,22 @@ use shotline_core::{
 };
 use tempfile::TempDir;
 
+const VENICE: &str = r#"
+[[model]]
+plugin = "venice"
+id = "minimax-h3-max-reference-to-video"
+op = "video.generate"
+ref_image = "<Picture {n}>"
+max_images = 30
+min_duration = 5
+max_duration = 15
+whole_seconds = true
+resolutions = ["480P", "768P", "1080P"]
+aspects = ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]
+start_frame = true
+start_frame_with_refs = false
+"#;
+
 /// Two cast members with anchors, one set without, one chapter.
 fn film() -> (TempDir, Project) {
     let dir = TempDir::new().unwrap();
@@ -24,6 +40,7 @@ fn film() -> (TempDir, Project) {
     p.add_anchor("paka", &img).unwrap();
     p.add_anchor("kan", &img).unwrap();
     p.add_chapter("Into the forest").unwrap();
+    fs::write(dir.path().join("models.toml"), VENICE).unwrap();
     fs::write(
         dir.path().join("style.md"),
         "<!-- note -->\nMuted greens, 35mm, soft overcast light.\n",

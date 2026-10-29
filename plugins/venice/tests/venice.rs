@@ -40,7 +40,12 @@ fn body_shape() {
     let (b, refs) = venice::body(&req(dir.path())).unwrap();
     assert_eq!(b["duration"], "8s");
     assert_eq!(b["aspect_ratio"], "9:16");
-    assert!(b["audio_url"].as_str().unwrap().starts_with("data:audio/wav;base64,"));
+    assert!(
+        b["audio_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:audio/wav;base64,")
+    );
     assert_eq!(b["reference_image_urls"].as_array().unwrap().len(), 1);
     assert_eq!(refs, [1]);
 
@@ -62,7 +67,10 @@ fn zod_errors_point_at_fields() {
     assert_eq!(e.kind, ErrorKind::Validation);
     assert_eq!(e.field.as_deref(), Some("references[1]"));
     assert_eq!(e.message, "Invalid request: Image too large");
-    assert_eq!(venice::map_error(402, &json!({"error": "Insufficient balance"}), &[]).kind, ErrorKind::Quota);
+    assert_eq!(
+        venice::map_error(402, &json!({"error": "Insufficient balance"}), &[]).kind,
+        ErrorKind::Quota
+    );
     assert_eq!(
         venice::map_error(422, &json!({"error": "Content policy violation"}), &[]).kind,
         ErrorKind::ContentPolicy
@@ -85,18 +93,27 @@ async fn mock() -> MockServer {
         .await;
     Mock::given(method("POST"))
         .and(path("/video/queue"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"queue_id": "q1", "model": H3})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"queue_id": "q1", "model": H3})),
+        )
         .mount(&s)
         .await;
     Mock::given(method("POST"))
         .and(path("/video/retrieve"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "PROCESSING", "progress": 40})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"status": "PROCESSING", "progress": 40})),
+        )
         .up_to_n_times(1)
         .mount(&s)
         .await;
     Mock::given(method("POST"))
         .and(path("/video/retrieve"))
-        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "video/mp4").set_body_bytes(b"mp4".to_vec()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/mp4")
+                .set_body_bytes(b"mp4".to_vec()),
+        )
         .mount(&s)
         .await;
     s
@@ -115,7 +132,10 @@ async fn full_job() {
     assert_eq!((st.state, st.progress), (State::Running, Some(0.4)));
     assert_eq!(v.poll(&job).await.unwrap().state, State::Done);
     let out = v.fetch(&job, &dir.path().join("o")).await.unwrap();
-    assert_eq!(std::fs::read(dir.path().join("o").join(&out.outputs[0].file)).unwrap(), b"mp4");
+    assert_eq!(
+        std::fs::read(dir.path().join("o").join(&out.outputs[0].file)).unwrap(),
+        b"mp4"
+    );
     assert!(matches!(v.cancel(&job).await, Err(Error::Unsupported(_))));
 }
 

@@ -11,13 +11,13 @@ mod shot;
 pub mod slug;
 mod template;
 
-pub use element::{Element, Kind};
+pub use element::{Element, Kind, Voice};
 pub use error::{Error, Result};
 pub use job::{Clock, Cost, Job, JobStatus, SystemClock, Take, TestClock};
 pub use model::{Catalog, ModelSpec};
 pub use money::UserConfig;
-pub use project::{CONFIG_FILE, Config, Money, Project, PromptLayers, user_dir};
+pub use project::{CONFIG_FILE, Config, Money, Project, PromptLayers, Step, user_dir};
 pub use prompt::{Built, Reference, StartFrame, build};
-pub use shot::{Chapter, ModelOverride, Shot, ShotRef, Transition};
+pub use shot::{Chapter, Line, ModelOverride, Shot, ShotRef, Transition};
 pub use shotline_ledger as ledger;
 pub use shotline_protocol as protocol;
