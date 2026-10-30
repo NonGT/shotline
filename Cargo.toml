@@ -10,3 +10,7 @@ repository = "https://github.com/NonGT/shotline"
 
 [workspace.dependencies]
 shotline-core = { path = "crates/shotline-core" }
+
+[profile.release]
+lto = "thin"
+strip = true

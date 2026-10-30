@@ -487,8 +487,9 @@ plugins/
 shotline-core knows nothing about HTTP or ffmpeg. The CLI, MCP server and UI are thin layers on top
 of it.
 
-Release binaries for mac/linux/windows from CI. ffmpeg has to be installed separately,
-`shotline doctor` checks for it.
+Release binaries for mac/linux/windows from CI (`.github/workflows/release.yml`): a `v*` tag that
+matches the crate version builds all targets and makes a draft release; a manual run only builds.
+ffmpeg has to be installed separately, `shotline doctor` checks for it.
 
 ## Testing
 

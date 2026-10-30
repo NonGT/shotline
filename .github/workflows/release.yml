@@ -1,0 +1,92 @@
+name: release
+
+# A v* tag builds every target and makes a draft release to look over and publish by hand.
+# Running it manually only builds, and leaves the archives as workflow artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+          # The oldest runner there is, so the binary runs on older glibc too.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: version
+        shell: bash
+        run: |
+          version=$(cargo pkgid -p shotline-cli | sed 's/.*[#@]//')
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "tag $GITHUB_REF_NAME doesn't match the crate version $version"
+            exit 1
+          fi
+          echo "NAME=shotline-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
+      - run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          -p shotline-cli -p shotline-plugin-venice -p shotline-plugin-elevenlabs
+          -p shotline-plugin-wavespeed -p shotline-plugin-local
+      - name: package
+        shell: bash
+        run: |
+          exe=""
+          [[ "$RUNNER_OS" == Windows ]] && exe=.exe
+          mkdir "$NAME"
+          for b in shotline shotline-plugin-venice shotline-plugin-elevenlabs shotline-plugin-wavespeed shotline-plugin-local; do
+            cp "target/${{ matrix.target }}/release/$b$exe" "$NAME/"
+          done
+          cp README.md LICENSE "$NAME/"
+          # x86_64 mac is built on an arm runner and can't be run there.
+          if [[ "${{ matrix.target }}" != x86_64-apple-darwin ]]; then
+            "$NAME/shotline$exe" --version
+          fi
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            archive="$NAME.zip"
+            7z a -bd "$archive" "$NAME" > /dev/null
+          else
+            archive="$NAME.tar.gz"
+            tar czf "$archive" "$NAME"
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --draft --generate-notes --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}
