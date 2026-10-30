@@ -204,7 +204,11 @@ async fn exchange<P: Serialize>(
     };
     let mut line = serde_json::to_string(&req).expect("requests serialize");
     line.push('\n');
-    let io = |e: std::io::Error| format!("lost the plugin process: {e}");
+    let io = |e: std::io::Error| match e.kind() {
+        // It can be gone before we write; the stderr tail says why.
+        std::io::ErrorKind::BrokenPipe => "plugin exited".to_string(),
+        _ => format!("lost the plugin process: {e}"),
+    };
     conn.stdin.write_all(line.as_bytes()).await.map_err(io)?;
     conn.stdin.flush().await.map_err(io)?;
     loop {

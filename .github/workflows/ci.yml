@@ -26,7 +26,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: FedericoCarboni/setup-ffmpeg@v3
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - if: runner.os == 'Windows'
+        uses: FedericoCarboni/setup-ffmpeg@v3
         with:
           github-token: ${{ github.token }}
       - run: cargo fmt --all --check
