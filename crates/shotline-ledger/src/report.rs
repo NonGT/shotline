@@ -107,6 +107,8 @@ pub struct Summary {
     /// Not tied to a take: adjustments, one-off runs.
     pub other: f64,
     pub by_unit: BTreeMap<String, f64>,
+    /// Spent by where the price came from; see [`Entry::pricing`].
+    pub by_pricing: BTreeMap<String, f64>,
 }
 
 pub fn summary(
@@ -123,6 +125,7 @@ pub fn summary(
         discarded: 0.0,
         other: 0.0,
         by_unit: BTreeMap::new(),
+        by_pricing: BTreeMap::new(),
     };
     for e in entries.iter().filter(|e| e.spent() != 0.0) {
         let v = value(e, currency, rates)?;
@@ -133,6 +136,7 @@ pub fn summary(
             None => s.other += v,
         }
         *s.by_unit.entry(e.unit.clone()).or_default() += e.spent_original();
+        *s.by_pricing.entry(e.pricing().to_string()).or_default() += v;
     }
     Ok(s)
 }

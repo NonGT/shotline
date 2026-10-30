@@ -118,6 +118,18 @@ pub async fn check(plugin: &dyn Plugin, opts: &Options<'_>) -> Vec<Check> {
             Ok(_) => Some("polled a job that doesn't exist".into()),
         },
     );
+
+    match plugin.balance().await {
+        Err(Error::Unsupported(_)) => {}
+        Ok(b) => r.add(
+            "balance",
+            b.balances
+                .iter()
+                .find(|a| !a.amount.is_finite() || a.unit.trim().is_empty())
+                .map(|a| format!("bad balance {} {:?}", a.amount, a.unit)),
+        ),
+        Err(e) => r.add("balance", Some(e.to_string())),
+    }
     r.0
 }
 

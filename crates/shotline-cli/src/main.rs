@@ -107,7 +107,9 @@ enum Cmd {
 enum CostCmd {
     /// Check nobody edited the ledger
     Verify,
-    /// Compare the ledger with what providers say they charged
+    /// Every rate in use and where it comes from
+    Rates,
+    /// Compare the ledger with what providers say they charged and how their balances moved
     Reconcile {
         #[arg(long)]
         plugin: Option<String>,
@@ -136,6 +138,10 @@ enum PluginCmd {
     /// Check a plugin talks the protocol properly. Never spends anything.
     Doctor {
         name: String,
+    },
+    /// What's left on each provider account
+    Balance {
+        name: Option<String>,
     },
 }
 
@@ -481,6 +487,7 @@ fn run(cli: Cli) -> Result<()> {
             match cmd {
                 None => cost::show(&p, by, csv)?,
                 Some(CostCmd::Verify) => cost::verify(&p)?,
+                Some(CostCmd::Rates) => cost::rates(&p, &plugins::load())?,
                 Some(CostCmd::Reconcile { plugin }) => {
                     cost::reconcile_cmd(&p, &plugins::load(), plugin.as_deref())?
                 }
@@ -497,6 +504,9 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Plugin(PluginCmd::Ls) => plugins::ls(&plugins::load()),
         Cmd::Plugin(PluginCmd::Doctor { ref name }) => plugins::doctor(&plugins::load(), name)?,
+        Cmd::Plugin(PluginCmd::Balance { ref name }) => {
+            plugins::balance(&plugins::load(), name.as_deref())?
+        }
         Cmd::FakePlugin => {
             plugins::runtime().block_on(shotline_plugin::serve(
                 shotline_plugin::fake::FakePlugin::default(),

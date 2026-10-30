@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, bail};
-use shotline_core::ledger::reconcile::{Diff, reconcile};
+use shotline_core::ledger::reconcile::{Diff, balance_checks, reconcile};
 use shotline_core::ledger::report::{self, By};
-use shotline_core::ledger::{Books, money};
+use shotline_core::ledger::{Books, money, rate};
 use shotline_core::protocol::Quote;
-use shotline_core::{Project, UserConfig, user_dir};
+use shotline_core::{MeasuredRates, Project, UserConfig, user_dir};
 
 use crate::plugins::{self, Installed};
 
@@ -47,6 +47,33 @@ pub fn show(p: &Project, by: By, csv: bool) -> Result<()> {
         println!("held     {} {cur} for jobs still running", money(s.held));
     }
     println!("by unit  {}", units(&s.by_unit));
+    if s.by_pricing.keys().any(|k| k != "provider") {
+        let parts: Vec<String> = s
+            .by_pricing
+            .iter()
+            .map(|(k, v)| {
+                let k = match k.as_str() {
+                    "provider" => "provider's prices",
+                    "yours" => "your rates",
+                    _ => "measured rates",
+                };
+                format!("{k} {}", money(*v))
+            })
+            .collect();
+        println!("priced   {}", parts.join(", "));
+    }
+    let checks = balance_checks(&entries, &b.rates);
+    if !checks.is_empty() {
+        let off = checks.iter().filter(|c| !c.agrees()).count();
+        let off = match off {
+            0 => "all agree".to_string(),
+            n => format!("{n} differ, see `shotline cost reconcile`"),
+        };
+        println!(
+            "balances {} jobs read before and after, {off}",
+            checks.len()
+        );
+    }
     let secs = p.cut_seconds()?;
     if secs > 0.0 {
         println!(
@@ -108,9 +135,98 @@ pub fn verify(p: &Project) -> Result<()> {
     Ok(())
 }
 
+/// Every rate there is for each unit, which one is used, and where they come from.
+pub fn rates(p: &Project, installed: &Installed) -> Result<()> {
+    let dir = user_dir();
+    let user = UserConfig::load(&dir)?;
+    // Lowest priority first, as `Project::rates` adds them.
+    let mut all: Vec<(String, f64, String, String)> = vec![];
+    for (unit, m) in &MeasuredRates::load(&dir)?.rates {
+        all.push((
+            unit.clone(),
+            m.rate(),
+            m.currency.clone(),
+            format!(
+                "measured, {} samples, {}",
+                m.samples,
+                m.updated.strftime("%Y-%m-%d")
+            ),
+        ));
+    }
+    let rt = plugins::runtime();
+    for pl in &installed.plugins {
+        if pl.description.is_err() {
+            continue;
+        }
+        let plugin = plugins::open(installed, &pl.name)?;
+        match rt.block_on(plugin.rates()) {
+            Ok(r) => {
+                for x in r.rates {
+                    all.push((x.unit, x.amount, x.currency, format!("plugin {}", pl.name)));
+                }
+            }
+            Err(shotline_plugin::Error::Unsupported(_)) => {}
+            Err(e) => eprintln!("warning: {}: {e}", pl.name),
+        }
+    }
+    for (table, from) in [
+        (&user.rates, dir.join("config.toml")),
+        (&p.config.rates, p.root.join(shotline_core::CONFIG_FILE)),
+    ] {
+        for (unit, v) in table {
+            let (n, cur) = shotline_core::ledger::parse_rate(v)?;
+            all.push((unit.clone(), n, cur, from.display().to_string()));
+        }
+    }
+    if all.is_empty() {
+        println!("no rates; providers that quote in money don't need any");
+        return Ok(());
+    }
+    let w = all.iter().map(|r| r.0.len()).max().unwrap_or(0);
+    // Highest priority first within each unit; the sort is stable.
+    all.reverse();
+    all.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut seen = BTreeSet::new();
+    for (unit, n, cur, from) in &all {
+        let used = if seen.insert(unit) {
+            ""
+        } else {
+            "  (not used)"
+        };
+        println!("{unit:<w$}  {} {cur}  {from}{used}", rate(*n));
+    }
+    Ok(())
+}
+
 pub fn reconcile_cmd(p: &Project, installed: &Installed, only: Option<&str>) -> Result<()> {
     let b = books(p)?;
     let entries = b.ledger.entries()?;
+    let mut differ = false;
+    let checks = balance_checks(&entries, &b.rates);
+    let checks: Vec<_> = checks
+        .iter()
+        .filter(|c| only.is_none_or(|o| o == c.plugin))
+        .collect();
+    if !checks.is_empty() {
+        let off: Vec<_> = checks.iter().filter(|c| !c.agrees()).collect();
+        println!(
+            "balances: {} jobs read before and after, {} differ",
+            checks.len(),
+            off.len()
+        );
+        for c in off {
+            differ = true;
+            println!(
+                "  {} ({}): booked {} {} but the balance dropped {} {}",
+                c.job,
+                c.plugin,
+                money(c.booked.0),
+                c.booked.1,
+                money(c.measured.0),
+                c.measured.1
+            );
+        }
+    }
     let names: BTreeSet<&str> = entries
         .iter()
         .filter_map(|e| e.plugin.as_deref())
@@ -121,7 +237,6 @@ pub fn reconcile_cmd(p: &Project, installed: &Installed, only: Option<&str>) -> 
         return Ok(());
     }
     let rt = plugins::runtime();
-    let mut differ = false;
     for name in names {
         if !installed.plugins.iter().any(|p| p.name == name) {
             println!("{name}: not installed, skipped");

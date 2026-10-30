@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use shotline_protocol::Charge;
 
-use crate::{Entry, Kind};
+use crate::{Entry, Kind, Rates};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Diff {
@@ -86,4 +86,51 @@ pub fn reconcile(entries: &[Entry], plugin: &str, charges: &[Charge]) -> Vec<Dif
         }
     }
     diffs
+}
+
+/// A job whose provider balance was read before and after it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BalanceCheck {
+    pub job: String,
+    pub plugin: String,
+    /// What the ledger booked, in the provider's unit.
+    pub booked: (f64, String),
+    /// What the balance dropped by.
+    pub measured: (f64, String),
+    /// The booked amount in the measured unit, when there's a rate between them.
+    pub booked_as_measured: Option<f64>,
+}
+
+impl BalanceCheck {
+    /// Close enough for providers that round, or can't be compared.
+    pub fn agrees(&self) -> bool {
+        match self.booked_as_measured {
+            Some(b) => {
+                let m = self.measured.0;
+                (b - m).abs() <= 0.005_f64.max(b.abs().max(m.abs()) * 0.02)
+            }
+            None => true,
+        }
+    }
+}
+
+/// Every charge and release that has a measured balance drop next to it.
+pub fn balance_checks(entries: &[Entry], rates: &Rates) -> Vec<BalanceCheck> {
+    entries
+        .iter()
+        .filter(|e| matches!(e.kind, Kind::Charge | Kind::Release))
+        .filter_map(|e| {
+            let m = e.measured.as_ref()?;
+            Some(BalanceCheck {
+                job: e.job.clone().unwrap_or_default(),
+                plugin: e.plugin.clone().unwrap_or_default(),
+                booked: (e.amount, e.unit.clone()),
+                measured: (m.amount, m.unit.clone()),
+                booked_as_measured: rates
+                    .convert(e.amount, &e.unit, &m.unit)
+                    .ok()
+                    .map(|c| c.amount),
+            })
+        })
+        .collect()
 }

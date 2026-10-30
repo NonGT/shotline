@@ -4,6 +4,7 @@
 //! with JSON while it runs and with the video itself once it's done. Durations are whole seconds
 //! written as `"8s"`. Venice won't take a start frame (`image_url`) or end frame together with
 //! reference images. Errors look like `{"error": "...", "details": {"field": {"_errors": [...]}}}`.
+//! `GET /api_keys/rate_limits` has the account's balances: USD, DIEM and bundled credits.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,8 +13,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use shotline_plugin::protocol::{
-    Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs, PROTOCOL_VERSION,
-    PluginError, Quote, Request, State, Status,
+    Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
+    PROTOCOL_VERSION, PluginError, Quote, Request, State, Status,
 };
 use shotline_plugin::util::data_url;
 use shotline_plugin::{Error, Plugin, Result};
@@ -89,17 +90,19 @@ impl Venice {
     }
 
     async fn post(&self, path: &str, body: &Value) -> Result<Resp> {
+        self.send(self.http.post(format!("{}{path}", self.base)).json(body))
+            .await
+    }
+
+    async fn send(&self, rb: reqwest::RequestBuilder) -> Result<Resp> {
         let key = self.key.as_deref().ok_or_else(|| {
             Error::from(PluginError::new(
                 ErrorKind::Auth,
                 format!("{KEY_VAR} isn't set"),
             ))
         })?;
-        let r = self
-            .http
-            .post(format!("{}{path}", self.base))
+        let r = rb
             .bearer_auth(key)
-            .json(body)
             .send()
             .await
             .map_err(|e| other(format!("can't reach Venice: {e}")))?;
@@ -446,6 +449,35 @@ impl Plugin for Venice {
 
     async fn cancel(&self, _job: &str) -> Result<()> {
         Err(Error::Unsupported("cancel".into()))
+    }
+
+    async fn balance(&self) -> Result<Balance> {
+        let r = self
+            .send(self.http.get(format!("{}/api_keys/rate_limits", self.base)))
+            .await?;
+        let v = r.json();
+        if r.status >= 300 {
+            return Err(map_error(r.status, &v, &[]).into());
+        }
+        let b = v
+            .pointer("/data/balances")
+            .and_then(Value::as_object)
+            .ok_or_else(|| other(format!("Venice sent no balances: {v}")))?;
+        Ok(Balance {
+            balances: b
+                .iter()
+                .filter_map(|(k, n)| {
+                    let unit = match k.as_str() {
+                        "USD" => "USD".to_string(),
+                        k => format!("venice-{}", k.to_lowercase().replace('_', "-")),
+                    };
+                    Some(Amount {
+                        amount: n.as_f64()?,
+                        unit,
+                    })
+                })
+                .collect(),
+        })
     }
 }
 

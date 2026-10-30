@@ -70,6 +70,24 @@ async fn mock() -> MockServer {
         .mount(&s)
         .await;
     Mock::given(method("GET"))
+        .and(path("/api/v3/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"code": 200, "data": [
+                {"model_id": "sync/lipsync-2", "base_price": 0.05},
+                {"model_id": "sync/lipsync-3", "base_price": 0.135}
+            ]})),
+        )
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/balance"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"code": 200, "data": {"balance": 2.72}})),
+        )
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
         .and(path("/files/o.mp4"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"synced".to_vec()))
         .mount(&s)
@@ -78,11 +96,16 @@ async fn mock() -> MockServer {
 }
 
 #[tokio::test]
-async fn quotes_seconds() {
-    let w = WaveSpeed::new(None, "http://unused");
+async fn quotes_the_listed_price() {
+    let s = mock().await;
+    let w = WaveSpeed::new(Some("k".into()), &format!("{}/api/v3", s.uri()));
     let dir = tempfile::tempdir().unwrap();
     let q = w.quote(&req(dir.path())).await.unwrap();
-    assert_eq!((q.amount, q.unit.as_str()), (8.0, "wavespeed-second"));
+    assert_eq!(q.unit, "USD");
+    assert!((q.amount - 1.08).abs() < 1e-9, "{}", q.amount);
+    assert_eq!(q.units, Some(8.0));
+    let b = w.balance().await.unwrap().balances;
+    assert_eq!((b[0].amount, b[0].unit.as_str()), (2.72, "USD"));
     let mut r = req(dir.path());
     r.inputs.remove("audio");
     match w.quote(&r).await {

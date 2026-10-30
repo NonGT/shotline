@@ -91,6 +91,15 @@ async fn mock() -> MockServer {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"quote": 0.48})))
         .mount(&s)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/api_keys/rate_limits"))
+        .and(header("Authorization", "Bearer k"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "balances": {"USD": 3.8197, "DIEM": 0, "BUNDLED_CREDITS": 0},
+            "rateLimits": []
+        }})))
+        .mount(&s)
+        .await;
     Mock::given(method("POST"))
         .and(path("/video/queue"))
         .respond_with(
@@ -137,6 +146,10 @@ async fn full_job() {
         b"mp4"
     );
     assert!(matches!(v.cancel(&job).await, Err(Error::Unsupported(_))));
+    let b = v.balance().await.unwrap().balances;
+    let units: Vec<&str> = b.iter().map(|a| a.unit.as_str()).collect();
+    assert_eq!(units, ["venice-bundled-credits", "venice-diem", "USD"]);
+    assert_eq!(b[2].amount, 3.8197);
 }
 
 #[tokio::test]

@@ -11,9 +11,9 @@ pub mod report;
 
 pub use books::{Books, Context, GlobalLimit};
 pub use budget::Budgets;
-pub use entry::{Entry, Kind};
+pub use entry::{Entry, Kind, is_currency, pricing};
 pub use ledger::{Ledger, Problem};
-pub use rates::{Converted, Rates};
+pub use rates::{Converted, Rates, parse_rate};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -41,8 +41,20 @@ pub fn money(amount: f64) -> String {
     if s == "-0" { "0".into() } else { s.into() }
 }
 
+/// Rates need more places than money: an ElevenLabs credit is 0.00016 USD.
+pub fn rate(r: f64) -> String {
+    let s = format!("{r:.8}");
+    s.trim_end_matches('0').trim_end_matches('.').into()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rate_formatting() {
+        assert_eq!(super::rate(6.42 / 40000.0), "0.0001605");
+        assert_eq!(super::rate(0.03), "0.03");
+    }
+
     #[test]
     fn money_formatting() {
         assert_eq!(super::money(0.4), "0.4");

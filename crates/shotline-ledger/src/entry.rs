@@ -1,6 +1,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use shotline_protocol::Amount;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +70,10 @@ pub struct Entry {
     pub base_currency: String,
     pub rate: f64,
     pub rate_source: String,
+    /// How much the provider's balance dropped over the job, read before and after. Kept next to
+    /// the booked amount, never instead of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<Amount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// sha256 of the previous line, empty for the first.
@@ -94,8 +99,32 @@ impl Entry {
         }
     }
 
+    /// Where the price of the provider's unit came from: `provider` when the provider quoted
+    /// money or its own rate was used, `yours` for a rate from your config, `measured` for one
+    /// worked out from balance changes. Currency conversions after that don't count.
+    pub fn pricing(&self) -> &'static str {
+        pricing(&self.unit, &self.rate_source)
+    }
+
     /// Key for matching a reservation to what closes it.
     pub(crate) fn job_key(&self) -> Option<(Option<&str>, &str)> {
         Some((self.project.as_deref(), self.job.as_deref()?))
     }
+}
+
+/// See [`Entry::pricing`].
+pub fn pricing(unit: &str, rate_source: &str) -> &'static str {
+    if is_currency(unit) {
+        return "provider";
+    }
+    match rate_source.split('+').next().unwrap_or("") {
+        "config" => "yours",
+        "measured" => "measured",
+        _ => "provider",
+    }
+}
+
+/// `USD`, `THB`: three capital letters. Anything else is some provider's credit or unit.
+pub fn is_currency(unit: &str) -> bool {
+    unit.len() == 3 && unit.bytes().all(|b| b.is_ascii_uppercase())
 }

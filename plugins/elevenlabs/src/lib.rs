@@ -2,8 +2,9 @@
 //!
 //! `POST /v1/text-to-speech/{voice_id}?output_format=mp3_44100_128` with `xi-api-key` answers with
 //! the audio straight away, so `run` does the work and `poll` just says it's done. ElevenLabs bills
-//! in credits per character; quotes count one credit per character (`elevenlabs-credit`) and the
-//! user sets what a credit costs on their plan under `[rates]`.
+//! in credits per character; quotes count one credit per character (`elevenlabs-credit`).
+//! `GET /v1/user/subscription` (needs a key with `user_read`) gives what a credit costs, the next
+//! invoice over the month's credits, and how many credits are left.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,8 +13,8 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use shotline_plugin::protocol::{
-    Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs, PROTOCOL_VERSION,
-    PluginError, Quote, Request, State, Status,
+    Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
+    PROTOCOL_VERSION, PluginError, Quote, Rate, Rates, Request, State, Status,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
@@ -168,6 +169,47 @@ impl ElevenLabs {
     }
 }
 
+impl ElevenLabs {
+    fn key(&self) -> Result<&str> {
+        self.key.as_deref().ok_or_else(|| {
+            Error::from(PluginError::new(
+                ErrorKind::Auth,
+                format!("{KEY_VAR} isn't set"),
+            ))
+        })
+    }
+
+    async fn subscription(&self) -> Result<Value> {
+        let r = self
+            .http
+            .get(format!("{}/user/subscription", self.base))
+            .header("xi-api-key", self.key()?)
+            .send()
+            .await
+            .map_err(|e| {
+                PluginError::new(ErrorKind::Other, format!("can't reach ElevenLabs: {e}"))
+            })?;
+        let status = r.status().as_u16();
+        let v: Value = r.json().await.unwrap_or(Value::Null);
+        if status >= 300 {
+            return Err(map_error(status, &v).into());
+        }
+        Ok(v)
+    }
+}
+
+/// What a credit costs: the next invoice spread over the month's credits. Nothing on a free plan.
+pub fn credit_rate(sub: &Value) -> Option<Rate> {
+    let cents = sub.pointer("/next_invoice/amount_due_cents")?.as_f64()?;
+    let credits = sub.get("character_limit")?.as_f64()?;
+    let currency = sub.get("currency")?.as_str()?.to_uppercase();
+    (cents > 0.0 && credits > 0.0).then(|| Rate {
+        unit: UNIT.into(),
+        amount: cents / 100.0 / credits,
+        currency,
+    })
+}
+
 fn not_found(job: &str) -> Error {
     PluginError::new(ErrorKind::NotFound, format!("no job {job}")).into()
 }
@@ -198,12 +240,7 @@ impl Plugin for ElevenLabs {
     async fn run(&self, req: &Request, _output_dir: &Path) -> Result<String> {
         check(req)?;
         let voice = voice_id(req)?;
-        let key = self.key.as_deref().ok_or_else(|| {
-            Error::from(PluginError::new(
-                ErrorKind::Auth,
-                format!("{KEY_VAR} isn't set"),
-            ))
-        })?;
+        let key = self.key()?;
         let r = self
             .http
             .post(format!(
@@ -274,5 +311,31 @@ impl Plugin for ElevenLabs {
             .remove(job)
             .ok_or_else(|| not_found(job))?;
         Ok(())
+    }
+
+    async fn rates(&self) -> Result<Rates> {
+        Ok(Rates {
+            rates: credit_rate(&self.subscription().await?)
+                .into_iter()
+                .collect(),
+        })
+    }
+
+    async fn balance(&self) -> Result<Balance> {
+        let sub = self.subscription().await?;
+        let n = |k: &str| sub.get(k).and_then(Value::as_f64);
+        let (Some(limit), Some(used)) = (n("character_limit"), n("character_count")) else {
+            return Err(PluginError::new(
+                ErrorKind::Other,
+                format!("ElevenLabs sent no credit counts: {sub}"),
+            )
+            .into());
+        };
+        Ok(Balance {
+            balances: vec![Amount {
+                amount: limit - used,
+                unit: UNIT.into(),
+            }],
+        })
     }
 }

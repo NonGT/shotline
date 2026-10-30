@@ -76,6 +76,7 @@ async fn dispatch<P: Plugin>(p: &P, method: &str, v: Value) -> Result<Value> {
             json!({})
         }
         "rates" => to_value(p.rates().await?),
+        "balance" => to_value(p.balance().await?),
         "usage" => to_value(p.usage(&params::<UsageParams>(v)?.since).await?),
         other => return Err(Error::Unsupported(other.to_string())),
     })

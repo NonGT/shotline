@@ -74,6 +74,7 @@ fn film(tmp: &TempDir) -> (Project, Vec<String>) {
                     &ctx.job,
                     Some(&format!("fake-{}", jobs.len() + 1)),
                     None,
+                    None,
                 )
                 .unwrap();
             j.status = JobStatus::Done;

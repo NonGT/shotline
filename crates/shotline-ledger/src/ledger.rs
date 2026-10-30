@@ -201,6 +201,7 @@ mod tests {
             base_currency: "USD".into(),
             rate: 1.0,
             rate_source: "same".into(),
+            measured: None,
             note: None,
             prev: String::new(),
         }

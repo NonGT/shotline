@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use shotline_core::ledger::{Books, money};
-use shotline_core::protocol::{MediaKind, Op, Rate, Reference, Request, State};
+use shotline_core::ledger::{Books, money, pricing};
+use shotline_core::protocol::{MediaKind, Op, Quote, Rate, Reference, Request, State};
 use shotline_core::{Project, ShotRef, UserConfig, user_dir};
 use shotline_engine::{Event, Options, Plan, Plugins, price};
 use shotline_plugin::Plugin;
@@ -94,7 +94,7 @@ fn print_steps(plan: &Plan) {
     for (i, s) in plan.steps.iter().enumerate() {
         let cost = match &s.reused {
             Some(j) => format!("reused from {}", j.id),
-            None => price(&s.quote, s.base, &plan.currency),
+            None => price(&s.quote, s.base, &plan.currency, s.pricing),
         };
         println!("  {i}  {:<18} {} {}  {cost}", s.what, s.plugin, s.model);
     }
@@ -122,7 +122,7 @@ pub fn quote(p: &Project, target: &str) -> Result<()> {
                 only.plugin,
                 only.model,
                 money(plan.built.duration),
-                price(&only.quote, only.base, &plan.currency)
+                price(&only.quote, only.base, &plan.currency, only.pricing)
             );
         } else {
             println!(
@@ -159,13 +159,54 @@ fn options() -> Options {
         .unwrap_or(Duration::from_secs(5));
     Options {
         poll_every,
+        learn: Some(user_dir()),
         ..Options::default()
+    }
+}
+
+/// What's left with each provider about to be used, and a warning when a quote won't fit.
+fn show_balances(rt: &Runtime, opened: &Opened, b: &Books, quotes: &[(String, Quote)]) {
+    let names: BTreeSet<&String> = quotes.iter().map(|(n, _)| n).collect();
+    for name in names {
+        let Some(p) = opened.plugins.get(name) else {
+            continue;
+        };
+        let Ok(bal) = rt.block_on(p.balance()) else {
+            continue;
+        };
+        if bal.balances.is_empty() {
+            continue;
+        }
+        let left: Vec<String> = bal
+            .balances
+            .iter()
+            .map(|a| format!("{} {}", money(a.amount), a.unit))
+            .collect();
+        println!("{name} balance: {}", left.join(", "));
+        // Only warns when every quote converts into one of the balances and none fits.
+        let short = bal.balances.iter().all(|a| {
+            let need: Option<f64> = quotes
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, q)| {
+                    b.rates
+                        .convert(q.amount, &q.unit, &a.unit)
+                        .ok()
+                        .map(|c| c.amount)
+                })
+                .sum();
+            need.is_some_and(|n| n > a.amount)
+        });
+        if short {
+            eprintln!("warning: {name} balance looks too low for this");
+        }
     }
 }
 
 /// Prints progress; remembers the last state so it isn't repeated every poll.
 fn printer(name: String) -> impl FnMut(Event) {
     let mut last: Option<State> = None;
+    let mut name = name;
     move |ev| match ev {
         Event::Reserved { total, currency } => {
             println!("reserved {} {currency}", money(total))
@@ -179,6 +220,7 @@ fn printer(name: String) -> impl FnMut(Event) {
             reused,
         } => {
             last = None;
+            name = plugin.clone();
             if of > 1 {
                 let r = if reused { " (reused)" } else { "" };
                 println!("step {}/{of}: {what} · {plugin} {model}{r}", index + 1);
@@ -186,6 +228,20 @@ fn printer(name: String) -> impl FnMut(Event) {
         }
         Event::Submitted { plugin_job } => println!("sent to {name} ({plugin_job})"),
         Event::Cancelling => println!("cancelling..."),
+        Event::Measured(Some(a)) => {
+            println!("{name} balance dropped {} {}", money(a.amount), a.unit)
+        }
+        Event::Measured(None) => {
+            println!("{name} balance hasn't moved yet; booked the provider's price")
+        }
+        Event::Learned {
+            unit,
+            rate,
+            currency,
+        } => println!(
+            "measured {unit} at {} {currency}, kept as a fallback rate",
+            shotline_core::ledger::rate(rate)
+        ),
         Event::Status(s) => {
             if last != Some(s.state) {
                 match s.progress {
@@ -264,11 +320,18 @@ pub fn take(
         }
     );
     let cost = if let [only] = plan.steps.as_slice() {
-        price(&only.quote, only.base, &plan.currency)
+        price(&only.quote, only.base, &plan.currency, only.pricing)
     } else {
         print_steps(&plan);
         format!("{} {}", money(plan.total), plan.currency)
     };
+    let quotes: Vec<(String, Quote)> = plan
+        .steps
+        .iter()
+        .filter(|s| s.reused.is_none())
+        .map(|s| (s.plugin.clone(), s.quote.clone()))
+        .collect();
+    show_balances(&rt, &opened, &b, &quotes);
     if !yes && !confirm(&format!("spend {cost} on {r}?"))? {
         println!("nothing spent");
         return Ok(());
@@ -380,12 +443,15 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
     }
     let plugin = opened.plugin(&a.plugin)?;
     let quote = rt.block_on(plugin.quote(&req))?;
-    let base = b
-        .rates
-        .convert(quote.amount, &quote.unit, &b.currency)?
-        .amount;
-    let cost = price(&quote, base, &b.currency);
+    let c = b.rates.convert(quote.amount, &quote.unit, &b.currency)?;
+    let cost = price(
+        &quote,
+        c.amount,
+        &b.currency,
+        pricing(&quote.unit, &c.source),
+    );
     println!("{} · {} {} · {cost}", a.op, a.plugin, a.model);
+    show_balances(&rt, &opened, &b, &[(a.plugin.clone(), quote.clone())]);
     if !a.yes && !confirm(&format!("spend {cost}?"))? {
         println!("nothing spent");
         return Ok(());

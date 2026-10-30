@@ -2,22 +2,23 @@
 //!
 //! `POST /api/v3/{model}` with the video and audio as data URLs starts a prediction;
 //! `GET /api/v3/predictions/{id}/result` reports its status and, once completed, the output URLs.
-//! There's no price endpoint, so quotes count seconds of video (`wavespeed-second`) and the user
-//! sets what a second costs for the model under `[rates]`.
+//! `GET /api/v3/models` lists every model with a `base_price`, which for the lip sync models is
+//! USD per second of video (veed/lipsync says "$0.15 per 5s" next to 0.03), so quotes are that
+//! times the duration. `GET /api/v3/balance` is what's left on the account, in USD.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use shotline_plugin::protocol::{
-    Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs, PROTOCOL_VERSION,
-    PluginError, Quote, Request, State, Status,
+    Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
+    PROTOCOL_VERSION, PluginError, Quote, Request, State, Status,
 };
 use shotline_plugin::util::data_url;
 use shotline_plugin::{Error, Plugin, Result};
 
 pub const KEY_VAR: &str = "WAVESPEED_API_KEY";
-pub const UNIT: &str = "wavespeed-second";
 const BASE: &str = "https://api.wavespeed.ai/api/v3";
 
 pub fn models() -> Vec<ModelInfo> {
@@ -32,6 +33,8 @@ pub struct WaveSpeed {
     key: Option<String>,
     base: String,
     http: reqwest::Client,
+    /// model -> base_price, fetched once.
+    prices: tokio::sync::Mutex<Option<HashMap<String, f64>>>,
 }
 
 pub fn from_env() -> WaveSpeed {
@@ -110,7 +113,34 @@ impl WaveSpeed {
             key,
             base: base.trim_end_matches('/').into(),
             http: reqwest::Client::new(),
+            prices: tokio::sync::Mutex::new(None),
         }
+    }
+
+    async fn price_per_second(&self, model: &str) -> Result<f64> {
+        let mut prices = self.prices.lock().await;
+        if prices.is_none() {
+            let v = self
+                .send(self.http.get(format!("{}/models", self.base)))
+                .await?;
+            let list = v
+                .as_array()
+                .ok_or_else(|| other(format!("WaveSpeed sent no model list: {v}")))?;
+            *prices = Some(
+                list.iter()
+                    .filter_map(|m| {
+                        Some((
+                            m.get("model_id")?.as_str()?.to_string(),
+                            m.get("base_price")?.as_f64()?,
+                        ))
+                    })
+                    .collect(),
+            );
+        }
+        prices
+            .as_ref()
+            .and_then(|p| p.get(model).copied())
+            .ok_or_else(|| other(format!("WaveSpeed lists no price for {model}")))
     }
 
     async fn send(&self, rb: reqwest::RequestBuilder) -> Result<Value> {
@@ -149,9 +179,10 @@ impl Plugin for WaveSpeed {
 
     async fn quote(&self, req: &Request) -> Result<Quote> {
         let secs = check(req)?;
+        let per = self.price_per_second(&req.model).await?;
         Ok(Quote {
-            amount: secs,
-            unit: UNIT.into(),
+            amount: per * secs,
+            unit: "USD".into(),
             units: Some(secs),
             unit_name: Some("s".into()),
         })
@@ -256,5 +287,21 @@ impl Plugin for WaveSpeed {
 
     async fn cancel(&self, _job: &str) -> Result<()> {
         Err(Error::Unsupported("cancel".into()))
+    }
+
+    async fn balance(&self) -> Result<Balance> {
+        let v = self
+            .send(self.http.get(format!("{}/balance", self.base)))
+            .await?;
+        let amount = v
+            .get("balance")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| other(format!("WaveSpeed sent no balance: {v}")))?;
+        Ok(Balance {
+            balances: vec![Amount {
+                amount,
+                unit: "USD".into(),
+            }],
+        })
     }
 }

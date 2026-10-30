@@ -150,6 +150,7 @@ poll      -> queued | running | done | failed, progress
 fetch     -> writes outputs into a folder shotline gives it
 cancel
 rates     -> optional: what one of its credit units costs
+balance   -> optional: what's left on the account, free to read
 usage     -> optional: what the provider actually charged, for reconciling
 ```
 
@@ -185,8 +186,9 @@ What a plugin says about its models can be overridden in the project's `models.t
 
 First plugins: fal (built in, video), and in `plugins/` Venice (video), ElevenLabs (TTS) and
 WaveSpeed (`sync/lipsync-3` for lip sync), installed with `cargo install --path plugins/<name>`.
-ElevenLabs quotes in `elevenlabs-credit` (one per character) and WaveSpeed in `wavespeed-second`,
-since neither has a price endpoint; what those cost on your plan goes under `[rates]`.
+ElevenLabs quotes in `elevenlabs-credit` (one per character) and works out what a credit costs
+from the subscription (next invoice over the month's credits; the key needs `user_read`).
+WaveSpeed quotes in USD from the `base_price` its model list gives per second of video.
 
 ## Jobs and takes
 
@@ -301,6 +303,22 @@ paid for credits can differ from list price. Rates chain (credit -> USD -> THB).
 converted to the project currency, the job doesn't run until a rate is set, so nothing gets spent
 uncounted.
 
+### Measured from balances
+
+Plugins that implement `balance` (Venice, WaveSpeed, ElevenLabs) have it read before a job and
+after it finishes, re-read a few times if billing is slow. When nothing else of that plugin is
+running, the drop is written on the charge line as `measured`, next to the booked amount and never
+instead of it. Someone using the provider's website at the same time still muddles it, so it's a
+check, not the truth.
+
+When a job booked in a provider unit (credits, seconds) and the balance is money, the drop gives a
+rate for that unit. Those go to `~/.config/shotline/measured-rates.toml`, apart from everything
+else, averaged over samples (one far off the average is dropped). They're only used for a unit no
+plugin and no config has a rate for; quotes then say "at a measured rate", and `shotline cost`
+splits what was spent by where its price came from: the provider's, your rates, measured.
+`shotline cost rates` lists every rate, where it's from and which one wins. `shotline plugin
+balance` shows what's left with each provider, and takes show it before asking to spend.
+
 ### Budgets
 
 Hard stops, in the project currency: `per_job`, `per_take`, `per_chapter`, `per_day` and `total`
@@ -315,15 +333,16 @@ and per provider unit (to compare with the provider's dashboard). It also splits
 (selected takes) from what was thrown away, and shows what each second of the final film cost.
 `--csv` exports it.
 
-`shotline cost reconcile` pulls `usage` from plugins that support it and lists any differences
-from what the ledger says.
+`shotline cost reconcile` lists jobs whose balance dropped by a different amount than was booked,
+then pulls `usage` from plugins that support it and lists any differences from what the ledger
+says.
 
 ## Commands
 
 ```
 shotline init <dir>
 shotline doctor
-shotline plugin ls | doctor <name>
+shotline plugin ls | doctor <name> | balance [name]
 shotline element add <kind> <name> [--handle h] [--desc ...]
 shotline element anchor <handle> (--file img | --generate)
 shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--sample f] [--set k=v]
@@ -344,7 +363,7 @@ shotline run <op> --plugin p --model m [--prompt ..] [--duration s] [--input nam
              [--ref file] [--param k=v] [--yes]          one-off operation outside a shot
 shotline timeline render [--no-colormatch]
 shotline cost [--by chapter|shot|op|plugin|day] [--csv]
-shotline cost verify | reconcile [--plugin p]
+shotline cost verify | rates | reconcile [--plugin p]
 shotline cost adjust <amount> <unit> --note ...
 shotline cost refund <job> <amount> <unit> [--note ...]
 shotline mcp

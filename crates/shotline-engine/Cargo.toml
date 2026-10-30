@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+jiff = "0.2.38"
 serde_json = "1.0.154"
 shotline-core = { version = "0.1.0", path = "../shotline-core" }
 shotline-plugin = { version = "0.1.0", path = "../shotline-plugin" }

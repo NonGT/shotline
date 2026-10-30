@@ -65,15 +65,15 @@ fn lifecycle() {
 
     b.reserve(now, &job("j1", "t1", "01-010", 1), &usd(0.4))
         .unwrap();
-    b.charge(now, "j1", Some("fal-123"), Some(&usd(0.38)))
+    b.charge(now, "j1", Some("fal-123"), Some(&usd(0.38)), None)
         .unwrap();
     b.reserve(now, &job("j2", "t1", "01-010", 1), &usd(0.2))
         .unwrap();
-    b.release(now, "j2").unwrap();
+    b.release(now, "j2", None).unwrap();
     b.reserve(now, &job("j3", "t2", "01-010", 1), &usd(0.4))
         .unwrap();
     // failed, but still charged: no actual given, the reserved amount is booked
-    b.charge(now, "j3", None, None).unwrap();
+    b.charge(now, "j3", None, None, None).unwrap();
     b.refund(now, "j3", &usd(0.4), "provider refunded the policy hit")
         .unwrap();
 
@@ -96,8 +96,11 @@ fn lifecycle() {
     assert!((s.spent - 0.38).abs() < 1e-9, "{s:?}");
     assert_eq!(s.held, 0.0);
 
-    assert!(b.charge(now, "j1", None, None).is_err(), "already closed");
-    assert!(b.release(now, "nope").is_err());
+    assert!(
+        b.charge(now, "j1", None, None, None).is_err(),
+        "already closed"
+    );
+    assert!(b.release(now, "nope", None).is_err());
     b.reserve(now, &job("j4", "t3", "01-020", 1), &usd(0.1))
         .unwrap();
     assert!(
@@ -137,15 +140,15 @@ fn budgets_stop_reservations() {
     assert!(over(b.reserve(now, &job("d", "t5", "02-020", 2), &usd(0.1))).contains("daily"));
 
     // Releasing frees the money again.
-    b.release(now, "b").unwrap();
+    b.release(now, "b", None).unwrap();
     b.reserve(now, &job("d", "t5", "02-020", 2), &usd(0.5))
         .unwrap();
 
     // Next day (in UTC+7) the daily limit resets but the total doesn't.
     let tomorrow = at("2026-10-30T17:30:00Z");
-    b.charge(now, "a", None, None).unwrap();
-    b.charge(now, "c", None, None).unwrap();
-    b.charge(now, "d", None, None).unwrap();
+    b.charge(now, "a", None, None, None).unwrap();
+    b.charge(now, "c", None, None, None).unwrap();
+    b.charge(now, "d", None, None, None).unwrap();
     b.reserve(tomorrow, &job("e", "t6", "03-010", 3), &usd(0.9))
         .unwrap();
     assert!(over(b.reserve(tomorrow, &job("f", "t7", "03-020", 3), &usd(0.2))).contains("total"));
@@ -211,7 +214,7 @@ fn credits_and_currencies() {
 
     // A changed rate doesn't touch old lines.
     b.rates.add("USD", 40.0, "THB", "config");
-    b.charge(at(T), "j1", None, None).unwrap();
+    b.charge(at(T), "j1", None, None, None).unwrap();
     let es = b.ledger.entries().unwrap();
     assert!((es[0].base - 29.2).abs() < 1e-9);
     assert!((es[1].base - 32.0).abs() < 1e-9);
@@ -238,7 +241,7 @@ fn daily_limit_across_films() {
         .unwrap();
     let m = over(b.reserve(at(T), &job("j1", "t1", "01-010", 1), &usd(0.6)));
     assert!(m.contains("daily (all films)"), "{m}");
-    a.release(at(T), "j1").unwrap();
+    a.release(at(T), "j1", None).unwrap();
     // same job id in another film is a different job
     b.reserve(at(T), &job("j1", "t1", "01-010", 1), &usd(0.6))
         .unwrap();
@@ -274,13 +277,13 @@ fn reports() {
     };
     b.reserve(day1, &job("j1", "t1", "01-010", 1), &usd(0.4))
         .unwrap();
-    b.charge(day1, "j1", None, None).unwrap();
+    b.charge(day1, "j1", None, None, None).unwrap();
     b.reserve(day1, &job("j2", "t2", "01-010", 1), &credits(30.0))
         .unwrap();
-    b.charge(day1, "j2", None, None).unwrap();
+    b.charge(day1, "j2", None, None, None).unwrap();
     b.reserve(day2, &job("j3", "t3", "01-020", 1), &usd(1.0))
         .unwrap();
-    b.charge(day2, "j3", None, None).unwrap();
+    b.charge(day2, "j3", None, None, None).unwrap();
     b.reserve(day2, &job("j4", "t4", "01-020", 1), &usd(5.0))
         .unwrap();
     b.adjust(day2, &usd(0.1), "bank fee").unwrap();
@@ -335,7 +338,7 @@ fn reconciling() {
     for (j, pj, amount) in [("j1", "p1", 0.4), ("j2", "p2", 0.5), ("j3", "p3", 0.2)] {
         b.reserve(at(T), &job(j, "t", "01-010", 1), &usd(amount))
             .unwrap();
-        b.charge(at(T), j, Some(pj), None).unwrap();
+        b.charge(at(T), j, Some(pj), None, None).unwrap();
     }
     b.refund(at(T), "j3", &usd(0.2), "refunded").unwrap();
     let charge = |job: Option<&str>, amount: f64| Charge {

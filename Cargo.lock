@@ -1740,6 +1740,7 @@ name = "shotline-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jiff",
  "serde_json",
  "shotline-core",
  "shotline-plugin",

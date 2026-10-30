@@ -5,7 +5,9 @@ use std::path::Path;
 
 use async_trait::async_trait;
 pub use shotline_protocol as protocol;
-use shotline_protocol::{Description, Outputs, PluginError, Quote, Rates, Request, Status, Usage};
+use shotline_protocol::{
+    Balance, Description, Outputs, PluginError, Quote, Rates, Request, Status, Usage,
+};
 
 pub mod conformance;
 pub mod discovery;
@@ -43,6 +45,12 @@ pub trait Plugin: Send + Sync {
 
     async fn rates(&self) -> Result<Rates> {
         Err(Error::Unsupported("rates".into()))
+    }
+
+    /// What's left on the account. Must be free to call; shotline reads it before and after jobs
+    /// to see what they really cost.
+    async fn balance(&self) -> Result<Balance> {
+        Err(Error::Unsupported("balance".into()))
     }
 
     /// Charges since an RFC 3339 time.

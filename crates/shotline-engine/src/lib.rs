@@ -8,11 +8,13 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::json;
-use shotline_core::ledger::{Books, Context, Entry, money};
+use shotline_core::ledger::{Books, Context, Entry, Kind, is_currency, money, pricing};
 use shotline_core::protocol::{
-    ErrorKind, MediaKind, Op, PluginError, Quote, Reference, Request, State, Status,
+    Amount, ErrorKind, MediaKind, Op, PluginError, Quote, Reference, Request, State, Status,
 };
-use shotline_core::{Built, Catalog, Cost, Job, JobStatus, Project, ShotRef, Take, build};
+use shotline_core::{
+    Built, Catalog, Cost, Job, JobStatus, MeasuredRates, Project, ShotRef, Take, build,
+};
 use shotline_plugin::{Error as PluginErr, Plugin};
 use tokio::sync::Notify;
 use ulid::Ulid;
@@ -52,6 +54,8 @@ pub struct StepPlan {
     pub quote: Quote,
     /// The quote in the film's currency; 0 for a reused step.
     pub base: f64,
+    /// Where the price of the quote's unit came from: `provider`, `yours` or `measured`.
+    pub pricing: &'static str,
     /// Taken over from an earlier take instead of being run again.
     pub reused: Option<Job>,
     kind: StepKind,
@@ -305,6 +309,7 @@ pub async fn plan(
                 unit_name: None,
             },
             base: 0.0,
+            pricing: "provider",
             reused: None,
             kind,
         };
@@ -326,10 +331,11 @@ pub async fn plan(
                 .quote(&sp.request)
                 .await
                 .map_err(|e| plugin_error(e, &sp, &built))?;
-            sp.base = books
+            let c = books
                 .rates
-                .convert(sp.quote.amount, &sp.quote.unit, &books.currency)?
-                .amount;
+                .convert(sp.quote.amount, &sp.quote.unit, &books.currency)?;
+            sp.base = c.amount;
+            sp.pricing = pricing(&sp.quote.unit, &c.source);
             total += sp.base;
         }
         out.push(sp);
@@ -362,6 +368,14 @@ pub enum Event {
     },
     Status(Status),
     Cancelling,
+    /// What the provider's balance dropped by over the job, or `None` if it didn't move in time.
+    Measured(Option<Amount>),
+    /// A rate worked out from the balance, kept as a fallback.
+    Learned {
+        unit: String,
+        rate: f64,
+        currency: String,
+    },
 }
 
 pub struct Options {
@@ -370,6 +384,10 @@ pub struct Options {
     pub cancel: Arc<Notify>,
     /// Poll errors in a row before giving up on a job.
     pub max_poll_errors: u32,
+    /// Balance reads after a job, `poll_every` apart, waiting for slow billing to show.
+    pub balance_reads: u32,
+    /// Where measured rates are kept (the user's config folder); `None` doesn't keep them.
+    pub learn: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -378,6 +396,8 @@ impl Default for Options {
             poll_every: Duration::from_secs(5),
             cancel: Arc::new(Notify::new()),
             max_poll_errors: 5,
+            balance_reads: 6,
+            learn: None,
         }
     }
 }
@@ -403,6 +423,48 @@ fn context(job: &Job) -> Context {
     }
 }
 
+/// No other job is using `ctx.plugin`: nothing else of it is reserved and not closed (bar this
+/// take's later steps, which wait for this one), and with `since`, nothing else of it was
+/// booked since then. Balance changes only mean something for a job that ran alone.
+fn alone(books: &Books, ctx: &Context, since: Option<jiff::Timestamp>) -> bool {
+    let Ok(entries) = books.ledger.entries() else {
+        return false;
+    };
+    let other = |e: &Entry| {
+        e.plugin.as_deref() == Some(ctx.plugin.as_str())
+            && e.job.as_deref() != Some(ctx.job.as_str())
+    };
+    let closed: Vec<&str> = entries
+        .iter()
+        .filter(|e| matches!(e.kind, Kind::Charge | Kind::Release))
+        .filter_map(|e| e.job.as_deref())
+        .collect();
+    let busy = entries.iter().filter(|e| other(e)).any(|e| {
+        let open = e.kind == Kind::Reserve
+            && !closed.contains(&e.job.as_deref().unwrap_or(""))
+            && (e.take.is_none() || e.take != ctx.take);
+        let recent = since.is_some_and(|t| e.time >= t && e.kind != Kind::Reserve);
+        open || recent
+    });
+    !busy
+}
+
+/// The one balance that dropped (or rose) between two reads.
+fn drop_between(before: &[Amount], after: &[Amount]) -> Option<Amount> {
+    let mut changed = before.iter().filter_map(|b| {
+        let a = after.iter().find(|a| a.unit == b.unit)?;
+        let d = b.amount - a.amount;
+        (d.abs() > 1e-9).then(|| Amount {
+            amount: d,
+            unit: b.unit.clone(),
+        })
+    });
+    match (changed.next(), changed.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
+    }
+}
+
 struct Run<'a> {
     project: &'a Project,
     books: &'a Books,
@@ -410,6 +472,71 @@ struct Run<'a> {
 }
 
 impl Run<'_> {
+    /// Reads the balance again until it moves, if a drop is expected, and books what it learned.
+    async fn measure(
+        &self,
+        plugin: &dyn Plugin,
+        before: &[Amount],
+        expect_drop: bool,
+        on_event: &mut dyn FnMut(Event),
+    ) -> Option<Amount> {
+        let reads = if expect_drop {
+            self.opts.balance_reads.max(1)
+        } else {
+            1
+        };
+        for i in 0..reads {
+            if i > 0 {
+                tokio::time::sleep(self.opts.poll_every).await;
+            }
+            let Ok(after) = plugin.balance().await else {
+                return None;
+            };
+            if let Some(d) = drop_between(before, &after.balances) {
+                on_event(Event::Measured(Some(d.clone())));
+                return Some(d);
+            }
+        }
+        if expect_drop {
+            on_event(Event::Measured(None));
+        }
+        None
+    }
+
+    /// Keeps `booked` units costing `measured` as a fallback rate, when the booked unit is some
+    /// provider's own and the balance is money.
+    fn learn(
+        &self,
+        booked: &Entry,
+        measured: &Amount,
+        alone: bool,
+        on_event: &mut dyn FnMut(Event),
+    ) {
+        let Some(dir) = &self.opts.learn else { return };
+        if !alone
+            || is_currency(&booked.unit)
+            || !is_currency(&measured.unit)
+            || booked.amount <= 0.0
+        {
+            return;
+        }
+        let now = self.project.clock.now();
+        if let Ok(true) = MeasuredRates::add(
+            dir,
+            &booked.unit,
+            booked.amount,
+            measured.amount,
+            &measured.unit,
+            now,
+        ) {
+            on_event(Event::Learned {
+                unit: booked.unit.clone(),
+                rate: measured.amount / booked.amount,
+                currency: measured.unit.clone(),
+            });
+        }
+    }
+
     /// Runs one already reserved job to the end and books it. Returns the job as it ended and
     /// why it failed, if it did.
     async fn job(
@@ -430,11 +557,17 @@ impl Run<'_> {
             Ok(project.save_job(job)?)
         };
 
+        let started = project.clock.now();
+        let before = if alone(books, &ctx, None) {
+            plugin.balance().await.ok().map(|b| b.balances)
+        } else {
+            None
+        };
         let plugin_job = match plugin.run(request, &out_dir).await {
             Ok(pj) => pj,
             Err(e) => {
                 let msg = explain(e);
-                books.release(project.clock.now(), &ctx.job)?;
+                books.release(project.clock.now(), &ctx.job, None)?;
                 finish(&mut job, JobStatus::Failed, Some(msg.clone()))?;
                 return Ok((job, Some(msg)));
             }
@@ -487,6 +620,12 @@ impl Run<'_> {
             }
         };
 
+        let charged = status.state == State::Done || status.cost.is_some();
+        let measured = match &before {
+            Some(b) => self.measure(plugin, b, charged, on_event).await,
+            None => None,
+        };
+        let alone = before.is_some() && alone(books, &ctx, Some(started));
         let now = project.clock.now();
         let cost_of = |e: &Entry| Cost {
             amount: e.amount,
@@ -495,8 +634,16 @@ impl Run<'_> {
         match status.state {
             State::Done => {
                 // Done means money was spent, whatever happens with the download.
-                let charged =
-                    books.charge(now, &ctx.job, Some(&plugin_job), status.cost.as_ref())?;
+                let charged = books.charge(
+                    now,
+                    &ctx.job,
+                    Some(&plugin_job),
+                    status.cost.as_ref(),
+                    measured.as_ref(),
+                )?;
+                if let Some(m) = &measured {
+                    self.learn(&charged, m, alone, on_event);
+                }
                 job.cost = Some(cost_of(&charged));
                 match plugin.fetch(&plugin_job, &out_dir).await {
                     Ok(out) => {
@@ -514,11 +661,17 @@ impl Run<'_> {
             State::Failed | State::Cancelled => {
                 match &status.cost {
                     Some(c) => {
-                        let e = books.charge(now, &ctx.job, Some(&plugin_job), Some(c))?;
+                        let e = books.charge(
+                            now,
+                            &ctx.job,
+                            Some(&plugin_job),
+                            Some(c),
+                            measured.as_ref(),
+                        )?;
                         job.cost = Some(cost_of(&e));
                     }
                     None => {
-                        books.release(now, &ctx.job)?;
+                        books.release(now, &ctx.job, measured.as_ref())?;
                     }
                 }
                 let (st, msg) = if status.state == State::Cancelled || cancelled {
@@ -582,7 +735,7 @@ pub async fn take(
         let Some(job) = job else { continue };
         if let Err(e) = books.reserve(now, &context(job), &sp.quote) {
             for id in &held {
-                books.release(now, id)?;
+                books.release(now, id, None)?;
             }
             return Err(e.into());
         }
@@ -663,7 +816,7 @@ pub async fn take(
                     let now = project.clock.now();
                     let id = job.id.to_string();
                     for later in held.iter().skip_while(|h| **h != id).skip(1) {
-                        books.release(now, later)?;
+                        books.release(now, later, None)?;
                     }
                     let err = if n > 1 {
                         format!("{}: {e}", sp.what)
@@ -744,16 +897,48 @@ pub async fn run_once(
     run.job(plugin, job, request, &explain, &mut on_event).await
 }
 
-/// "0.4 USD" or "30 fake-credit (0.3 USD)".
-pub fn price(quote: &Quote, base: f64, currency: &str) -> String {
+/// "0.4 USD" or "30 fake-credit (0.3 USD)", saying so when the unit's price isn't the
+/// provider's: "8 fake-second (0.24 USD at a measured rate)".
+pub fn price(quote: &Quote, base: f64, currency: &str, pricing: &str) -> String {
+    let how = match pricing {
+        "measured" => " at a measured rate",
+        "yours" => " at your rate",
+        _ => "",
+    };
     if quote.unit == currency {
         format!("{} {}", money(quote.amount), quote.unit)
     } else {
         format!(
-            "{} {} ({} {currency})",
+            "{} {} ({} {currency}{how})",
             money(quote.amount),
             quote.unit,
             money(base)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a(amount: f64, unit: &str) -> Amount {
+        Amount {
+            amount,
+            unit: unit.into(),
+        }
+    }
+
+    #[test]
+    fn balance_drops() {
+        let before = [a(3.82, "USD"), a(0.0, "venice-diem")];
+        let d = drop_between(&before, &[a(3.34, "USD"), a(0.0, "venice-diem")]).unwrap();
+        assert_eq!(d.unit, "USD");
+        assert!((d.amount - 0.48).abs() < 1e-9);
+        assert_eq!(drop_between(&before, &before), None, "nothing moved");
+        assert_eq!(
+            drop_between(&before, &[a(3.5, "USD"), a(-1.0, "venice-diem")]),
+            None,
+            "two moved, can't tell which was the job"
+        );
     }
 }

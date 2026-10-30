@@ -79,7 +79,41 @@ async fn mock() -> MockServer {
         )
         .mount(&s)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/subscription"))
+        .and(header("xi-api-key", "k"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tier": "starter", "currency": "usd",
+            "character_count": 24761, "character_limit": 40000,
+            "next_invoice": {"amount_due_cents": 600, "subtotal_cents": 600}
+        })))
+        .mount(&s)
+        .await;
     s
+}
+
+#[tokio::test]
+async fn rate_and_balance_from_the_plan() {
+    let s = mock().await;
+    let el = ElevenLabs::new(Some("k".into()), &format!("{}/v1", s.uri()));
+    let r = el.rates().await.unwrap().rates;
+    assert_eq!(r.len(), 1);
+    assert_eq!(
+        (r[0].unit.as_str(), r[0].currency.as_str()),
+        ("elevenlabs-credit", "USD")
+    );
+    assert!((r[0].amount - 0.00015).abs() < 1e-12);
+    let b = el.balance().await.unwrap().balances;
+    assert_eq!(
+        (b[0].amount, b[0].unit.as_str()),
+        (15239.0, "elevenlabs-credit")
+    );
+    assert!(
+        elevenlabs::credit_rate(&json!({"character_limit": 10000, "currency": "usd",
+            "next_invoice": {"amount_due_cents": 0}}))
+        .is_none(),
+        "free plans have no rate"
+    );
 }
 
 #[tokio::test]

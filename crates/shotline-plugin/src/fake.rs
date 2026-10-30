@@ -6,9 +6,12 @@
 //! - `fake_fail = "<kind>"`: the job runs, then fails with that kind
 //! - `fake_charge_on_fail = true`: a failed job still reports a cost
 //! - `fake_polls = n`: polls that say running before it finishes (default 1)
+//! - `fake_overcharge = x`: the balance drops by x times the price instead of the price
+//! - `fake_no_drop = true`: the balance never drops, as if billing were slow
 //!
 //! `usage` answers with the contents of `shotline-fake-usage.json` in the working directory, if
-//! there is one.
+//! there is one. The balance starts at 100 USD for each process. `fake/metered` quotes in
+//! `fake-second`, which has no rate anywhere; the balance drops 0.03 USD a second.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,18 +20,28 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use shotline_protocol::{
-    Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs, PROTOCOL_VERSION,
-    PluginError, Quote, Rate, Rates, Request, State, Status, Usage,
+    Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
+    PROTOCOL_VERSION, PluginError, Quote, Rate, Rates, Request, State, Status, Usage,
 };
 
 use crate::{Plugin, Result};
 
 pub const KEY_VAR: &str = "SHOTLINE_FAKE_KEY";
 
-#[derive(Default)]
 pub struct FakePlugin {
     jobs: Mutex<HashMap<String, Job>>,
     next: Mutex<u64>,
+    balance: Mutex<f64>,
+}
+
+impl Default for FakePlugin {
+    fn default() -> Self {
+        Self {
+            jobs: Mutex::default(),
+            next: Mutex::default(),
+            balance: Mutex::new(100.0),
+        }
+    }
 }
 
 struct Job {
@@ -37,6 +50,7 @@ struct Job {
     fail: Option<ErrorKind>,
     charge_on_fail: bool,
     cancelled: bool,
+    billed: bool,
 }
 
 fn models() -> Vec<ModelInfo> {
@@ -76,6 +90,11 @@ fn models() -> Vec<ModelInfo> {
         ModelInfo {
             id: "fake/lipsync".into(),
             op: Op::VideoLipsync,
+            ..ModelInfo::default()
+        },
+        ModelInfo {
+            id: "fake/metered".into(),
+            op: Op::VideoUpscale,
             ..ModelInfo::default()
         },
     ]
@@ -156,6 +175,12 @@ fn price(req: &Request) -> Quote {
                 unit_name: Some("chars".into()),
             }
         }
+        "fake/metered" => Quote {
+            amount: secs,
+            unit: "fake-second".into(),
+            units: Some(secs),
+            unit_name: Some("s".into()),
+        },
         "fake/lipsync" => Quote {
             amount: 0.05 * secs,
             unit: "USD".into(),
@@ -169,6 +194,25 @@ fn price(req: &Request) -> Quote {
             unit_name: Some("s".into()),
         },
     }
+}
+
+/// What the account really loses for a job, in USD.
+fn billed(req: &Request) -> f64 {
+    if req.params.get("fake_no_drop") == Some(&json!(true)) {
+        return 0.0;
+    }
+    let q = price(req);
+    let usd = match q.unit.as_str() {
+        "fake-credit" => q.amount * 0.01,
+        "fake-second" => q.amount * 0.03,
+        _ => q.amount,
+    };
+    let factor = req
+        .params
+        .get("fake_overcharge")
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0);
+    usd * factor
 }
 
 fn not_found(job: &str) -> crate::Error {
@@ -213,6 +257,7 @@ impl Plugin for FakePlugin {
                 fail,
                 charge_on_fail,
                 cancelled: false,
+                billed: false,
             },
         );
         Ok(id)
@@ -237,6 +282,11 @@ impl Plugin for FakePlugin {
                 error: None,
                 cost: None,
             });
+        }
+        let charged = j.fail.is_none() || j.charge_on_fail;
+        if charged && !j.billed {
+            j.billed = true;
+            *self.balance.lock().unwrap() -= billed(&j.req);
         }
         Ok(match j.fail {
             Some(kind) => Status {
@@ -290,6 +340,15 @@ impl Plugin for FakePlugin {
                 unit: "fake-credit".into(),
                 amount: 0.01,
                 currency: "USD".into(),
+            }],
+        })
+    }
+
+    async fn balance(&self) -> Result<Balance> {
+        Ok(Balance {
+            balances: vec![Amount {
+                amount: *self.balance.lock().unwrap(),
+                unit: "USD".into(),
             }],
         })
     }

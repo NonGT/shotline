@@ -165,6 +165,15 @@ What one of your credit units costs:
 
 User settings override this.
 
+### balance (optional)
+
+What's left on the account, one line per currency or kind of credit. It must be free to call:
+shotline reads it before and after each job to see how much the job really took.
+
+```json
+{"balances": [{"amount": 3.82, "unit": "USD"}, {"amount": 0, "unit": "venice-diem"}]}
+```
+
 ### usage (optional)
 
 Params: `{"since": "2026-10-01T00:00:00Z"}`. What the provider actually charged, for

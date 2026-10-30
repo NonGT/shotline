@@ -272,6 +272,19 @@ pub struct Rates {
     pub rates: Vec<Rate>,
 }
 
+/// An amount of money or credits.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Amount {
+    pub amount: f64,
+    pub unit: String,
+}
+
+/// What's left on the account, one line per currency or kind of credit.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Balance {
+    pub balances: Vec<Amount>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageParams {
     /// RFC 3339

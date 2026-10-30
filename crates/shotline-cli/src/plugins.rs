@@ -156,6 +156,37 @@ fn print_env(declared: &[String], env_file: &Path) {
 }
 
 /// Describe, env and offline conformance checks. Only calls `quote`, which plugins must keep free.
+/// What's left on each provider account, for plugins that can tell. Reading it is free.
+pub fn balance(installed: &Installed, only: Option<&str>) -> Result<()> {
+    if let Some(n) = only
+        && !installed.plugins.iter().any(|p| p.name == n)
+    {
+        bail!("no plugin called {n}; `shotline plugin ls` shows what's installed");
+    }
+    let rt = runtime();
+    for p in &installed.plugins {
+        if only.is_some_and(|n| n != p.name) || p.description.is_err() {
+            continue;
+        }
+        let plugin = open(installed, &p.name)?;
+        match rt.block_on(plugin.balance()) {
+            Ok(b) => {
+                let left: Vec<String> = b
+                    .balances
+                    .iter()
+                    .map(|a| format!("{} {}", shotline_core::ledger::money(a.amount), a.unit))
+                    .collect();
+                println!("{}  {}", p.name, left.join(", "));
+            }
+            Err(shotline_plugin::Error::Unsupported(_)) => {
+                println!("{}  can't tell", p.name)
+            }
+            Err(e) => println!("{}  {e}", p.name),
+        }
+    }
+    Ok(())
+}
+
 pub fn doctor(installed: &Installed, name: &str) -> Result<()> {
     warn_problems(installed);
     let Some(p) = installed.plugins.iter().find(|p| p.name == name) else {

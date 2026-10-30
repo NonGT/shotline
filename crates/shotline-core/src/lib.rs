@@ -15,7 +15,7 @@ pub use element::{Element, Kind, Voice};
 pub use error::{Error, Result};
 pub use job::{Clock, Cost, Job, JobStatus, SystemClock, Take, TestClock};
 pub use model::{Catalog, ModelSpec};
-pub use money::UserConfig;
+pub use money::{Measured, MeasuredRates, UserConfig};
 pub use project::{CONFIG_FILE, Config, Money, Project, PromptLayers, Step, user_dir};
 pub use prompt::{Built, Reference, StartFrame, build};
 pub use shot::{Chapter, Line, ModelOverride, Shot, ShotRef, Transition};

@@ -1,6 +1,6 @@
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use shotline_protocol::Quote;
+use shotline_protocol::{Amount, Quote};
 
 use crate::budget::{Scope, check, exposure};
 use crate::{Budgets, Entry, Error, Kind, Ledger, Rates, Result};
@@ -44,6 +44,7 @@ fn line(now: Timestamp, kind: Kind, from: &Entry) -> Entry {
         seq: 0,
         time: now,
         kind,
+        measured: None,
         note: None,
         prev: String::new(),
         ..from.clone()
@@ -74,6 +75,7 @@ impl Books {
             base_currency: self.currency.clone(),
             rate: c.rate,
             rate_source: c.source,
+            measured: None,
             note: None,
             prev: String::new(),
         })
@@ -184,17 +186,20 @@ impl Books {
     }
 
     /// Books what a job cost and closes its reservation. Without `actual` the reserved amount is
-    /// used. Never refused for budget reasons: the money is already gone.
+    /// used. `measured` is what the balance dropped by, if it was read. Never refused for budget
+    /// reasons: the money is already gone.
     pub fn charge(
         &self,
         now: Timestamp,
         job: &str,
         plugin_job: Option<&str>,
         actual: Option<&Quote>,
+        measured: Option<&Amount>,
     ) -> Result<Entry> {
         let reserve = self.reservation(job)?;
         let mut e = line(now, Kind::Charge, &reserve);
         e.plugin_job = plugin_job.map(str::to_string);
+        e.measured = measured.cloned();
         if let Some(q) = actual {
             e.amount = q.amount;
             e.unit = q.unit.clone();
@@ -209,10 +214,12 @@ impl Books {
         self.write(e, |entries| still_open(entries, job), false)
     }
 
-    /// Closes a reservation for a job that cost nothing.
-    pub fn release(&self, now: Timestamp, job: &str) -> Result<Entry> {
+    /// Closes a reservation for a job that cost nothing, as far as the provider says. A balance
+    /// that dropped anyway shows up in `measured`.
+    pub fn release(&self, now: Timestamp, job: &str, measured: Option<&Amount>) -> Result<Entry> {
         let reserve = self.reservation(job)?;
         let mut e = line(now, Kind::Release, &reserve);
+        e.measured = measured.cloned();
         e.amount = 0.0;
         e.base = 0.0;
         self.write(e, |entries| still_open(entries, job), false)
