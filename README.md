@@ -7,13 +7,21 @@ story into chapters and shots, then generate takes and pick the good ones. Shots
 from the last frame of the previous take, so scenes flow instead of jumping. At the end it stitches
 the selected takes into one video.
 
-There's no built-in chat. If you want a co-director, run `shotline mcp` and let any MCP client
-drive it. It always asks before spending credits.
+There's no built-in chat. If you want a co-director, add `shotline mcp` to any MCP client as a
+stdio server, e.g. for Claude Code:
+
+```
+claude mcp add shotline -- shotline mcp -C ~/films/my-film
+```
+
+The tools are the CLI's commands. Taking a shot only shows the price until the agent calls again
+with `confirm: true`, and budgets in `shotline.toml` are enforced either way. What the agent is told
+about the workflow is in [agent/CO_DIRECTOR.md](agent/CO_DIRECTOR.md).
 
 Very early. So far you can set up a project, add cast/sets/props with anchor images, break it
 into chapters and shots, preview the exact prompt each shot would send, and install and check
-plugins, then quote and generate takes (fal, Venice, ElevenLabs voices, WaveSpeed lip sync) with
-every cost on record. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
+plugins, quote and generate takes (fal, Venice, ElevenLabs voices, WaveSpeed lip sync) with
+every cost on record, chain continue shots, and render the cut with colour matching and music. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ```
 cargo install --path crates/shotline-cli

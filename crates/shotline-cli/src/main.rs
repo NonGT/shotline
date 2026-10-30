@@ -6,6 +6,7 @@ use shotline_core::ledger::report::By;
 use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voice, build};
 
 mod cost;
+mod mcp;
 mod plugins;
 mod shoot;
 mod timeline;
@@ -35,6 +36,16 @@ enum Cmd {
     /// Cast, sets and props
     #[command(subcommand)]
     Element(ElementCmd),
+    /// Show story.md, or replace it
+    Story {
+        #[arg(long)]
+        set: Option<String>,
+    },
+    /// Show style.md, or replace it
+    Style {
+        #[arg(long)]
+        set: Option<String>,
+    },
     /// Chapters group shots, numbered 01, 02, ...
     #[command(subcommand)]
     Chapter(ChapterCmd),
@@ -104,6 +115,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<TimelineCmd>,
     },
+    /// Serve the commands as MCP tools over stdio, for an agent to drive
+    Mcp,
     /// Serves the built-in fake plugin over stdio, for tests and dry runs
     #[command(name = "__fake-plugin", hide = true)]
     FakePlugin,
@@ -238,6 +251,22 @@ enum ShotCmd {
         #[arg(long)]
         recipe: Option<String>,
     },
+    /// Change a shot: `shot set 01-010 --prompt ...`
+    Set {
+        shot: ShotRef,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        plot: Option<String>,
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long)]
+        duration: Option<f64>,
+        #[arg(long)]
+        transition: Option<Transition>,
+        #[arg(long)]
+        recipe: Option<String>,
+    },
     /// Add a line of dialogue: `shot line 01-010 paka "..."`
     Line {
         shot: ShotRef,
@@ -272,6 +301,9 @@ fn run(cli: Cli) -> Result<()> {
             let p = Project::init(dir, name.as_deref())?;
             println!("created {} in {}", p.config.name, dir.display());
         }
+
+        Cmd::Story { ref set } => doc(&open()?, "story.md", set.as_deref())?,
+        Cmd::Style { ref set } => doc(&open()?, "style.md", set.as_deref())?,
 
         Cmd::Element(ElementCmd::Add {
             kind,
@@ -384,6 +416,34 @@ fn run(cli: Cli) -> Result<()> {
                 ..Shot::default()
             };
             println!("{}", open()?.add_shot(chapter, after, shot)?);
+        }
+        Cmd::Shot(ShotCmd::Set {
+            shot,
+            ref title,
+            ref plot,
+            ref prompt,
+            duration,
+            transition,
+            ref recipe,
+        }) => {
+            let p = open()?;
+            let mut s = p.shot(shot)?;
+            if let Some(t) = title {
+                s.title = t.clone();
+            }
+            if let Some(t) = plot {
+                s.plot = t.clone();
+            }
+            if let Some(t) = prompt {
+                s.prompt = t.clone();
+            }
+            if let Some(r) = recipe {
+                s.recipe = (!r.is_empty()).then(|| r.clone());
+            }
+            s.duration = duration.or(s.duration);
+            s.transition = transition.unwrap_or(s.transition);
+            p.save_shot(shot, &s)?;
+            println!("{shot} saved");
         }
         Cmd::Shot(ShotCmd::Line {
             shot,
@@ -540,11 +600,32 @@ fn run(cli: Cli) -> Result<()> {
                 }) => timeline::render(&p, output.as_deref(), !no_colormatch, *xfade)?,
             }
         }
+        Cmd::Mcp => mcp::serve(cli.project.clone())?,
         Cmd::FakePlugin => {
             plugins::runtime().block_on(shotline_plugin::serve(
                 shotline_plugin::fake::FakePlugin::default(),
             ))?;
         }
+    }
+    Ok(())
+}
+
+fn doc(p: &Project, name: &str, set: Option<&str>) -> Result<()> {
+    let path = p.root.join(name);
+    match set {
+        Some(text) => {
+            let mut text = text.to_string();
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            std::fs::write(&path, text)?;
+            println!("{name} saved");
+        }
+        None => match std::fs::read_to_string(&path) {
+            Ok(t) => print!("{t}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("{name} is empty"),
+            Err(e) => return Err(e.into()),
+        },
     }
     Ok(())
 }

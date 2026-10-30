@@ -17,8 +17,11 @@ shotline-builtin = { version = "0.1.0", path = "../shotline-builtin" }
 shotline-core = { version = "0.1.0", path = "../shotline-core" }
 shotline-engine = { version = "0.1.0", path = "../shotline-engine" }
 shotline-plugin = { version = "0.1.0", path = "../shotline-plugin" }
-tokio = { version = "1.54.1", features = ["rt", "signal", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1.1.8"
+rmcp = { version = "3.8.0", features = ["server", "transport-io", "macros"] }
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

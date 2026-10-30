@@ -368,6 +368,7 @@ says.
 
 ```
 shotline init <dir>
+shotline story | style [--set text]
 shotline doctor
 shotline plugin ls | doctor <name> | balance [name]
 shotline element add <kind> <name> [--handle h] [--desc ...]
@@ -378,6 +379,7 @@ shotline chapter add <title>
 shotline chapter ls
 shotline shot add <chapter> [--after id] --plot ... --prompt ... [--duration n] [--transition cut|continue]
 shotline shot add ... [--plugin p] [--model m] [--recipe r]
+shotline shot set <shot> [--title] [--plot] [--prompt] [--duration] [--transition] [--recipe]
 shotline shot line <shot> <who> <text>
 shotline shot ls [chapter]
 shotline shot show <id>
@@ -393,13 +395,24 @@ shotline cost [--by chapter|shot|op|plugin|day] [--csv]
 shotline cost verify | rates | reconcile [--plugin p]
 shotline cost adjust <amount> <unit> --note ...
 shotline cost refund <job> <amount> <unit> [--note ...]
-shotline mcp
+shotline mcp [-C dir]
 shotline ui
 ```
 
-The MCP tools mirror these. Anything that spends refuses to run without an explicit confirm flag or
-when it would go over budget. There'll be a short `agent/CO_DIRECTOR.md` describing the workflow for
-the agent: story, elements, anchors, voices, shot breakdown, preview and quote, takes, pick, render.
+The MCP tools mirror these (`shot_add`, `take`, `timeline_render`, ...), over stdio with rmcp. Each
+call runs the shotline binary itself as a child process in the project folder and returns what it
+printed, so tools and commands can't drift apart and nothing reads the MCP stream from stdin. Lines
+go out as progress notifications while a take runs. `cost adjust` and `cost refund` aren't tools:
+corrections to the ledger are for people.
+
+`take` and `run` without `confirm: true` answer no at the prompt, so the agent gets the price and
+balances and nothing is spent. Budgets are checked when money is reserved, before any job starts,
+whether or not it was confirmed. The server starts in `-C dir` or the project around its working
+directory; `init` and `open_project` switch to another. Relative paths are from the project folder.
+
+`agent/CO_DIRECTOR.md` is sent as the server's instructions: the workflow (story, style, elements
+and anchors, voices, shot breakdown, prompt check, quote, take, pick, render) and the rule that
+agreeing to one take isn't agreeing to the next.
 
 ## UI
 
@@ -475,7 +488,7 @@ windows.
 4. fal built in: quote, take, select, errors - done
 5. external plugins: Venice, ElevenLabs (voices, lines), WaveSpeed lip sync; recipes - done
 6. continuity: last frame chaining, colour match, timeline render with audio tracks - done
-7. mcp server and the co-director notes
+7. mcp server and the co-director notes - done
 8. anchor image generation, storyboard frames, upscale/interpolate
 9. egui UI: browse the project, costs, open takes in mpv/ffplay
 10. built-in player over ffmpeg pipes, side by side takes, timeline playback
