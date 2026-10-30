@@ -449,8 +449,11 @@ the timeline and shows costs. Plugin operations show up in it without plugins sh
 egui can't play video on its own. Instead of linking libav, the player runs ffmpeg as a process like
 everything else: `ffmpeg -ss <t> -i take.mp4 -f rawvideo -pix_fmt rgba -s <preview size> -` feeds
 frames into a texture, a second ffmpeg pipes PCM to `cpal`, and the audio clock drives the frames.
-Seeking restarts ffmpeg at the new time. Takes are 5-15s at preview size, so this is cheap. Until the
-player exists, "play" opens the file in mpv or ffplay.
+Seeking restarts ffmpeg at the new time. Takes are 5-15s at preview size, so this is cheap. When
+the sound stops moving (a gap, or the audio is shorter than the picture) the wall clock takes over
+after a quarter second. Two takes can play side by side, the second one silent. The cut plays the
+selected takes back to back as they are; colour matching and music only happen in a render. "Open"
+still hands a take to mpv or ffplay to see it full size.
 
 Anchors and storyboard frames are shrunk to 512px thumbnails when first shown: generated images
 are often 2-4K, past the texture size some GPUs allow. Thai text uses a font from the system
@@ -521,7 +524,7 @@ windows.
 7. mcp server and the co-director notes - done
 8. anchor image generation, storyboard frames, upscale/interpolate - done
 9. egui UI: browse the project, costs, open takes in mpv/ffplay - done
-10. built-in player over ffmpeg pipes, side by side takes, timeline playback
+10. built-in player over ffmpeg pipes, side by side takes, timeline playback - done
 
 ## Not sure yet
 

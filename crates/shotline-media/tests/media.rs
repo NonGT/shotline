@@ -213,3 +213,43 @@ fn renders_clips_and_tracks() {
     .unwrap();
     assert!(!ff.probe(&quiet).unwrap().audio);
 }
+
+/// Drains a pipe as if playback were instantly far ahead.
+fn all_frames(p: &mut shotline_media::play::FramePipe, from: f64) -> Vec<f64> {
+    let mut pts = vec![];
+    let start = std::time::Instant::now();
+    while !p.ended() && start.elapsed().as_secs() < 20 {
+        // One at a time: ask for each frame exactly when it's due.
+        match p.at(pts.last().map_or(from, |l| l + 1.5 / 24.0)) {
+            Some(f) => {
+                assert_eq!(f.rgba.len(), (p.width * p.height * 4) as usize);
+                pts.push(f.pts);
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(2)),
+        }
+    }
+    pts
+}
+
+#[test]
+fn frame_and_sound_pipes() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let c = clip(dir.path(), "a.mp4", RED, true);
+
+    let mut p = ff.frame_pipe(&c, 0.0, 80, 46, 24.0).unwrap();
+    let pts = all_frames(&mut p, 0.0);
+    assert_eq!(pts.len(), 24);
+    assert!(close(pts[23], 23.0 / 24.0));
+
+    // Seeking is a new pipe from the new time.
+    let mut p = ff.frame_pipe(&c, 0.5, 80, 46, 24.0).unwrap();
+    let pts = all_frames(&mut p, 0.5);
+    assert_eq!(pts.len(), 12);
+    assert!(close(pts[0], 0.5));
+
+    let (_pipe, rx) = ff.pcm_pipe(&c, 0.0, 48000, 2).unwrap();
+    let samples: usize = rx.iter().map(|c| c.len()).sum();
+    let secs = samples as f64 / 2.0 / 48000.0;
+    assert!((0.9..1.1).contains(&secs), "{secs}s of sound");
+}

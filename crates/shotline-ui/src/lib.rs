@@ -1,5 +1,8 @@
-//! The desktop app: browse a film's story, elements, shots, takes and costs. It reads and writes
-//! the project folder through shotline-core like the CLI does, so both always agree.
+//! The desktop app: browse a film's story, elements, shots, takes and costs, and play takes and
+//! the cut. It reads and writes the project folder through shotline-core like the CLI does, so
+//! both always agree.
+
+mod player;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,14 +12,18 @@ use eframe::egui::{self, Color32, RichText};
 use shotline_core::ledger::money;
 use shotline_core::ledger::report::{self, By, Row, Summary};
 use shotline_core::{
-    Chapter, Element, JobStatus, Project, Shot, ShotRef, Take, Transition, UserConfig,
+    Chapter, CutShot, Element, JobStatus, Project, Shot, ShotRef, Take, Transition, UserConfig,
 };
+use shotline_media::Ffmpeg;
+
+use player::{Audio, Deck, Player};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Story,
     Elements,
     Shots,
+    Cut,
     Cost,
 }
 
@@ -27,13 +34,19 @@ struct Film {
     style: String,
     elements: Vec<(Element, Vec<PathBuf>)>,
     chapters: Vec<(Chapter, Vec<(ShotRef, Shot)>)>,
+    cut: Vec<CutShot>,
     cost: Option<(Summary, Vec<Row>)>,
 }
 
 pub struct App {
     project: Project,
     user_dir: PathBuf,
-    player: Option<PathBuf>,
+    viewer: Option<PathBuf>,
+    ff: Option<Ffmpeg>,
+    audio: Option<Audio>,
+    /// Opening the sound device is tried once, on first play.
+    audio_tried: bool,
+    deck: Option<Deck>,
     film: Film,
     tab: Tab,
     shot: Option<ShotRef>,
@@ -42,7 +55,7 @@ pub struct App {
     thumbs: Thumbs,
 }
 
-const PLAYERS: [&str; 2] = ["mpv", "ffplay"];
+const VIEWERS: [&str; 2] = ["mpv", "ffplay"];
 
 fn on_path(exe: &str) -> Option<PathBuf> {
     let name = format!("{exe}{}", std::env::consts::EXE_SUFFIX);
@@ -87,7 +100,11 @@ impl App {
         let mut app = App {
             project,
             user_dir,
-            player: PLAYERS.iter().find_map(|p| on_path(p)),
+            viewer: VIEWERS.iter().find_map(|p| on_path(p)),
+            ff: Ffmpeg::find().ok(),
+            audio: None,
+            audio_tried: false,
+            deck: None,
             film: Film::default(),
             tab: Tab::Shots,
             shot: None,
@@ -99,10 +116,20 @@ impl App {
         app
     }
 
-    /// What "Play" runs with the file as its last argument. None shows a hint instead.
-    pub fn with_player(mut self, player: Option<PathBuf>) -> App {
-        self.player = player;
+    /// What "Open" runs with the file as its last argument, to watch a take full size.
+    pub fn with_viewer(mut self, viewer: Option<PathBuf>) -> App {
+        self.viewer = viewer;
         self
+    }
+
+    /// Plays without sound and never touches the sound device, for tests.
+    pub fn silent(mut self) -> App {
+        self.audio_tried = true;
+        self
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.deck.as_ref().is_some_and(Deck::is_playing)
     }
 
     fn reload(&mut self) {
@@ -132,6 +159,7 @@ impl App {
             style: p.style()?,
             elements,
             chapters,
+            cut: p.cut(&p.timeline()?)?,
             cost: self.cost()?,
         };
         self.load_takes()
@@ -173,21 +201,62 @@ impl App {
         }
     }
 
-    fn play(&mut self, file: &Path) {
-        let Some(player) = &self.player else {
-            self.error(format!(
-                "no player found; install mpv or ffplay, or open {} yourself",
-                file.display()
-            ));
+    fn open_file(&mut self, file: &Path) {
+        let Some(viewer) = &self.viewer else {
             return;
         };
-        let mut cmd = Command::new(player);
-        if player.file_stem().is_some_and(|s| s == "ffplay") {
+        let mut cmd = Command::new(viewer);
+        if viewer.file_stem().is_some_and(|s| s == "ffplay") {
             cmd.args(["-autoexit", "-loglevel", "error"]);
         }
         match cmd.arg(file).spawn() {
-            Ok(_) => self.info(format!("playing {}", self.project.rel(file))),
-            Err(e) => self.error(format!("can't run {}: {e}", player.display())),
+            Ok(_) => self.info(format!("opened {}", self.project.rel(file))),
+            Err(e) => self.error(format!("can't run {}: {e}", viewer.display())),
+        }
+    }
+
+    fn player(&mut self, label: &str, files: &[PathBuf]) -> Option<Player> {
+        let Some(ff) = &self.ff else {
+            self.error("can't play without ffmpeg; install it or set SHOTLINE_FFMPEG".into());
+            return None;
+        };
+        if !self.audio_tried {
+            self.audio_tried = true;
+            self.audio = Audio::open();
+        }
+        match Player::new(ff, label, files) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                self.error(format!("can't play {label}: {e}"));
+                None
+            }
+        }
+    }
+
+    fn play(&mut self, label: &str, files: &[PathBuf], looping: bool) {
+        if let Some(d) = &mut self.deck {
+            d.pause(self.audio.as_ref());
+        }
+        self.deck = None;
+        if let Some(p) = self.player(label, files) {
+            self.deck = Some(Deck::new(label, p, looping));
+        }
+    }
+
+    fn compare(&mut self, label: &str, file: PathBuf) {
+        if let Some(p) = self.player(label, &[file])
+            && let Some(d) = &mut self.deck
+        {
+            d.compare(p, self.audio.as_ref());
+        }
+    }
+
+    fn deck(&mut self, ui: &mut egui::Ui) {
+        if let Some(d) = &mut self.deck {
+            if !d.show(ui, self.audio.as_ref()) {
+                self.deck = None;
+            }
+            ui.separator();
         }
     }
 
@@ -206,6 +275,7 @@ impl App {
 
     /// The whole window. Kept apart from eframe so tests can drive it.
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        let tab = self.tab;
         egui::Panel::top("bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(&self.project.config.name);
@@ -214,6 +284,7 @@ impl App {
                     (Tab::Story, "Story"),
                     (Tab::Elements, "Elements"),
                     (Tab::Shots, "Shots"),
+                    (Tab::Cut, "Cut"),
                     (Tab::Cost, "Cost"),
                 ] {
                     ui.selectable_value(&mut self.tab, tab, name);
@@ -236,10 +307,17 @@ impl App {
                 ui.label(RichText::new(msg).color(color));
             });
         }
+        if self.tab != tab
+            && !matches!(self.tab, Tab::Shots | Tab::Cut)
+            && let Some(d) = &mut self.deck
+        {
+            d.pause(self.audio.as_ref());
+        }
         match self.tab {
             Tab::Story => self.story(ui),
             Tab::Elements => self.elements(ui),
             Tab::Shots => self.shots(ui),
+            Tab::Cut => self.cut(ui),
             Tab::Cost => self.costs(ui),
         }
     }
@@ -336,7 +414,10 @@ impl App {
             });
             match found {
                 Some((r, s)) => {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.shot_detail(ui, r, &s));
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.deck(ui);
+                        self.shot_detail(ui, r, &s)
+                    });
                 }
                 None => {
                     ui.weak("pick a shot");
@@ -388,7 +469,16 @@ impl App {
             return;
         }
         let mut play = None;
+        let mut compare = None;
+        let mut open = None;
         let mut select = None;
+        // Comparing makes sense while one take of this shot is up.
+        let single = self
+            .deck
+            .as_ref()
+            .filter(|d| d.players.len() == 1)
+            .map(|d| d.players[0].label.clone())
+            .filter(|l| l.starts_with(&format!("{r}#")));
         egui::Grid::new("takes").striped(true).show(ui, |ui| {
             for t in &self.takes {
                 let selected = s.selected_take.as_deref() == Some(t.id.to_string().as_str());
@@ -419,9 +509,25 @@ impl App {
                         .map(|f| self.project.job_dir(j.id).join(f))
                 }) {
                     Some(file) => {
-                        if ui.button(format!("Play #{}", t.number)).clicked() {
-                            play = Some(file);
-                        }
+                        let label = t.to_string();
+                        ui.horizontal(|ui| {
+                            if ui.button(format!("Play #{}", t.number)).clicked() {
+                                play = Some((label.clone(), file.clone()));
+                            }
+                            if single.as_ref().is_some_and(|l| *l != label)
+                                && ui.button(format!("Compare #{}", t.number)).clicked()
+                            {
+                                compare = Some((label.clone(), file.clone()));
+                            }
+                            if self.viewer.is_some()
+                                && ui
+                                    .button(format!("Open #{}", t.number))
+                                    .on_hover_text("full size in mpv or ffplay")
+                                    .clicked()
+                            {
+                                open = Some(file.clone());
+                            }
+                        });
                         if !selected && ui.button(format!("Select #{}", t.number)).clicked() {
                             select = Some(t.clone());
                         }
@@ -434,12 +540,61 @@ impl App {
                 ui.end_row();
             }
         });
-        if let Some(f) = play {
-            self.play(&f);
+        if let Some((label, f)) = play {
+            self.play(&label, &[f], true);
+        }
+        if let Some((label, f)) = compare {
+            self.compare(&label, f);
+        }
+        if let Some(f) = open {
+            self.open_file(&f);
         }
         if let Some(t) = select {
             self.select(&t);
         }
+    }
+
+    fn cut(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                self.deck(ui);
+                if self.film.cut.is_empty() {
+                    ui.weak("no shots yet");
+                    return;
+                }
+                let files: Vec<PathBuf> = self
+                    .film
+                    .cut
+                    .iter()
+                    .filter_map(|c| c.video.clone())
+                    .collect();
+                let missing = self.film.cut.len() - files.len();
+                ui.horizontal(|ui| {
+                    if !files.is_empty() && ui.button("Play the cut").clicked() {
+                        self.play("the cut", &files, false);
+                    }
+                    if missing > 0 {
+                        ui.weak(format!("{missing} shots have no take yet and are left out"));
+                    }
+                });
+                ui.weak("Takes as they are: colour matching and music only happen in a render.");
+                ui.add_space(6.0);
+                egui::Grid::new("cut").striped(true).show(ui, |ui| {
+                    for c in &self.film.cut {
+                        ui.label(c.shot.to_string());
+                        ui.weak(match c.transition {
+                            Transition::Cut => "cut",
+                            Transition::Continue => "continue",
+                        });
+                        match &c.take {
+                            Some(t) if c.video.is_some() => ui.label(format!("#{}", t.number)),
+                            _ => ui.weak("no take"),
+                        };
+                        ui.end_row();
+                    }
+                });
+            });
+        });
     }
 
     fn costs(&mut self, ui: &mut egui::Ui) {
