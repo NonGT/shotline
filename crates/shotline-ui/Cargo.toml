@@ -1,0 +1,17 @@
+[package]
+name = "shotline-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+eframe = "0.37.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+shotline-core = { version = "0.1.0", path = "../shotline-core" }
+
+[dev-dependencies]
+egui_kittest = "0.37.0"
+jiff = "0.2.38"
+tempfile = "3.27.0"

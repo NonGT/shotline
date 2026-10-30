@@ -21,7 +21,8 @@ about the workflow is in [agent/CO_DIRECTOR.md](agent/CO_DIRECTOR.md).
 Very early. So far you can set up a project, add cast/sets/props with anchor images, break it
 into chapters and shots, preview the exact prompt each shot would send, and install and check
 plugins, quote and generate takes (fal, Venice, ElevenLabs voices, WaveSpeed lip sync) with
-every cost on record, chain continue shots, and render the cut with colour matching and music. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
+every cost on record, chain continue shots, and render the cut with colour matching and music.
+`shotline ui` opens a small desktop app to browse the film, watch and pick takes and see costs. The plan is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ```
 cargo install --path crates/shotline-cli
@@ -31,6 +32,7 @@ shotline element anchor paka --file paka.png   # or --generate
 shotline chapter add "Into the forest"
 shotline shot add 1 --prompt "@paka walks into the trees"
 shotline prompt 01-010
+shotline ui
 ```
 
 Video models, TTS, lip sync, upscalers and anything else are plugins: small programs in any

@@ -128,6 +128,8 @@ enum Cmd {
     },
     /// Serve the commands as MCP tools over stdio, for an agent to drive
     Mcp,
+    /// Open the desktop app on the film
+    Ui { dir: Option<PathBuf> },
     /// Serves the built-in fake plugin over stdio, for tests and dry runs
     #[command(name = "__fake-plugin", hide = true)]
     FakePlugin,
@@ -330,6 +332,16 @@ fn main() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
+}
+
+#[cfg(feature = "ui")]
+fn ui(p: Project) -> Result<()> {
+    shotline_ui::run(p, shotline_core::user_dir())
+}
+
+#[cfg(not(feature = "ui"))]
+fn ui(_: Project) -> Result<()> {
+    bail!("this shotline was built without the ui feature")
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -664,6 +676,13 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Mcp => mcp::serve(cli.project.clone())?,
+        Cmd::Ui { ref dir } => {
+            let p = match dir {
+                Some(d) => Project::discover(d)?,
+                None => open()?,
+            };
+            ui(p)?;
+        }
         Cmd::FakePlugin => {
             plugins::runtime().block_on(shotline_plugin::serve(
                 shotline_plugin::fake::FakePlugin::default(),

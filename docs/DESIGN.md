@@ -422,7 +422,7 @@ shotline cost verify | rates | reconcile [--plugin p]
 shotline cost adjust <amount> <unit> --note ...
 shotline cost refund <job> <amount> <unit> [--note ...]
 shotline mcp [-C dir]
-shotline ui
+shotline ui [dir]
 ```
 
 The MCP tools mirror these (`shot_add`, `take`, `timeline_render`, ...), over stdio with rmcp. Each
@@ -451,6 +451,10 @@ everything else: `ffmpeg -ss <t> -i take.mp4 -f rawvideo -pix_fmt rgba -s <previ
 frames into a texture, a second ffmpeg pipes PCM to `cpal`, and the audio clock drives the frames.
 Seeking restarts ffmpeg at the new time. Takes are 5-15s at preview size, so this is cheap. Until the
 player exists, "play" opens the file in mpv or ffplay.
+
+Anchors and storyboard frames are shrunk to 512px thumbnails when first shown: generated images
+are often 2-4K, past the texture size some GPUs allow. Thai text uses a font from the system
+(Thonburi/Ayuthaya, Noto Sans Thai, Leelawadee or Tahoma), since egui ships none.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first.
@@ -516,7 +520,7 @@ windows.
 6. continuity: last frame chaining, colour match, timeline render with audio tracks - done
 7. mcp server and the co-director notes - done
 8. anchor image generation, storyboard frames, upscale/interpolate - done
-9. egui UI: browse the project, costs, open takes in mpv/ffplay
+9. egui UI: browse the project, costs, open takes in mpv/ffplay - done
 10. built-in player over ffmpeg pipes, side by side takes, timeline playback
 
 ## Not sure yet
