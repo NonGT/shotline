@@ -10,6 +10,7 @@ mod prompt;
 mod shot;
 pub mod slug;
 mod template;
+mod timeline;
 
 pub use element::{Element, Kind, Voice};
 pub use error::{Error, Result};
@@ -21,3 +22,4 @@ pub use prompt::{Built, Reference, StartFrame, build};
 pub use shot::{Chapter, Line, ModelOverride, Shot, ShotRef, Transition};
 pub use shotline_ledger as ledger;
 pub use shotline_protocol as protocol;
+pub use timeline::{ColourMatch, CutShot, MatchAt, TIMELINE_FILE, Timeline, Track};

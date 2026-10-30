@@ -131,6 +131,7 @@ jobs/**/*
 !jobs/*/
 !jobs/*/job.toml
 .shotline/cache/
+renders/
 ";
 
 impl Project {

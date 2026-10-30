@@ -1714,6 +1714,7 @@ dependencies = [
  "shotline-builtin",
  "shotline-core",
  "shotline-engine",
+ "shotline-media",
  "shotline-plugin",
  "tokio",
  "toml",
@@ -1743,6 +1744,7 @@ dependencies = [
  "jiff",
  "serde_json",
  "shotline-core",
+ "shotline-media",
  "shotline-plugin",
  "tempfile",
  "tokio",
@@ -1766,6 +1768,11 @@ dependencies = [
 [[package]]
 name = "shotline-media"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "shotline-plugin"

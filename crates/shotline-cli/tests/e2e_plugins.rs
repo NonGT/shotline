@@ -160,6 +160,9 @@ fn add_take(p: &Project, r: ShotRef, status: JobStatus) {
     job.take = Some(p.new_take_id());
     let mut job = p.create_job(job).unwrap();
     job.status = status;
+    if status == JobStatus::Done {
+        job.outputs = vec!["out.mp4".into()];
+    }
     job.cost = Some(shotline_core::Cost {
         amount: 0.4,
         unit: "USD".into(),

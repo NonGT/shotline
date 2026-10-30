@@ -38,7 +38,8 @@ my-film/
     chapter.toml
     shots/010.toml     ids go 010, 020, ... so there's room to insert
   jobs/<ulid>/         one folder per generation: job.toml + output files
-  timeline.toml        shot order, selected takes, music/sfx tracks
+  timeline.toml        optional: shot order, crossfades, colour match, music/sfx tracks
+  renders/             rendered films
   prompts/             optional overrides for the prompt templates
   models.toml          optional overrides for model capabilities
   .shotline/ledger.jsonl
@@ -253,9 +254,35 @@ For a continue shot, the last frame of the previous shot's selected take is sent
 along with the references. Not every model accepts a start frame and references together (Venice's
 h3 doesn't); `shotline prompt` says so before you pay for anything.
 
-After a take comes back it's colour matched against the previous selected take (port of my
-`colormatch_concat.py` experiment). `shotline timeline render` joins everything with ffmpeg,
-including music and sfx tracks.
+The frame is taken with ffmpeg the first time a take of the continue shot is quoted, and kept as
+`jobs/<job>/last.png` next to the video it came from.
+
+Colour matching happens when the film is rendered, not when a take comes back, since the take
+before can still change. Each clip gets one fixed MKL colour transform (Pitie 2007), from the
+stats of its first frames to those of the previous clip's last frames after their own correction,
+so a whole chain lines up and nothing flickers. By default only continue shots are matched; a cut
+is usually a new look on purpose.
+
+```toml
+# timeline.toml, all optional
+shots = ["01-010", "01-030", "01-020"]   # play order; default is every shot in order
+xfade = 0.0                              # crossfade at joins, seconds
+
+[colormatch]
+at = "continue"     # continue | all | none
+frames = 5          # frames each side of a join used for the stats
+strength = 1.0
+
+[[track]]
+file = "audio/theme.mp3"
+at = 0.0            # seconds into the film
+volume = 0.5
+```
+
+`shotline timeline` lists the cut with the selected takes. `shotline timeline render` decodes each
+clip to the first one's size and frame rate, colour matches, writes lossless intermediates under
+`.shotline/cache/`, then encodes once to H.264/AAC in `renders/` (ignored by git), with each
+clip's own sound kept in sync and the tracks mixed over it.
 
 ## Money
 
@@ -361,7 +388,7 @@ shotline takes <shot>
 shotline select <shot> <take>
 shotline run <op> --plugin p --model m [--prompt ..] [--duration s] [--input name=file]
              [--ref file] [--param k=v] [--yes]          one-off operation outside a shot
-shotline timeline render [--no-colormatch]
+shotline timeline [render [-o file] [--no-colormatch] [--xfade s]]
 shotline cost [--by chapter|shot|op|plugin|day] [--csv]
 shotline cost verify | rates | reconcile [--plugin p]
 shotline cost adjust <amount> <unit> --note ...
@@ -447,7 +474,7 @@ windows.
 3. ledger: reserve/charge, budgets, rates and currencies, `cost`, `verify` - done
 4. fal built in: quote, take, select, errors - done
 5. external plugins: Venice, ElevenLabs (voices, lines), WaveSpeed lip sync; recipes - done
-6. continuity: last frame chaining, colour match, timeline render with audio tracks
+6. continuity: last frame chaining, colour match, timeline render with audio tracks - done
 7. mcp server and the co-director notes
 8. anchor image generation, storyboard frames, upscale/interpolate
 9. egui UI: browse the project, costs, open takes in mpv/ffplay

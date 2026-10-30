@@ -8,6 +8,7 @@ use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voi
 mod cost;
 mod plugins;
 mod shoot;
+mod timeline;
 
 #[derive(Parser)]
 #[command(
@@ -98,6 +99,11 @@ enum Cmd {
         #[arg(long)]
         csv: bool,
     },
+    /// The cut: shots in order with their selected takes
+    Timeline {
+        #[command(subcommand)]
+        cmd: Option<TimelineCmd>,
+    },
     /// Serves the built-in fake plugin over stdio, for tests and dry runs
     #[command(name = "__fake-plugin", hide = true)]
     FakePlugin,
@@ -129,6 +135,22 @@ enum CostCmd {
         unit: String,
         #[arg(long, default_value = "")]
         note: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TimelineCmd {
+    /// Join the selected takes into one video with ffmpeg
+    Render {
+        /// Where to write it (default: renders/<time>.mp4)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Skip colour matching
+        #[arg(long)]
+        no_colormatch: bool,
+        /// Crossfade at each join in seconds, instead of timeline.toml's
+        #[arg(long)]
+        xfade: Option<f64>,
     },
 }
 
@@ -506,6 +528,17 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Plugin(PluginCmd::Doctor { ref name }) => plugins::doctor(&plugins::load(), name)?,
         Cmd::Plugin(PluginCmd::Balance { ref name }) => {
             plugins::balance(&plugins::load(), name.as_deref())?
+        }
+        Cmd::Timeline { ref cmd } => {
+            let p = open()?;
+            match cmd {
+                None => timeline::show(&p)?,
+                Some(TimelineCmd::Render {
+                    output,
+                    no_colormatch,
+                    xfade,
+                }) => timeline::render(&p, output.as_deref(), !no_colormatch, *xfade)?,
+            }
         }
         Cmd::FakePlugin => {
             plugins::runtime().block_on(shotline_plugin::serve(

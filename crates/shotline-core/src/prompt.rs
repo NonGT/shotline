@@ -15,8 +15,11 @@ pub struct Reference {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartFrame {
     pub from: ShotRef,
-    /// Relative to the project root, `/` separated.
+    /// The image sent, relative to the project root, `/` separated. Taken from `video` when it
+    /// isn't there yet.
     pub path: String,
+    /// The selected take of `from`.
+    pub video: String,
 }
 
 /// Everything that would be sent for a shot, worked out without spending anything.
@@ -146,10 +149,17 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
                 match (selected.is_some(), project.selected_take(prev)?) {
                     (_, Some(take)) => {
                         let job = take.output().expect("only done takes get selected");
-                        start_frame = Some(StartFrame {
-                            from: prev,
-                            path: format!("jobs/{}/last.png", job.id),
-                        })
+                        match job.outputs.first() {
+                            Some(file) => {
+                                start_frame = Some(StartFrame {
+                                    from: prev,
+                                    path: format!("jobs/{}/last.png", job.id),
+                                    video: format!("jobs/{}/{file}", job.id),
+                                })
+                            }
+                            None => warnings
+                                .push(format!("{take} made no file, so there's no start frame")),
+                        }
                     }
                     (true, None) => warnings.push(format!(
                         "{prev}'s selected take is gone, so there's no start frame"

@@ -151,11 +151,11 @@ pub async fn plan(
         Some(sf) => {
             let p = project.root.join(&sf.path);
             if !p.is_file() {
-                bail!(
-                    "{r} continues from {}, but {} isn't there yet",
-                    sf.from,
-                    sf.path
-                );
+                let ff = shotline_media::Ffmpeg::find().with_context(|| {
+                    format!("{r} continues from {}, which needs its last frame", sf.from)
+                })?;
+                ff.last_frame(&project.root.join(&sf.video), &p)
+                    .with_context(|| format!("taking the last frame of {}", sf.from))?;
             }
             Some(p)
         }

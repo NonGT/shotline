@@ -31,6 +31,7 @@ Built {
                 shot: 10,
             },
             path: "jobs/01M66411780000000000000001/last.png",
+            video: "jobs/01M66411780000000000000001/out.mp4",
         },
     ),
     params: {},

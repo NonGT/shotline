@@ -244,11 +244,38 @@ async fn continue_needs_the_last_frame() {
     second.transition = Transition::Continue;
     second.selected_take = None;
     let r2 = f.p.add_shot("1", None, second).unwrap();
-    let e = f.plan(r2).await.unwrap_err().to_string();
-    assert!(
-        e.contains("continues from 01-010, but jobs/") && e.ends_with("/last.png isn't there yet"),
-        "{e}"
-    );
+    let Ok(ff) = shotline_media::Ffmpeg::find() else {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    };
+    // The fake plugin's "video" is a line of text.
+    let e = format!("{:#}", f.plan(r2).await.unwrap_err());
+    assert!(e.starts_with("taking the last frame of 01-010"), "{e}");
+
+    let t = f.p.selected_take(R).unwrap().unwrap();
+    let j = t.output().unwrap();
+    let video = f.p.job_dir(j.id).join(&j.outputs[0]);
+    let made = std::process::Command::new(
+        std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
+    )
+    .args([
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=64x36:duration=1",
+    ])
+    .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4"])
+    .arg(&video)
+    .status()
+    .unwrap();
+    assert!(made.success());
+    let plan = f.plan(r2).await.unwrap();
+    let start = plan.steps[0].request.start_frame.clone().unwrap();
+    assert!(start.ends_with("last.png") && start.is_file());
+    assert_eq!(ff.probe(&start).unwrap().width, 64);
 }
 
 /// Paka with a fake voice and one line, and a recipe tts -> video with audio -> lip sync.
