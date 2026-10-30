@@ -5,6 +5,11 @@
 //! written as `"8s"`. Venice won't take a start frame (`image_url`) or end frame together with
 //! reference images. Errors look like `{"error": "...", "details": {"field": {"_errors": [...]}}}`.
 //! `GET /api_keys/rate_limits` has the account's balances: USD, DIEM and bundled credits.
+//!
+//! Images are made right away: `POST /image/generate` answers with base64 images, and requests
+//! with references go to `POST /image/multi-edit` with the model's `-edit` twin, which answers
+//! with the image itself. Prices come from the model lists (`GET /models?type=image` and
+//! `?type=inpaint` for the edit twins).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,8 +27,21 @@ use shotline_plugin::{Error, Plugin, Result};
 pub const KEY_VAR: &str = "VENICE_API_KEY";
 const BASE: &str = "https://api.venice.ai/api/v1";
 
+const IMAGE_ASPECTS: [&str; 8] = ["1:1", "3:2", "16:9", "21:9", "9:16", "2:3", "3:4", "4:5"];
+
+/// Image models that have an `-edit` twin, so they can take references. (id, max references,
+/// resolutions)
+const IMAGES: &[(&str, usize, &[&str])] = &[
+    ("nano-banana-2", 6, &["1K", "2K", "4K"]),
+    ("nano-banana-pro", 6, &["1K", "2K", "4K"]),
+    ("seedream-v5-lite", 6, &[]),
+    ("seedream-v4", 6, &[]),
+    ("qwen-image-2-1-pro", 10, &["1K", "2K"]),
+    ("gpt-image-2", 6, &["1K", "2K", "4K"]),
+];
+
 pub fn models() -> Vec<ModelInfo> {
-    vec![ModelInfo {
+    let mut models = vec![ModelInfo {
         id: "minimax-h3-max-reference-to-video".into(),
         op: Op::VideoGenerate,
         ref_image: Some("<Picture {n}>".into()),
@@ -40,16 +58,31 @@ pub fn models() -> Vec<ModelInfo> {
         start_frame_with_refs: false,
         audio_input: true,
         ..ModelInfo::default()
-    }]
+    }];
+    for (id, max, resolutions) in IMAGES {
+        models.push(ModelInfo {
+            id: id.to_string(),
+            op: Op::ImageGenerate,
+            ref_image: Some("image {n}".into()),
+            max_images: Some(*max),
+            resolutions: resolutions.iter().map(|r| r.to_string()).collect(),
+            aspects: IMAGE_ASPECTS.map(String::from).to_vec(),
+            ..ModelInfo::default()
+        });
+    }
+    models
 }
 
 pub struct Venice {
     key: Option<String>,
     base: String,
     http: reqwest::Client,
-    /// Finished videos, kept from `poll` until `fetch`.
+    /// Finished videos and images, kept from `poll` (or `run`) until `fetch`.
     done: Mutex<HashMap<String, Done>>,
     refs: Mutex<HashMap<String, Vec<usize>>>,
+    /// Model lists for image prices: (`type=image`, `type=inpaint`).
+    prices: tokio::sync::Mutex<Option<(Value, Value)>>,
+    next: Mutex<u64>,
 }
 
 enum Done {
@@ -61,6 +94,7 @@ struct Resp {
     status: u16,
     content_type: String,
     body: Vec<u8>,
+    violation: bool,
 }
 
 impl Resp {
@@ -86,6 +120,8 @@ impl Venice {
             http: reqwest::Client::new(),
             done: Mutex::new(HashMap::new()),
             refs: Mutex::new(HashMap::new()),
+            prices: tokio::sync::Mutex::new(None),
+            next: Mutex::new(0),
         }
     }
 
@@ -107,12 +143,15 @@ impl Venice {
             .await
             .map_err(|e| other(format!("can't reach Venice: {e}")))?;
         let status = r.status().as_u16();
-        let content_type = r
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
+        let header = |k: &str| {
+            r.headers()
+                .get(k)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string()
+        };
+        let content_type = header("content-type");
+        let violation = header("x-venice-is-content-violation") == "true";
         let body = r
             .bytes()
             .await
@@ -122,8 +161,165 @@ impl Venice {
             status,
             content_type,
             body,
+            violation,
         })
     }
+
+    async fn model_list(&self, kind: &str) -> Result<Value> {
+        let r = self
+            .send(self.http.get(format!("{}/models?type={kind}", self.base)))
+            .await?;
+        let v = r.json();
+        if r.status >= 300 {
+            return Err(map_error(r.status, &v, &[]).into());
+        }
+        Ok(v)
+    }
+
+    async fn image_price(&self, req: &Request) -> Result<f64> {
+        let mut cached = self.prices.lock().await;
+        if cached.is_none() {
+            *cached = Some((
+                self.model_list("image").await?,
+                self.model_list("inpaint").await?,
+            ));
+        }
+        let (images, edits) = cached.as_ref().unwrap();
+        let edit = !req.references.is_empty();
+        let (list, id) = if edit {
+            (edits, format!("{}-edit", req.model))
+        } else {
+            (images, req.model.clone())
+        };
+        image_price(list, &id, req.resolution.as_deref(), req.references.len()).ok_or_else(|| {
+            PluginError::new(
+                ErrorKind::Validation,
+                format!("Venice's model list has no price for {id}"),
+            )
+            .field("model")
+            .into()
+        })
+    }
+
+    async fn image(&self, req: &Request) -> Result<String> {
+        let (path, b, refs) = image_body(req)?;
+        let r = self.post(path, &b).await?;
+        if r.status >= 300 {
+            return Err(map_error(r.status, &r.json(), &refs).into());
+        }
+        if r.violation {
+            return Err(PluginError::new(
+                ErrorKind::ContentPolicy,
+                "Venice flagged the image as against its terms",
+            )
+            .into());
+        }
+        let bytes = if r.content_type.starts_with("image/") {
+            r.body
+        } else {
+            let v = r.json();
+            let b64 = v
+                .pointer("/images/0")
+                .and_then(Value::as_str)
+                .ok_or_else(|| other(format!("Venice sent no image: {v}")))?;
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| other(format!("Venice's image isn't base64: {e}")))?
+        };
+        let n = {
+            let mut next = self.next.lock().unwrap();
+            *next += 1;
+            *next
+        };
+        let job = format!("{IMAGE_JOB}{}#{n}", req.model);
+        self.done
+            .lock()
+            .unwrap()
+            .insert(job.clone(), Done::Bytes(bytes));
+        Ok(job)
+    }
+}
+
+/// Image jobs are done by the time `run` returns; their handles start with this.
+const IMAGE_JOB: &str = "image:";
+
+/// USD for one image from a Venice model list entry: per resolution or flat, plus any charge
+/// for input images past the ones included.
+pub fn image_price(list: &Value, id: &str, resolution: Option<&str>, inputs: usize) -> Option<f64> {
+    let m = list
+        .get("data")?
+        .as_array()?
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(id))?;
+    let spec = m.get("model_spec")?;
+    let pricing = spec.get("pricing")?;
+    let usd = |v: &Value| v.get("usd").and_then(Value::as_f64);
+    let res = resolution.or_else(|| {
+        spec.pointer("/constraints/defaultResolution")
+            .and_then(Value::as_str)
+    });
+    let base = res
+        .and_then(|r| pricing.get("resolutions")?.get(r))
+        .and_then(usd)
+        .or_else(|| pricing.get("generation").and_then(usd))
+        .or_else(|| pricing.get("inpaint").and_then(usd))?;
+    let extra = match pricing.get("inputImages") {
+        Some(ii) => {
+            let included = ii.get("included").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let each = ii.get("additional").and_then(usd).unwrap_or(0.0);
+            each * inputs.saturating_sub(included) as f64
+        }
+        None => 0.0,
+    };
+    Some(base + extra)
+}
+
+/// Path and body for an image request.
+pub fn image_body(req: &Request) -> Result<(&'static str, Value, Vec<usize>)> {
+    let mut images = vec![];
+    let mut refs = vec![];
+    for (i, r) in req.references.iter().enumerate() {
+        let f = format!("references[{i}]");
+        if r.kind != MediaKind::Image {
+            return Err(PluginError::new(
+                ErrorKind::Validation,
+                "only images go to an image model",
+            )
+            .field(f)
+            .into());
+        }
+        images.push(data_url(&r.path, &f)?);
+        refs.push(i);
+    }
+    let mut b = Map::new();
+    b.insert(
+        "prompt".into(),
+        json!(req.prompt.clone().unwrap_or_default()),
+    );
+    if let Some(a) = &req.aspect {
+        b.insert("aspect_ratio".into(), json!(a));
+    }
+    if let Some(r) = &req.resolution {
+        b.insert("resolution".into(), json!(r));
+    }
+    let path = if images.is_empty() {
+        b.insert("model".into(), json!(req.model));
+        b.insert("format".into(), json!("png"));
+        if let Some(s) = req.seed {
+            b.insert("seed".into(), json!(s));
+        }
+        "/image/generate"
+    } else {
+        b.insert("modelId".into(), json!(format!("{}-edit", req.model)));
+        b.insert("images".into(), json!(images));
+        b.insert("output_format".into(), json!("png"));
+        "/image/multi-edit"
+    };
+    for (k, v) in &req.params {
+        b.insert(k.clone(), v.clone());
+    }
+    Ok((path, Value::Object(b), refs))
 }
 
 /// Request fields Venice names differently.
@@ -137,6 +333,11 @@ fn field(name: &str, idx: Option<usize>, refs: &[usize]) -> String {
         "end_image_url" => "end_frame".into(),
         "aspect_ratio" => "aspect".into(),
         "audio_url" => "references".into(),
+        "images" => match idx {
+            Some(i) => format!("references[{}]", refs.get(i).copied().unwrap_or(i)),
+            None => "references".into(),
+        },
+        "modelId" => "model".into(),
         "prompt" | "duration" | "resolution" | "model" | "seed" => name.into(),
         other => format!("params.{other}"),
     }
@@ -214,7 +415,10 @@ pub fn body(req: &Request) -> Result<(Map<String, Value>, Vec<usize>)> {
     if req.op != Op::VideoGenerate {
         return Err(PluginError::new(
             ErrorKind::Unsupported,
-            format!("the Venice plugin only does video.generate, not {}", req.op),
+            format!(
+                "the Venice plugin does video.generate and image.generate, not {}",
+                req.op
+            ),
         )
         .field("op")
         .into());
@@ -300,6 +504,14 @@ impl Plugin for Venice {
     }
 
     async fn quote(&self, req: &Request) -> Result<Quote> {
+        if req.op == Op::ImageGenerate {
+            return Ok(Quote {
+                amount: self.image_price(req).await?,
+                unit: "USD".into(),
+                units: Some(1.0),
+                unit_name: Some("image".into()),
+            });
+        }
         let mut b = json!({"model": req.model, "duration": duration(req)});
         if let Some(r) = &req.resolution {
             b["resolution"] = json!(r);
@@ -327,6 +539,9 @@ impl Plugin for Venice {
     }
 
     async fn run(&self, req: &Request, _output_dir: &Path) -> Result<String> {
+        if req.op == Op::ImageGenerate {
+            return self.image(req).await;
+        }
         let (b, refs) = body(req)?;
         let r = self.post("/video/queue", &Value::Object(b)).await?;
         let v = r.json();
@@ -346,6 +561,9 @@ impl Plugin for Venice {
         let (model, id) = split(job)?;
         if self.done.lock().unwrap().contains_key(job) {
             return Ok(status(State::Done));
+        }
+        if job.starts_with(IMAGE_JOB) {
+            return Err(PluginError::new(ErrorKind::NotFound, format!("{job} is gone")).into());
         }
         let r = self
             .post("/video/retrieve", &json!({"model": model, "queue_id": id}))
@@ -435,13 +653,18 @@ impl Plugin for Venice {
                 .map_err(|e| other(format!("download failed: {e}")))?
                 .to_vec(),
         };
+        let (file, kind) = if job.starts_with(IMAGE_JOB) {
+            ("out.png", MediaKind::Image)
+        } else {
+            ("out.mp4", MediaKind::Video)
+        };
         let io = |e: std::io::Error| other(e.to_string());
         std::fs::create_dir_all(output_dir).map_err(io)?;
-        std::fs::write(output_dir.join("out.mp4"), bytes).map_err(io)?;
+        std::fs::write(output_dir.join(file), bytes).map_err(io)?;
         Ok(Outputs {
             outputs: vec![Output {
-                file: "out.mp4".into(),
-                kind: MediaKind::Video,
+                file: file.into(),
+                kind,
             }],
             data: None,
         })

@@ -195,6 +195,35 @@ pub struct Anchor {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct MakeAnchor {
+    handle: String,
+    /// Added to the element's description, e.g. "side view, full body"
+    prompt: Option<String>,
+    /// Image plugin and model instead of [image] in shotline.toml
+    plugin: Option<String>,
+    model: Option<String>,
+    /// Spend the money. Only after the user agreed to the price.
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct Frame {
+    /// e.g. 01-010
+    shot: String,
+    /// Use this image (relative to the project folder) instead of making one
+    file: Option<String>,
+    /// Remove the shot's frame
+    #[serde(default)]
+    clear: bool,
+    plugin: Option<String>,
+    model: Option<String>,
+    /// Spend the money. Only after the user agreed to the price.
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct Voice {
     handle: String,
     plugin: String,
@@ -432,6 +461,44 @@ impl Server {
             &ctx,
         )
         .await
+    }
+
+    /// Make a new anchor image of an element with the image model, from its description and the
+    /// anchors it already has. SPENDS MONEY. Without confirm it only shows the price.
+    #[tool]
+    async fn element_anchor_generate(
+        &self,
+        Parameters(p): Parameters<MakeAnchor>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Reply {
+        let mut args = a(["element", "anchor", &p.handle, "--generate"]);
+        opt(&mut args, "--prompt", p.prompt);
+        opt(&mut args, "--plugin", p.plugin);
+        opt(&mut args, "--model", p.model);
+        self.spend(args, p.confirm, &ctx).await
+    }
+
+    /// Give a shot a storyboard frame for its video to start on: made by the image model (SPENDS
+    /// MONEY; without confirm it only shows the price), or from a file, or cleared. Continue shots
+    /// start on the shot before instead.
+    #[tool]
+    async fn frame(
+        &self,
+        Parameters(p): Parameters<Frame>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Reply {
+        let mut args = a(["frame", &p.shot]);
+        if p.clear {
+            args.push("--clear".into());
+            return self.cli(args, None, &ctx).await;
+        }
+        if let Some(f) = p.file {
+            args.extend(["--file".into(), f]);
+            return self.cli(args, None, &ctx).await;
+        }
+        opt(&mut args, "--plugin", p.plugin);
+        opt(&mut args, "--model", p.model);
+        self.spend(args, p.confirm, &ctx).await
     }
 
     /// Give a cast member a voice for their lines.

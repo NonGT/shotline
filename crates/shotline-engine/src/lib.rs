@@ -96,7 +96,7 @@ pub fn explain(e: &PluginError, built: &Built) -> String {
         }
         match f {
             "start_frame" => match &built.start_frame {
-                Some(sf) => format!("the start frame {} from {}", sf.path, sf.from),
+                Some(sf) => format!("the start frame {} from {}", sf.path, sf.source()),
                 None => "the start frame".into(),
             },
             "prompt" => format!("the prompt of {}", built.shot),
@@ -151,11 +151,15 @@ pub async fn plan(
         Some(sf) => {
             let p = project.root.join(&sf.path);
             if !p.is_file() {
+                let Some(video) = &sf.video else {
+                    bail!("{r}'s storyboard frame {} isn't there", sf.path);
+                };
+                let from = sf.source();
                 let ff = shotline_media::Ffmpeg::find().with_context(|| {
-                    format!("{r} continues from {}, which needs its last frame", sf.from)
+                    format!("{r} continues from {from}, which needs its last frame")
                 })?;
-                ff.last_frame(&project.root.join(&sf.video), &p)
-                    .with_context(|| format!("taking the last frame of {}", sf.from))?;
+                ff.last_frame(&project.root.join(video), &p)
+                    .with_context(|| format!("taking the last frame of {from}"))?;
             }
             Some(p)
         }
@@ -544,6 +548,7 @@ impl Run<'_> {
         plugin: &dyn Plugin,
         job: Job,
         request: &Request,
+        free: bool,
         explain: &dyn Fn(PluginErr) -> String,
         on_event: &mut dyn FnMut(Event),
     ) -> Result<(Job, Option<String>)> {
@@ -558,7 +563,8 @@ impl Run<'_> {
         };
 
         let started = project.clock.now();
-        let before = if alone(books, &ctx, None) {
+        // A free job can't move the balance, so there's nothing to measure.
+        let before = if !free && alone(books, &ctx, None) {
             plugin.balance().await.ok().map(|b| b.balances)
         } else {
             None
@@ -810,7 +816,10 @@ pub async fn take(
                 job.params = toml::Table::try_from(&req.params).unwrap_or_default();
                 let plugin = plugins.plugin(&sp.plugin)?;
                 let explain = |e: PluginErr| plugin_error(e, sp, &plan.built).to_string();
-                let (job, err) = run.job(plugin, job, &req, &explain, &mut on_event).await?;
+                let free = sp.quote.amount == 0.0;
+                let (job, err) = run
+                    .job(plugin, job, &req, free, &explain, &mut on_event)
+                    .await?;
                 if let Some(e) = err {
                     // Nothing after this runs; give back what it held.
                     let now = project.clock.now();
@@ -858,18 +867,31 @@ fn outcome(
 
 /// Runs one operation outside any shot, e.g. `shotline run video.upscale`. Reserves and books
 /// like a take.
+/// A job outside any take, already quoted.
+pub struct Once<'a> {
+    pub request: &'a Request,
+    pub quote: &'a Quote,
+    /// The shot it's for, like a storyboard frame; none for one-off runs.
+    pub shot: Option<ShotRef>,
+}
+
 pub async fn run_once(
     project: &Project,
     books: &Books,
     plugin: (&str, &dyn Plugin),
-    request: &Request,
-    quote: &Quote,
+    once: Once<'_>,
     opts: &Options,
     mut on_event: impl FnMut(Event),
 ) -> Result<(Job, Option<String>)> {
     let (name, plugin) = plugin;
+    let Once {
+        request,
+        quote,
+        shot,
+    } = once;
     let mut job = Job::new(request.op.clone(), name, &request.model);
     job.id = project.clock.ulid();
+    job.shot = shot;
     job.inputs = request
         .inputs
         .values()
@@ -894,7 +916,15 @@ pub async fn run_once(
         books,
         opts,
     };
-    run.job(plugin, job, request, &explain, &mut on_event).await
+    run.job(
+        plugin,
+        job,
+        request,
+        quote.amount == 0.0,
+        &explain,
+        &mut on_event,
+    )
+    .await
 }
 
 /// "0.4 USD" or "30 fake-credit (0.3 USD)", saying so when the unit's price isn't the

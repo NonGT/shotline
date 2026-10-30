@@ -257,3 +257,43 @@ fn opens_an_existing_film() {
     m.ok("open_project", json!({"dir": tmp.path().join("a")}));
     assert_eq!(m.ok("chapter_ls", json!({})), "01  In A");
 }
+
+#[test]
+fn images_ask_first() {
+    let tmp = TempDir::new().unwrap();
+    fake_plugin(&tmp);
+    let mut m = Mcp::start(&tmp, tmp.path());
+    m.ok("init", json!({"dir": "film"}));
+    tmp.child("film/shotline.toml")
+        .write_str(
+            "name = \"Film\"\nplugin = \"fake\"\nmodel = \"fake/video\"\nduration = 4\n\
+             [image]\nplugin = \"fake\"\nmodel = \"fake/image\"\n",
+        )
+        .unwrap();
+    m.ok(
+        "element_add",
+        json!({"kind": "cast", "name": "Paka", "description": "tall"}),
+    );
+    let text = m.ok("element_anchor_generate", json!({"handle": "paka"}));
+    assert!(
+        text.contains("anchor for @paka · fake fake/image · 0.04 USD"),
+        "{text}"
+    );
+    assert!(text.contains("Nothing was spent"), "{text}");
+    assert!(ledger(&tmp).is_empty());
+    let text = m.ok(
+        "element_anchor_generate",
+        json!({"handle": "paka", "confirm": true}),
+    );
+    assert!(text.contains("elements/cast/paka/01.png"), "{text}");
+
+    m.ok("chapter_add", json!({"title": "One"}));
+    m.ok("shot_add", json!({"chapter": "1", "prompt": "@paka walks"}));
+    let text = m.ok("frame", json!({"shot": "01-010", "confirm": true}));
+    assert!(text.contains("chapters/01-one/shots/010.png"), "{text}");
+    assert_eq!(ledger(&tmp), ["reserve", "charge", "reserve", "charge"]);
+    assert_eq!(
+        m.ok("frame", json!({"shot": "01-010", "clear": true})),
+        "01-010 has no storyboard frame now"
+    );
+}

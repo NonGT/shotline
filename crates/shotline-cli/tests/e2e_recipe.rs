@@ -258,3 +258,67 @@ fn run_one_operation() {
             "spent    0.3 USD  (in the cut 0, thrown away 0, other 0.3)",
         ));
 }
+
+#[test]
+fn upscale_and_interpolate_steps() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    let cfg = tmp.child("film/shotline.toml");
+    let text = std::fs::read_to_string(cfg.path()).unwrap();
+    cfg.write_str(&format!(
+        "{text}\n[rates]\nfake-second = \"0.01 USD\"\n\n\
+         [[recipe.polished]]\nop = \"video.generate\"\n\n\
+         [[recipe.polished]]\nop = \"video.interpolate\"\nplugin = \"fake\"\nmodel = \"fake/smooth\"\n\n\
+         [[recipe.polished]]\nop = \"video.upscale\"\nplugin = \"fake\"\nmodel = \"fake/metered\"\n"
+    ))
+    .unwrap();
+    shotline(&tmp)
+        .args([
+            "shot",
+            "add",
+            "1",
+            "--prompt",
+            "@paka waves",
+            "--recipe",
+            "polished",
+        ])
+        .assert()
+        .success();
+
+    // 4s * 0.1 + free + 4 fake-seconds at 0.01
+    shotline(&tmp)
+        .args(["quote", "01-020"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::starts_with("01-020  4s  0.44 USD\n")
+                .and(predicate::str::contains(
+                    "1  video.interpolate  fake fake/smooth  0 USD",
+                ))
+                .and(predicate::str::contains(
+                    "2  video.upscale      fake fake/metered",
+                )),
+        );
+    shotline(&tmp)
+        .args(["take", "01-020", "--yes"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("step 3/3: video.upscale · fake fake/metered").and(
+                predicate::str::is_match(
+                    r"01-020#1 done · 0.4 USD \+ 4 fake-second · jobs/\w{26}/out.mp4",
+                )
+                .unwrap(),
+            ),
+        );
+
+    // A different upscale later only pays for that step.
+    shotline(&tmp)
+        .args(["take", "01-020", "--from-step", "2", "--yes"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("step 2/3: video.interpolate · fake fake/smooth (reused)")
+                .and(predicate::str::contains("01-020#2 done · 4 fake-second")),
+        );
+}

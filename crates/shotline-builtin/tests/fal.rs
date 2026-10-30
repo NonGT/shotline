@@ -3,7 +3,7 @@ use shotline_builtin::fal::{self, Fal, RefMap};
 use shotline_plugin::conformance::{self, Options};
 use shotline_plugin::protocol::{ErrorKind, MediaKind, Op, Reference, Request, State};
 use shotline_plugin::{Error, Plugin};
-use wiremock::matchers::{body_partial_json, header, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const H3: &str = "minimax/h3-max/reference-to-video";
@@ -179,6 +179,34 @@ async fn mock_fal() -> MockServer {
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"mp4 bytes".to_vec()))
         .mount(&s)
         .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/fal-ai/nano-banana(-pro)?(/edit)?$"))
+        .and(body_partial_json(
+            json!({"num_images": 1, "output_format": "png"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"request_id": "img-1"})))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/fal-ai/nano-banana(-pro)?/requests/img-1/status$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "COMPLETED"})))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/fal-ai/nano-banana(-pro)?/requests/img-1$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "images": [{"url": format!("{}/files/i.png", s.uri()), "content_type": "image/png"}],
+            "description": ""
+        })))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/files/i.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"png bytes".to_vec()))
+        .mount(&s)
+        .await;
     Mock::given(method("PUT"))
         .and(path("/minimax/h3-max/requests/req-1/cancel"))
         .respond_with(
@@ -223,6 +251,54 @@ async fn quote_run_poll_fetch() {
     );
     assert_eq!(out.data.unwrap()["seed"], 7);
     fal.cancel(&job).await.unwrap();
+}
+
+#[tokio::test]
+async fn images_with_references_go_to_edit() {
+    let s = mock_fal().await;
+    let fal = fal_at(&s);
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = Request {
+        op: Op::ImageGenerate,
+        model: "fal-ai/nano-banana".into(),
+        prompt: Some("image 1 in a forest".into()),
+        aspect: Some("9:16".into()),
+        ..Request::default()
+    };
+    assert_eq!(fal::endpoint(&req), "fal-ai/nano-banana");
+    let anchor = dir.path().join("a.png");
+    std::fs::write(&anchor, b"png").unwrap();
+    req.references.push(Reference {
+        kind: MediaKind::Image,
+        path: anchor,
+    });
+    assert_eq!(fal::endpoint(&req), "fal-ai/nano-banana/edit");
+    let (body, _) = fal::input(&req).unwrap();
+    assert_eq!(body["aspect_ratio"], "9:16");
+    assert_eq!(body["image_urls"].as_array().unwrap().len(), 1);
+    assert!(!body.contains_key("prompt_expansion_mode"));
+
+    let q = fal.quote(&req).await.unwrap();
+    assert_eq!(
+        (q.units, q.unit_name.as_deref()),
+        (Some(1.0), Some("image"))
+    );
+    let job = fal.run(&req, dir.path()).await.unwrap();
+    assert_eq!(job, "fal-ai/nano-banana/edit#img-1");
+    assert_eq!(fal.poll(&job).await.unwrap().state, State::Done);
+    let out = fal.fetch(&job, &dir.path().join("out")).await.unwrap();
+    assert_eq!(out.outputs[0].file, "out.png");
+    assert_eq!(out.outputs[0].kind, MediaKind::Image);
+    assert_eq!(
+        std::fs::read(dir.path().join("out/out.png")).unwrap(),
+        b"png bytes"
+    );
+
+    req.references[0].kind = MediaKind::Audio;
+    match fal::input(&req) {
+        Err(Error::Plugin(e)) => assert_eq!(e.field.as_deref(), Some("references[0]")),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]

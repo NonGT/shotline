@@ -4,6 +4,9 @@
 //! in `{"input": ...}` like the JS SDK makes fal fail with 422 after queueing). Status and result
 //! live under `{queue}/{owner}/{app}/requests/{id}`. Prices come from the pricing estimate
 //! endpoint, which quotes the 480P rate; other resolutions are multiples of it.
+//!
+//! Image models (nano-banana) have a separate `<model>/edit` endpoint that takes `image_urls`;
+//! requests with references go there.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,8 +31,20 @@ const RESOLUTION_PRICE: &[(&str, &[(&str, f64)])] = &[(
     &[("480P", 1.0), ("768P", 1.6), ("1080P", 3.2)],
 )];
 
+const IMAGE_ASPECTS: [&str; 10] = [
+    "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16",
+];
+
 pub fn models() -> Vec<ModelInfo> {
-    vec![ModelInfo {
+    let image = |id: &str, resolutions: &[&str]| ModelInfo {
+        id: id.into(),
+        op: Op::ImageGenerate,
+        ref_image: Some("image {n}".into()),
+        resolutions: resolutions.iter().map(|r| r.to_string()).collect(),
+        aspects: IMAGE_ASPECTS.map(String::from).to_vec(),
+        ..ModelInfo::default()
+    };
+    let mut models = vec![ModelInfo {
         id: "minimax/h3-max/reference-to-video".into(),
         op: Op::VideoGenerate,
         ref_image: Some("Image {n}".into()),
@@ -45,7 +60,26 @@ pub fn models() -> Vec<ModelInfo> {
         start_frame_with_refs: true,
         audio_input: true,
         ..ModelInfo::default()
-    }]
+    }];
+    // fal prices pro per image without saying whether 2K or 4K cost more, so only 1K for now.
+    models.push(image("fal-ai/nano-banana", &[]));
+    models.push(image("fal-ai/nano-banana-pro", &["1K"]));
+    models
+}
+
+fn is_image(model: &str) -> bool {
+    models()
+        .iter()
+        .any(|m| m.id == model && m.op == Op::ImageGenerate)
+}
+
+/// Where a request goes: image requests with references go to the model's edit endpoint.
+pub fn endpoint(req: &Request) -> String {
+    if req.op == Op::ImageGenerate && !req.references.is_empty() {
+        format!("{}/edit", req.model)
+    } else {
+        req.model.clone()
+    }
 }
 
 pub struct Fal {
@@ -132,11 +166,14 @@ fn data_url(path: &Path) -> Result<String> {
 
 /// The JSON fal gets for a request, and where each list item came from.
 pub fn input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {
+    if req.op == Op::ImageGenerate {
+        return image_input(req);
+    }
     if req.op != Op::VideoGenerate {
         return Err(PluginError::new(
             ErrorKind::Unsupported,
             format!(
-                "the built-in fal plugin only does video.generate, not {}",
+                "the built-in fal plugin does video.generate and image.generate, not {}",
                 req.op
             ),
         )
@@ -202,6 +239,45 @@ pub fn input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {
     Ok((m, refs))
 }
 
+fn image_input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {
+    let mut m = Map::new();
+    let mut refs = RefMap::default();
+    if let Some(p) = &req.prompt {
+        m.insert("prompt".into(), json!(p));
+    }
+    if let Some(a) = &req.aspect {
+        m.insert("aspect_ratio".into(), json!(a));
+    }
+    if let Some(r) = &req.resolution {
+        m.insert("resolution".into(), json!(r));
+    }
+    if let Some(s) = req.seed {
+        m.insert("seed".into(), json!(s));
+    }
+    let mut images = vec![];
+    for (i, r) in req.references.iter().enumerate() {
+        if r.kind != MediaKind::Image {
+            return Err(PluginError::new(
+                ErrorKind::Validation,
+                "only images go to an image model",
+            )
+            .field(format!("references[{i}]"))
+            .into());
+        }
+        images.push(data_url(&r.path)?);
+        refs.images.push(i);
+    }
+    if !images.is_empty() {
+        m.insert("image_urls".into(), json!(images));
+    }
+    m.insert("num_images".into(), json!(1));
+    m.insert("output_format".into(), json!("png"));
+    for (k, v) in &req.params {
+        m.insert(k.clone(), v.clone());
+    }
+    Ok((m, refs))
+}
+
 /// fal's field names back to request fields.
 fn field(loc: &[Value], refs: &RefMap) -> Option<String> {
     let loc: Vec<&Value> = loc.iter().filter(|v| v.as_str() != Some("body")).collect();
@@ -219,7 +295,7 @@ fn field(loc: &[Value], refs: &RefMap) -> Option<String> {
         "aspect_ratio" => Some("aspect".into()),
         "image_url" => Some("start_frame".into()),
         "end_image_url" => Some("end_frame".into()),
-        "reference_image_urls" => list(&refs.images),
+        "reference_image_urls" | "image_urls" => list(&refs.images),
         "reference_audio_urls" => list(&refs.audio),
         "reference_video_urls" => list(&refs.video),
         other => Some(format!("params.{other}")),
@@ -317,10 +393,15 @@ impl Plugin for Fal {
     }
 
     async fn quote(&self, req: &Request) -> Result<Quote> {
-        let secs = req.duration.unwrap_or(5.0);
+        let image = is_image(&req.model);
+        let units = if image {
+            1.0
+        } else {
+            req.duration.unwrap_or(5.0)
+        };
         let body = json!({
             "estimate_type": "unit_price",
-            "endpoints": {req.model.clone(): {"unit_quantity": secs}},
+            "endpoints": {endpoint(req): {"unit_quantity": units}},
         });
         let r = self
             .send(
@@ -356,8 +437,8 @@ impl Plugin for Fal {
         Ok(Quote {
             amount: base * price_multiple(&req.model, req.resolution.as_deref()),
             unit: currency,
-            units: Some(secs),
-            unit_name: Some("s".into()),
+            units: Some(units),
+            unit_name: Some(if image { "image" } else { "s" }.into()),
         })
     }
 
@@ -366,7 +447,7 @@ impl Plugin for Fal {
         let r = self
             .send(
                 self.http
-                    .post(format!("{}/{}", self.queue, req.model))
+                    .post(format!("{}/{}", self.queue, endpoint(req)))
                     .json(&Value::Object(body)),
                 &refs,
             )
@@ -376,7 +457,7 @@ impl Plugin for Fal {
                 PluginError::new(ErrorKind::Other, format!("fal queued nothing: {r}")).into(),
             );
         };
-        let job = format!("{}#{id}", req.model);
+        let job = format!("{}#{id}", endpoint(req));
         let mut saved = Map::new();
         saved.insert("images".into(), json!(refs.images));
         saved.insert("audio".into(), json!(refs.audio));
@@ -441,13 +522,12 @@ impl Plugin for Fal {
         for (key, kind, file) in [
             ("video", MediaKind::Video, "out.mp4"),
             ("image", MediaKind::Image, "out.png"),
+            ("images", MediaKind::Image, "out.png"),
             ("audio", MediaKind::Audio, "out.mp3"),
         ] {
-            let Some(src) = body
-                .get(key)
-                .and_then(|v| v.get("url"))
-                .and_then(Value::as_str)
-            else {
+            // Image models answer with a list; one image is asked for.
+            let v = body.get(key).map(|v| v.get(0).unwrap_or(v));
+            let Some(src) = v.and_then(|v| v.get("url")).and_then(Value::as_str) else {
                 continue;
             };
             let bytes = self
@@ -476,7 +556,7 @@ impl Plugin for Fal {
             .into());
         }
         let mut data = body.clone();
-        for k in ["video", "image", "audio"] {
+        for k in ["video", "image", "images", "audio"] {
             data.as_object_mut().map(|m| m.remove(k));
         }
         Ok(Outputs {

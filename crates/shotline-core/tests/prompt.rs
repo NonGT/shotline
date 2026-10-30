@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use shotline_core::protocol::Op;
 use shotline_core::{
-    Built, Catalog, Job, JobStatus, Kind, ModelOverride, Project, Shot, ShotRef, TestClock,
-    Transition,
+    Built, BuiltImage, Catalog, ImageFor, Job, JobStatus, Kind, ModelOverride, Project, Shot,
+    ShotRef, TestClock, Transition,
 };
 use tempfile::TempDir;
 
@@ -140,7 +140,10 @@ fn project_templates_and_layer_switches() {
     let mut p = p;
     p.config.prompt.style = false;
     p.config.prompt.identity = false;
-    assert_eq!(build(&p, r).unwrap().text, "Image 1 and Image 2 waits.");
+    assert_eq!(
+        build(&p, r).unwrap().text,
+        "Paka (shown in Image 1 and Image 2) waits."
+    );
 }
 
 #[test]
@@ -184,4 +187,99 @@ fn unknown_model() {
     });
     let e = build(&p, r).unwrap_err().to_string();
     assert!(e.contains("from plugin nobody"), "{e}");
+}
+
+fn image(p: &Project, what: ImageFor) -> shotline_core::Result<BuiltImage> {
+    shotline_core::build_image(p, &p.catalog(Catalog::builtin())?, &what, None, None)
+}
+
+#[test]
+fn anchor_prompt_keeps_the_look() {
+    let (_dir, p) = film();
+    p.add_element(Kind::Cast, "Mali", None, "girl, 8, red raincoat")
+        .unwrap();
+    let b = image(
+        &p,
+        ImageFor::Anchor {
+            handle: "mali".into(),
+            prompt: "side view".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (b.plugin.as_str(), b.model.as_str()),
+        ("fal", "fal-ai/nano-banana")
+    );
+    assert!(b.references.is_empty());
+    assert_eq!(
+        b.text,
+        "A reference image of Mali for a film: plain background, soft even light, fully in view. \
+         girl, 8, red raincoat side view\n\nStyle: Muted greens, 35mm, soft overcast light."
+    );
+
+    // With anchors they go along, so the new one matches them.
+    let b = image(
+        &p,
+        ImageFor::Anchor {
+            handle: "paka".into(),
+            prompt: "next to @kan".into(),
+        },
+    )
+    .unwrap();
+    let labels: Vec<_> = b
+        .references
+        .iter()
+        .map(|r| (r.label.as_str(), r.handle.as_str()))
+        .collect();
+    assert_eq!(
+        labels,
+        [("image 1", "kan"), ("image 2", "paka"), ("image 3", "paka")]
+    );
+    assert!(b.text.contains("next to image 1"), "{}", b.text);
+    assert!(b.text.contains("Keep each character's face"), "{}", b.text);
+}
+
+#[test]
+fn storyboard_frame_is_the_start_frame() {
+    let (dir, p) = film();
+    let r = add(&p, "@paka walks into the trees", |_| {});
+    let b = image(&p, ImageFor::Frame(r)).unwrap();
+    assert!(b.text.starts_with("A single still frame"), "{}", b.text);
+    assert!(
+        b.text.contains("Paka (shown in image 1 and image 2) walks"),
+        "{}",
+        b.text
+    );
+    assert_eq!(b.aspect, "9:16");
+
+    let mut shot = p.shot(r).unwrap();
+    shot.frame = Some("chapters/01-into-the-forest/shots/010.png".into());
+    p.save_shot(r, &shot).unwrap();
+    fs::write(dir.path().join(shot.frame.as_ref().unwrap()), b"png").unwrap();
+    let built = build(&p, r).unwrap();
+    let sf = built.start_frame.unwrap();
+    assert_eq!((sf.from, sf.video), (None, None));
+    assert_eq!(sf.path, "chapters/01-into-the-forest/shots/010.png");
+    assert!(
+        built
+            .text
+            .ends_with("The video starts exactly on the given start frame.")
+    );
+
+    // A continue shot starts on the shot before, not on its own frame.
+    finished_take(&p, r);
+    let takes = p.takes(r).unwrap();
+    p.select_take(r, &takes[0].number.to_string()).unwrap();
+    let next = add(&p, "@paka keeps going", |s| {
+        s.transition = Transition::Continue;
+        s.frame = Some("x.png".into());
+    });
+    let built = build(&p, next).unwrap();
+    assert_eq!(built.start_frame.unwrap().from, Some(r));
+    assert!(
+        built
+            .warnings
+            .iter()
+            .any(|w| w.contains("storyboard frame isn't used"))
+    );
 }

@@ -75,6 +75,10 @@ pub struct Shot {
     pub lines: Vec<Line>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelOverride>,
+    /// Storyboard frame the video starts on, relative to the project root. Not used by
+    /// continue shots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
 }
 
 /// Something a cast member says in the shot.

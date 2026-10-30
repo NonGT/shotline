@@ -27,7 +27,7 @@ every cost on record, chain continue shots, and render the cut with colour match
 cargo install --path crates/shotline-cli
 shotline init my-film && cd my-film
 shotline element add cast "Paka" --desc "team lead, 30s"
-shotline element anchor paka --file paka.png
+shotline element anchor paka --file paka.png   # or --generate
 shotline chapter add "Into the forest"
 shotline shot add 1 --prompt "@paka walks into the trees"
 shotline prompt 01-010
@@ -39,7 +39,8 @@ and recorded in an append-only ledger per film.
 
 The plugins in `plugins/` install with `cargo install --path plugins/venice` (and so on) and are
 found on PATH. `shotline plugin ls` shows what's there and `shotline plugin doctor <name>` checks
-one without spending anything.
+one without spending anything. `plugins/local` upscales and interpolates for free with ffmpeg (and
+RIFE if you have `rife-ncnn-vulkan`), for use in recipes.
 
 Needs ffmpeg. API keys go in your environment or `~/.config/shotline/.env`.
 

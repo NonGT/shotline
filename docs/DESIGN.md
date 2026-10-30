@@ -63,6 +63,7 @@ transition = "continue"    # or "cut"
 recipe = "talking"         # optional, project default otherwise
 elements = ["paka", "kan", "mali", "deep-forest"]
 selected_take = "01JBX9Q3T7K2M8V5N4R6P1W0YZ"
+frame = "chapters/01-forest/shots/010.png"   # optional storyboard frame, cut shots only
 
 [[lines]]
 who = "kan"
@@ -78,6 +79,10 @@ prompt_expansion_mode = "disabled"
 ```
 
 `elements` gets filled from the @handles in the prompt but can be edited by hand.
+
+`frame` is a still of the shot's first frame, made with `shotline frame` or given as a file. A cut
+shot starts on it, which is a cheap way to agree on framing before paying for video. Continue shots
+ignore it, they start on the previous take's last frame.
 
 A cast member can have a voice:
 
@@ -97,15 +102,29 @@ The prompt that actually gets sent is put together from a few parts:
 
 1. the shot prompt
 2. @handles swapped for whatever the model expects (`Image 1` on fal, `<Picture 1>` on Venice),
-   with the anchor images attached in the same order
+   with the anchor images attached in the same order. An element with several anchors becomes
+   "Paka (shown in Image 1 and Image 2)"; "Image 1 and Image 2 walks" gets you two people
 3. style.md
 4. a short identity note (keep faces/outfits from the references)
-5. for continue shots, a note that it starts on the given frame
+5. for continue shots and storyboard frames, a note that it starts on the given frame
 6. per-model tweaks
 
 Each part can be turned off in shotline.toml. The templates for 3-6 are plain files in `prompts/`
 so tuning them doesn't need a rebuild. `shotline prompt <shot>` prints the result without
 spending anything.
+
+Images use the same parts with their own templates: `anchor.md` for an element's reference image
+(plain background, even light, the element's description) and `storyboard.md` for a shot's first
+frame. Which plugin and model make them is set in shotline.toml:
+
+```toml
+[image]
+plugin = "fal"                 # or "venice"
+model = "fal-ai/nano-banana"
+aspect = "9:16"                # defaults to the project's
+```
+
+With references attached, fal goes to the model's `/edit` endpoint and Venice to `multi-edit`.
 
 ## Operations
 
@@ -190,6 +209,9 @@ WaveSpeed (`sync/lipsync-3` for lip sync), installed with `cargo install --path 
 ElevenLabs quotes in `elevenlabs-credit` (one per character) and works out what a credit costs
 from the subscription (next invoice over the month's credits; the key needs `user_read`).
 WaveSpeed quotes in USD from the `base_price` its model list gives per second of video.
+fal and Venice also make images (nano-banana, seedream and others). `plugins/local` is free and
+runs on the machine: `ffmpeg/minterpolate` and `ffmpeg/lanczos` for interpolation and upscaling,
+and `rife` when `rife-ncnn-vulkan` is on PATH.
 
 ## Jobs and takes
 
@@ -244,6 +266,9 @@ steps are reserved up front, so a take that wouldn't fit the budget never starts
 output feeds the next; the first failure ends the take and releases what the rest held.
 `shotline take 01-010 --from-step 2` reuses the earlier steps of the latest take (or `--of 3`) and
 only pays for the rest.
+
+Free steps fit on the end, for example `op = "video.upscale"`, `plugin = "local"`,
+`model = "ffmpeg/lanczos"`, `params = { scale = 2 }`, or `video.interpolate` with `rife`.
 
 Lip sync takes one audio clip, so for now it needs a shot with one line; joining several comes
 with the media work.
@@ -372,7 +397,7 @@ shotline story | style [--set text]
 shotline doctor
 shotline plugin ls | doctor <name> | balance [name]
 shotline element add <kind> <name> [--handle h] [--desc ...]
-shotline element anchor <handle> (--file img | --generate)
+shotline element anchor <handle> (--file img | --generate [--prompt ..] [--plugin p] [--model m] [--yes])
 shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--sample f] [--set k=v]
 shotline element ls
 shotline chapter add <title>
@@ -384,6 +409,7 @@ shotline shot line <shot> <who> <text>
 shotline shot ls [chapter]
 shotline shot show <id>
 shotline prompt <shot>
+shotline frame <shot> [--file img | --clear] [--plugin p] [--model m] [--yes]
 shotline quote <shot|chapter>
 shotline take <shot> [--from-step n [--of take]] [--yes]
 shotline takes <shot>
@@ -448,7 +474,7 @@ crates/
   shotline-ui          egui app
   shotline-cli         the binary, clap; `mcp` via rmcp, `ui` behind the `ui` cargo feature
 plugins/
-  venice/  elevenlabs/  wavespeed/   external plugins, built and installed separately
+  venice/  elevenlabs/  wavespeed/  local/   external plugins, built and installed separately
 ```
 
 shotline-core knows nothing about HTTP or ffmpeg. The CLI, MCP server and UI are thin layers on top
@@ -489,14 +515,13 @@ windows.
 5. external plugins: Venice, ElevenLabs (voices, lines), WaveSpeed lip sync; recipes - done
 6. continuity: last frame chaining, colour match, timeline render with audio tracks - done
 7. mcp server and the co-director notes - done
-8. anchor image generation, storyboard frames, upscale/interpolate
+8. anchor image generation, storyboard frames, upscale/interpolate - done
 9. egui UI: browse the project, costs, open takes in mpv/ffplay
 10. built-in player over ffmpeg pipes, side by side takes, timeline playback
 
 ## Not sure yet
 
 - Should shotline translate Thai plot text into English prompts, or leave that to the agent?
-- Are storyboard frames worth paying for before every video, or just an option?
 - Colour matching gets harder when the previous take came from a different model.
 - Hooks (run something after every take) or are recipes enough?
 - Should plugins be able to add their own CLI commands, or only operations?

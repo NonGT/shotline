@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(rename = "recipe", skip_serializing_if = "BTreeMap::is_empty")]
     pub recipes: BTreeMap<String, Vec<Step>>,
     pub prompt: PromptLayers,
+    /// What anchors and storyboard frames are made with.
+    pub image: ImageConfig,
 }
 
 impl Default for Config {
@@ -47,6 +49,30 @@ impl Default for Config {
             rates: BTreeMap::new(),
             recipes: BTreeMap::new(),
             prompt: PromptLayers::default(),
+            image: ImageConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageConfig {
+    pub plugin: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// For anchors; storyboard frames use the shot's. Default: the project's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aspect: Option<String>,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        Self {
+            plugin: "fal".into(),
+            model: "fal-ai/nano-banana".into(),
+            resolution: None,
+            aspect: None,
         }
     }
 }

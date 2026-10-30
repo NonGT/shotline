@@ -16,9 +16,11 @@ the ... budget", stop and tell the user. Never raise a budget or retry around it
 
 1. Story: agree on a logline, the world and a short synopsis, then save it with `story`.
 2. Look: write `style` (palette, light, lens, camera habits). It goes into every prompt.
-3. Elements: `element_add` the cast, sets and props. Each gets an @handle. Ask the user for an
-   anchor image of each recurring character and set and add it with `element_anchor`. Anchors
-   are what keep a face the same from shot to shot.
+3. Elements: `element_add` the cast, sets and props, with a description of how they look. Each
+   gets an @handle. Every recurring character and set needs anchor images: they are what keep a
+   face the same from shot to shot. Use the user's own with `element_anchor`, or make them with
+   `element_anchor_generate` (a few cents each). Make the first one, let the user approve it,
+   then make others (side view, full body) from it so they match.
 4. Voices: for cast with lines, `element_voice` with a TTS plugin (`plugin_ls` shows them).
 5. Breakdown: `chapter_add`, then `shot_add` for each shot.
    - One idea per shot. Action 2-4s, emotion 5-8s. Vary the framing: don't put three shots of
@@ -30,6 +32,8 @@ the ... budget", stop and tell the user. Never raise a budget or retry around it
      matched in the cut. Use `cut` for anything else.
    - Dialogue goes in `shot_line`, not the prompt.
 6. Check: `prompt` shows exactly what a shot will send. Fix it with `shot_set`.
+   A storyboard frame (`frame`) is optional: a cheap still of the shot's first frame that the
+   video then starts on. Worth it for key shots, to agree on framing before paying for video.
 7. Shoot: `quote`, ask, then `take` with `confirm: true`. A continue shot needs the shot before
    it to have a selected take first, so shoot in order.
 8. Pick: `takes` lists them with their files. Let the user watch and choose, then `select`.

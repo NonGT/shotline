@@ -97,6 +97,19 @@ fn models() -> Vec<ModelInfo> {
             op: Op::VideoUpscale,
             ..ModelInfo::default()
         },
+        ModelInfo {
+            id: "fake/smooth".into(),
+            op: Op::VideoInterpolate,
+            ..ModelInfo::default()
+        },
+        ModelInfo {
+            id: "fake/image".into(),
+            op: Op::ImageGenerate,
+            ref_image: Some("image {n}".into()),
+            max_images: Some(4),
+            aspects: vec!["1:1".into(), "9:16".into(), "16:9".into()],
+            ..ModelInfo::default()
+        },
     ]
 }
 
@@ -178,6 +191,18 @@ fn price(req: &Request) -> Quote {
         "fake/metered" => Quote {
             amount: secs,
             unit: "fake-second".into(),
+            units: Some(secs),
+            unit_name: Some("s".into()),
+        },
+        "fake/image" => Quote {
+            amount: 0.04,
+            unit: "USD".into(),
+            units: Some(1.0),
+            unit_name: Some("image".into()),
+        },
+        "fake/smooth" => Quote {
+            amount: 0.0,
+            unit: "USD".into(),
             units: Some(secs),
             unit_name: Some("s".into()),
         },

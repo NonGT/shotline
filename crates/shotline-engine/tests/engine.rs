@@ -114,7 +114,7 @@ async fn a_good_take() {
             .unwrap()
             .lines()
             .next(),
-        Some("Ref 1 and Ref 2 walks")
+        Some("Paka (shown in Ref 1 and Ref 2) walks")
     );
 
     let mut events = vec![];

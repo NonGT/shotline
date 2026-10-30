@@ -1,0 +1,22 @@
+[package]
+name = "shotline-plugin-local"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "local"
+
+[[bin]]
+name = "shotline-plugin-local"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1.92"
+serde_json = "1.0.154"
+shotline-plugin = { version = "0.1.0", path = "../../crates/shotline-plugin" }
+tokio = { version = "1.54.1", features = ["rt", "macros", "io-std", "sync"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time"] }

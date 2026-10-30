@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use shotline_core::ledger::{Books, money, pricing};
 use shotline_core::protocol::{MediaKind, Op, Quote, Rate, Reference, Request, State};
-use shotline_core::{Project, ShotRef, UserConfig, user_dir};
+use shotline_core::{Job, Project, ShotRef, UserConfig, user_dir};
 use shotline_engine::{Event, Options, Plan, Plugins, price};
 use shotline_plugin::Plugin;
 use tokio::runtime::Runtime;
@@ -408,11 +408,6 @@ fn guess_kind(path: &std::path::Path) -> MediaKind {
 
 /// One operation outside any shot: an upscale, a test line of speech, someone's x.* tool.
 pub fn run(p: &Project, a: RunArgs) -> Result<()> {
-    let installed = plugins::load();
-    let rt = plugins::runtime();
-    let mut opened = Opened::new(&installed)?;
-    opened.load_rates(&rt, [&a.plugin]);
-    let b = books(p, &opened.rates)?;
     let abs = |path: &PathBuf| -> Result<PathBuf> {
         let full = std::env::current_dir()?.join(path);
         if !full.is_file() {
@@ -441,8 +436,40 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
         let v = serde_json::from_str(v).unwrap_or(serde_json::Value::String(v.clone()));
         req.params.insert(k.clone(), v);
     }
-    let plugin = opened.plugin(&a.plugin)?;
-    let quote = rt.block_on(plugin.quote(&req))?;
+    let Some(job) = spend_once(p, &a.plugin, &req, None, &a.op.to_string(), a.yes)? else {
+        return Ok(());
+    };
+    for f in &job.outputs {
+        println!("{}", p.rel(&p.job_dir(job.id).join(f)));
+    }
+    println!("done · {} · job {}", job_cost(&job), job.id);
+    Ok(())
+}
+
+pub fn job_cost(job: &Job) -> String {
+    job.cost
+        .as_ref()
+        .map(|c| format!("{} {}", money(c.amount), c.unit))
+        .unwrap_or_else(|| "nothing charged".into())
+}
+
+/// Quotes one request, asks, then runs it as a job of its own. None if the answer was no.
+pub fn spend_once(
+    p: &Project,
+    plugin_name: &str,
+    req: &Request,
+    shot: Option<ShotRef>,
+    what: &str,
+    yes: bool,
+) -> Result<Option<Job>> {
+    let installed = plugins::load();
+    let rt = plugins::runtime();
+    let mut opened = Opened::new(&installed)?;
+    let name = plugin_name.to_string();
+    opened.load_rates(&rt, [&name]);
+    let b = books(p, &opened.rates)?;
+    let plugin = opened.plugin(plugin_name)?;
+    let quote = rt.block_on(plugin.quote(req))?;
     let c = b.rates.convert(quote.amount, &quote.unit, &b.currency)?;
     let cost = price(
         &quote,
@@ -450,11 +477,11 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
         &b.currency,
         pricing(&quote.unit, &c.source),
     );
-    println!("{} · {} {} · {cost}", a.op, a.plugin, a.model);
-    show_balances(&rt, &opened, &b, &[(a.plugin.clone(), quote.clone())]);
-    if !a.yes && !confirm(&format!("spend {cost}?"))? {
+    println!("{what} · {plugin_name} {} · {cost}", req.model);
+    show_balances(&rt, &opened, &b, &[(name.clone(), quote.clone())]);
+    if !yes && !confirm(&format!("spend {cost}?"))? {
         println!("nothing spent");
-        return Ok(());
+        return Ok(None);
     }
     let opts = options();
     let (job, err) = rt.block_on(async {
@@ -462,28 +489,20 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
         shotline_engine::run_once(
             p,
             &b,
-            (&a.plugin, plugin),
-            &req,
-            &quote,
+            (plugin_name, plugin),
+            shotline_engine::Once {
+                request: req,
+                quote: &quote,
+                shot,
+            },
             &opts,
-            printer(a.plugin.clone()),
+            printer(name.clone()),
         )
         .await
     })?;
     drop(opened);
-    let cost = job
-        .cost
-        .as_ref()
-        .map(|c| format!("{} {}", money(c.amount), c.unit))
-        .unwrap_or_else(|| "nothing charged".into());
     match err {
-        None => {
-            for f in &job.outputs {
-                println!("{}", p.rel(&p.job_dir(job.id).join(f)));
-            }
-            println!("done · {cost} · job {}", job.id);
-            Ok(())
-        }
-        Some(e) => bail!("job {} {}: {e} ({cost})", job.id, job.status),
+        None => Ok(Some(job)),
+        Some(e) => bail!("job {} {}: {e} ({})", job.id, job.status, job_cost(&job)),
     }
 }

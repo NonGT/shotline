@@ -6,6 +6,7 @@ use shotline_core::ledger::report::By;
 use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voice, build};
 
 mod cost;
+mod image;
 mod mcp;
 mod plugins;
 mod shoot;
@@ -54,6 +55,16 @@ enum Cmd {
     Shot(ShotCmd),
     /// Show the exact prompt and references a shot would send, without spending anything
     Prompt { shot: ShotRef },
+    /// Give a shot a storyboard frame to start on: made by the image model, or --file, or --clear
+    Frame {
+        shot: ShotRef,
+        #[arg(long, conflicts_with = "clear")]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        clear: bool,
+        #[command(flatten)]
+        image: ImageArgs,
+    },
     /// Price a shot (01-010) or a whole chapter (1) without spending anything
     Quote { target: String },
     /// Quote, ask, then generate a take of a shot
@@ -120,6 +131,30 @@ enum Cmd {
     /// Serves the built-in fake plugin over stdio, for tests and dry runs
     #[command(name = "__fake-plugin", hide = true)]
     FakePlugin,
+}
+
+#[derive(clap::Args)]
+struct ImageArgs {
+    /// Image plugin instead of [image] in shotline.toml
+    #[arg(long)]
+    plugin: Option<String>,
+    /// Image model instead of [image] in shotline.toml
+    #[arg(long)]
+    model: Option<String>,
+    /// Don't ask before spending
+    #[arg(long)]
+    yes: bool,
+}
+
+impl ImageArgs {
+    fn make<'a>(&'a self, prompt: &'a str) -> image::Make<'a> {
+        image::Make {
+            prompt,
+            plugin: self.plugin.as_deref(),
+            model: self.model.as_deref(),
+            yes: self.yes,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -191,13 +226,22 @@ enum ElementCmd {
         #[arg(long, default_value = "")]
         desc: String,
     },
-    /// Add an anchor image to an element
+    /// Add an anchor image to an element, from a file or made by the image model
     Anchor {
         handle: String,
-        #[arg(long, required_unless_present = "generate")]
+        #[arg(
+            long,
+            required_unless_present = "generate",
+            conflicts_with = "generate"
+        )]
         file: Option<PathBuf>,
         #[arg(long)]
         generate: bool,
+        /// What to add to the element's description, e.g. "side view"
+        #[arg(long, default_value = "", requires = "generate")]
+        prompt: String,
+        #[command(flatten)]
+        image: ImageArgs,
     },
     /// Give a cast member a voice for their lines
     Voice {
@@ -318,13 +362,16 @@ fn run(cli: Cli) -> Result<()> {
             ref handle,
             ref file,
             generate,
+            ref prompt,
+            ref image,
         }) => {
-            if generate {
-                bail!("generating anchors isn't available yet, use --file");
-            }
             let p = open()?;
-            let dest = p.add_anchor(handle, file.as_ref().unwrap())?;
-            println!("{}", p.rel(&dest));
+            if generate {
+                image::anchor(&p, handle, &image.make(prompt))?;
+            } else {
+                let dest = p.add_anchor(handle, file.as_ref().unwrap())?;
+                println!("{}", p.rel(&dest));
+            }
         }
         Cmd::Element(ElementCmd::Voice {
             ref handle,
@@ -487,7 +534,10 @@ fn run(cli: Cli) -> Result<()> {
                 b.shot, b.plugin, b.model, b.duration, b.resolution, b.aspect
             );
             if let Some(sf) = &b.start_frame {
-                println!("start frame: {} (from {})", sf.path, sf.from);
+                match sf.from {
+                    Some(r) => println!("start frame: {} (from {r})", sf.path),
+                    None => println!("start frame: {} (storyboard)", sf.path),
+                }
             }
             if !b.references.is_empty() {
                 println!("references:");
@@ -498,6 +548,19 @@ fn run(cli: Cli) -> Result<()> {
             println!("\n{}", b.text);
         }
 
+        Cmd::Frame {
+            shot,
+            ref file,
+            clear,
+            ref image,
+        } => {
+            let how = match (file, clear) {
+                (Some(f), _) => image::Frame::File(f),
+                (None, true) => image::Frame::Clear,
+                (None, false) => image::Frame::Make(image.make("")),
+            };
+            image::frame(&open()?, shot, how)?;
+        }
         Cmd::Quote { ref target } => shoot::quote(&open()?, target)?,
         Cmd::Take {
             shot,

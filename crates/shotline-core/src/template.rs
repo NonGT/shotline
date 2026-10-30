@@ -10,6 +10,12 @@ const DEFAULTS: &[(&str, &str)] = &[
         "continue",
         include_str!("../../../assets/prompts/continue.md"),
     ),
+    ("frame", include_str!("../../../assets/prompts/frame.md")),
+    ("anchor", include_str!("../../../assets/prompts/anchor.md")),
+    (
+        "storyboard",
+        include_str!("../../../assets/prompts/storyboard.md"),
+    ),
 ];
 
 impl Project {

@@ -1999,10 +1999,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "shotline-plugin-local"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "shotline-plugin",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "shotline-plugin-venice"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "reqwest",
  "serde_json",
  "shotline-plugin",
