@@ -2,6 +2,7 @@
 //! the cut. It reads and writes the project folder through shotline-core like the CLI does, so
 //! both always agree.
 
+mod edit;
 mod player;
 mod theme;
 
@@ -13,10 +14,12 @@ use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
 use shotline_core::ledger::report::{self, By, Row, Summary};
 use shotline_core::{
-    Chapter, CutShot, Element, JobStatus, Project, Shot, ShotRef, Take, Transition, UserConfig,
+    Chapter, CutShot, Element, JobStatus, Kind, Project, Shot, ShotRef, Take, Transition,
+    UserConfig,
 };
 use shotline_media::Ffmpeg;
 
+use edit::{Action, Form, LineForm};
 use player::{Audio, Deck, Player};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +80,7 @@ pub struct App {
     /// The tab and shot last written to the place file, when the app keeps one.
     place: Option<(Tab, Option<ShotRef>)>,
     themed: bool,
+    form: Form,
 }
 
 const VIEWERS: [&str; 2] = ["mpv", "ffplay"];
@@ -137,6 +141,7 @@ impl App {
             thumbs: Thumbs::default(),
             place: None,
             themed: false,
+            form: Form::default(),
         };
         app.reload();
         app
@@ -201,6 +206,18 @@ impl App {
         if let Err(e) = self.load() {
             self.error(e.to_string());
         }
+        self.fill_form();
+    }
+
+    /// The open shot as last read from disk.
+    fn open(&self) -> Option<(ShotRef, Shot)> {
+        let r = self.shot?;
+        self.film
+            .chapters
+            .iter()
+            .flat_map(|(_, s)| s)
+            .find(|(x, _)| *x == r)
+            .cloned()
     }
 
     fn load(&mut self) -> anyhow::Result<()> {
@@ -266,7 +283,9 @@ impl App {
     }
 
     fn open_shot(&mut self, r: ShotRef) {
+        self.flush();
         self.shot = Some(r);
+        self.fill_form();
         if let Err(e) = self.load_takes() {
             self.error(e.to_string());
         }
@@ -328,19 +347,6 @@ impl App {
                 self.deck = None;
             }
             ui.separator();
-        }
-    }
-
-    fn select(&mut self, take: &Take) {
-        match self
-            .project
-            .select_take(take.shot, &take.number.to_string())
-        {
-            Ok(t) => {
-                self.info(format!("{t} selected"));
-                self.reload();
-            }
-            Err(e) => self.error(e.to_string()),
         }
     }
 
@@ -410,6 +416,9 @@ impl App {
             Tab::Cost => self.costs(ui),
         }
         self.keep_place();
+        if ui.memory(|m| m.focused().is_none()) && ui.ctx().dragged_id().is_none() {
+            self.flush();
+        }
     }
 
     fn story(&mut self, ui: &mut egui::Ui) {
@@ -504,44 +513,36 @@ impl App {
                     .fill(theme::BAY)
                     .inner_margin(egui::vec2(28.0, 20.0)),
             )
-            .show(ui, |ui| {
-                let found = self.shot.and_then(|r| {
-                    self.film
-                        .chapters
-                        .iter()
-                        .flat_map(|(_, s)| s)
-                        .find(|(x, _)| *x == r)
-                        .cloned()
-                });
-                match found {
-                    Some((r, s)) => {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            self.deck(ui);
-                            self.shot_detail(ui, r, &s)
-                        });
-                    }
-                    None => {
-                        ui.weak("Pick a shot on the left.");
-                    }
+            .show(ui, |ui| match self.open() {
+                Some((r, s)) => {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        self.deck(ui);
+                        self.shot_detail(ui, r, &s)
+                    });
+                }
+                None => {
+                    ui.weak("Pick a shot on the left.");
                 }
             });
     }
 
     fn shot_detail(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
+        let mut acts = vec![];
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(r.to_string())
                     .font(theme::slate())
                     .color(theme::PAPER),
             );
-            if !s.title.is_empty() {
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new(&s.title)
-                        .text_style(egui::TextStyle::Heading)
-                        .color(theme::GRAPHITE),
-                );
-            }
+            ui.add_space(8.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.form.title)
+                    .font(egui::TextStyle::Heading)
+                    .text_color(theme::GRAPHITE)
+                    .hint_text("Add a title")
+                    .frame(egui::Frame::NONE)
+                    .desired_width(ui.available_width()),
+            );
         });
         ui.add_space(14.0);
         let side = 240.0;
@@ -549,7 +550,7 @@ impl App {
             let w = (ui.available_width() - side - 32.0).clamp(280.0, 620.0);
             ui.vertical(|ui| {
                 ui.set_width(w);
-                self.script(ui, r, s);
+                self.script(ui, r, s, &mut acts);
             });
             ui.add_space(32.0);
             ui.vertical(|ui| {
@@ -560,58 +561,79 @@ impl App {
         ui.add_space(20.0);
         ui.separator();
         ui.add_space(8.0);
-        self.take_list(ui, r, s);
+        self.take_list(ui, r, s, &mut acts);
+        for a in acts {
+            self.apply(a);
+        }
     }
 
     /// Plot, prompt and lines: what the shot says.
-    fn script(&self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
-        caption(ui, "Plot");
-        if s.plot.is_empty() {
+    fn script(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, acts: &mut Vec<Action>) {
+        let f = &mut self.form;
+        text_field(
+            ui,
+            "Plot",
+            &mut f.plot,
+            "What happens in the shot, in any language",
+        );
+        ui.add_space(14.0);
+        text_field(
+            ui,
+            "Prompt",
+            &mut f.prompt,
+            "What the video model is sent, in English, naming elements as @handles",
+        );
+        if f.prompt.is_empty() && !f.plot.is_empty() {
             hint(
                 ui,
-                &format!("No plot yet. Write one with shotline shot set {r} --plot"),
+                &format!("or draft one from the plot with shotline shot draft {r}"),
             );
-        } else {
-            ui.label(RichText::new(&s.plot).color(theme::PAPER));
         }
         ui.add_space(14.0);
-        caption(ui, "Prompt");
-        if s.prompt.is_empty() {
-            let how = if s.plot.is_empty() {
-                format!("shotline shot set {r} --prompt")
-            } else {
-                format!("shotline shot draft {r}")
-            };
-            hint(ui, &format!("No prompt yet. Write one with {how}"));
-        } else {
-            ui.label(&s.prompt);
+        text_field(
+            ui,
+            "Frame prompt",
+            &mut f.frame_prompt,
+            "Same as the prompt",
+        );
+        ui.add_space(14.0);
+        let lines = caption(ui, "Lines").id;
+        let cast: Vec<String> = self
+            .film
+            .elements
+            .iter()
+            .filter(|(e, _)| e.kind == Kind::Cast)
+            .map(|(e, _)| e.handle.clone())
+            .collect();
+        if cast.is_empty() {
+            hint(
+                ui,
+                "Only cast speak, and there's no cast yet. Add some with shotline element add cast",
+            );
+            return;
         }
-        if let Some(fp) = s.frame_prompt.as_deref().filter(|f| !f.is_empty()) {
-            ui.add_space(14.0);
-            caption(ui, "Frame prompt");
-            ui.label(fp);
+        let f = &mut self.form;
+        if f.new.who.is_empty() {
+            f.new.who = s.lines.last().map_or(cast[0].clone(), |l| l.who.clone());
         }
-        if !s.lines.is_empty() {
-            ui.add_space(14.0);
-            caption(ui, "Lines");
-            egui::Grid::new("lines")
-                .num_columns(3)
-                .spacing(egui::vec2(12.0, 6.0))
-                .show(ui, |ui| {
-                    for l in &s.lines {
-                        match l.at {
-                            Some(at) => ui.weak(format!("{} s", money(at))),
-                            None => ui.weak("next"),
-                        }
-                        .on_hover_text(
-                            "when the line starts in the shot; next follows the line before",
-                        );
-                        ui.label(RichText::new(format!("@{}", l.who)).color(theme::GRAPHITE));
-                        ui.label(RichText::new(&l.text).color(theme::PAPER));
-                        ui.end_row();
-                    }
-                });
+        for (i, l) in f.lines.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                line_fields(ui, i, l, &cast, 80.0);
+                if ui
+                    .add(egui::Button::new(RichText::new("Remove").color(theme::DUST)).frame(false))
+                    .clicked()
+                {
+                    acts.push(Action::RemoveLine(r, i));
+                }
+            });
         }
+        ui.horizontal(|ui| {
+            let text = line_fields(ui, usize::MAX, &mut f.new, &cast, 90.0).labelled_by(lines);
+            let enter = text.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (ui.button("Add line").clicked() || enter) && !f.new.text.trim().is_empty() {
+                acts.push(Action::AddLine(r, f.new.clone()));
+            }
+        });
     }
 
     /// The storyboard frame and the shot's settings.
@@ -624,43 +646,48 @@ impl App {
             ),
         }
         ui.add_space(12.0);
-        let duration = s.duration.unwrap_or(self.project.config.duration);
-        let mut rows = vec![
-            ("Length", format!("{} s", money(duration))),
-            (
-                "Starts",
-                match s.transition {
-                    Transition::Cut => "on a cut".to_string(),
-                    Transition::Continue => "from the last frame before".to_string(),
-                },
-            ),
-        ];
-        if let Some(rc) = &s.recipe {
-            rows.push(("Recipe", rc.clone()));
-        }
-        if let Some(m) = &s.model {
-            rows.push((
-                "Model",
-                format!(
-                    "{} {}",
-                    m.plugin.as_deref().unwrap_or("-"),
-                    m.id.as_deref().unwrap_or("-")
-                ),
-            ));
-        }
+        let f = &mut self.form;
         egui::Grid::new("facts")
             .num_columns(2)
-            .spacing(egui::vec2(12.0, 6.0))
+            .spacing(egui::vec2(12.0, 8.0))
             .show(ui, |ui| {
-                for (k, v) in rows {
-                    ui.weak(k);
-                    ui.label(v);
+                ui.weak("Length");
+                ui.add(
+                    egui::DragValue::new(&mut f.duration)
+                        .range(0.5..=60.0)
+                        .speed(0.1)
+                        .max_decimals(2)
+                        .suffix(" s"),
+                );
+                ui.end_row();
+                ui.weak("Starts");
+                ui.vertical(|ui| {
+                    ui.radio_value(&mut f.transition, Transition::Cut, "on a cut");
+                    ui.radio_value(
+                        &mut f.transition,
+                        Transition::Continue,
+                        "from the shot before",
+                    );
+                });
+                ui.end_row();
+                if let Some(rc) = &s.recipe {
+                    ui.weak("Recipe");
+                    ui.label(rc);
+                    ui.end_row();
+                }
+                if let Some(m) = &s.model {
+                    ui.weak("Model");
+                    ui.label(format!(
+                        "{} {}",
+                        m.plugin.as_deref().unwrap_or("-"),
+                        m.id.as_deref().unwrap_or("-")
+                    ));
                     ui.end_row();
                 }
             });
     }
 
-    fn take_list(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
+    fn take_list(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, acts: &mut Vec<Action>) {
         ui.label(
             RichText::new("Takes")
                 .text_style(egui::TextStyle::Heading)
@@ -677,7 +704,6 @@ impl App {
         let mut play = None;
         let mut compare = None;
         let mut open = None;
-        let mut select = None;
         // Comparing makes sense while one take of this shot is up.
         let single = self
             .deck
@@ -693,7 +719,7 @@ impl App {
                     let selected = s.selected_take.as_deref() == Some(t.id.to_string().as_str());
                     let n = t.number;
                     if selected {
-                        ui.label(RichText::new(format!("● #{n}")).color(theme::TUNGSTEN))
+                        ui.label(RichText::new(format!("• #{n}")).color(theme::TUNGSTEN))
                             .on_hover_text("in the cut");
                     } else {
                         ui.label(RichText::new(format!("   #{n}")).color(theme::GRAPHITE));
@@ -741,7 +767,7 @@ impl App {
                                         .on_hover_text("use this take in the cut")
                                         .clicked()
                                 {
-                                    select = Some(t.clone());
+                                    acts.push(Action::Select(t.clone()));
                                 }
                             });
                         }
@@ -761,9 +787,6 @@ impl App {
         }
         if let Some(f) = open {
             self.open_file(&f);
-        }
-        if let Some(t) = select {
-            self.select(&t);
         }
     }
 
@@ -950,8 +973,52 @@ fn shot_row(ui: &mut egui::Ui, r: ShotRef, s: &Shot, takes: usize, open: bool) -
 }
 
 /// The small label over a part of a shot.
-fn caption(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).small().color(theme::DUST));
+fn caption(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.label(RichText::new(text).small().color(theme::DUST))
+}
+
+/// A labelled text box that grows with its text.
+fn text_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str) -> egui::Response {
+    let cap = caption(ui, label).id;
+    ui.add(
+        egui::TextEdit::multiline(text)
+            .hint_text(RichText::new(hint).color(theme::DUST))
+            .desired_rows(1)
+            .desired_width(f32::INFINITY)
+            .margin(egui::vec2(8.0, 6.0)),
+    )
+    .labelled_by(cap)
+}
+
+/// When a line starts, who says it and what. Returns the text box.
+fn line_fields(
+    ui: &mut egui::Ui,
+    i: usize,
+    l: &mut LineForm,
+    cast: &[String],
+    after: f32,
+) -> egui::Response {
+    ui.add(
+        egui::TextEdit::singleline(&mut l.at)
+            .hint_text(RichText::new("next").color(theme::DUST))
+            .desired_width(64.0),
+    )
+    .on_hover_text("seconds into the shot; empty follows the line before");
+    egui::ComboBox::from_id_salt(("who", i))
+        .selected_text(format!("@{}", l.who))
+        .width(96.0)
+        .show_ui(ui, |ui| {
+            for c in cast {
+                ui.selectable_value(&mut l.who, c.clone(), format!("@{c}"));
+            }
+        })
+        .response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Who says it"));
+    ui.add(
+        egui::TextEdit::singleline(&mut l.text)
+            .hint_text(RichText::new("What they say").color(theme::DUST))
+            .desired_width(ui.available_width() - after),
+    )
 }
 
 /// What to do about something missing.

@@ -2,11 +2,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use eframe::egui;
+use eframe::egui::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{Op, Quote};
-use shotline_core::{Job, JobStatus, Kind, Project, Shot, ShotRef, UserConfig};
+use shotline_core::{Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
 use shotline_ui::{App, Tab};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
@@ -76,10 +78,65 @@ fn harness(dir: &Path) -> Harness<'static, App> {
     let app = App::new(film(dir), dir.join("home"))
         .with_viewer(None)
         .silent();
-    // Thai needs a system font, which CI may not have.
-    Harness::builder()
-        .allow_missing_glyphs()
-        .build_ui_state(|ui, app: &mut App| app.show(ui), app)
+    Harness::builder().build_ui_state(|ui, app: &mut App| app.show(ui), app)
+}
+
+fn field(h: &Harness<'static, App>, role: Role, label: &str) -> String {
+    h.get_by_role_and_label(role, label)
+        .value()
+        .unwrap_or_default()
+}
+
+const R: ShotRef = ShotRef {
+    chapter: 1,
+    shot: 10,
+};
+
+#[test]
+fn edit_a_shot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness(tmp.path());
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let p = Project::open(&tmp.path().join("film")).unwrap();
+
+    // Nothing is written while typing, only once the box is left.
+    let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
+    plot.focus();
+    plot.type_text(" ตอนเย็น");
+    h.run();
+    assert_eq!(p.shot(R).unwrap().plot, "ผกาเดินเข้าป่า");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().plot, "ผกาเดินเข้าป่า ตอนเย็น");
+    h.get_by_label("01-010 saved");
+
+    h.get_by_label("from the shot before").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().transition, Transition::Continue);
+
+    let line = h.get_by_role_and_label(Role::TextInput, "Lines");
+    line.focus();
+    line.type_text("ไปกันเถอะ");
+    h.run();
+    h.get_by_label("Add line").click();
+    h.run();
+    h.run();
+    let s = p.shot(R).unwrap();
+    assert_eq!(
+        (s.lines[0].who.as_str(), s.lines[0].text.as_str()),
+        ("paka", "ไปกันเถอะ")
+    );
+    assert_eq!(field(&h, Role::TextInput, "Lines"), "");
+
+    h.get_by_label("Remove").click();
+    h.run();
+    h.run();
+    assert!(p.shot(R).unwrap().lines.is_empty());
+    h.get_by_label("line 1 of 01-010 removed");
 }
 
 #[test]
@@ -90,14 +147,14 @@ fn browse_and_select_a_take() {
     assert_eq!(h.state().tab(), Tab::Shots);
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();
-    h.get_by_label("ผกาเดินเข้าป่า");
+    assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาเดินเข้าป่า");
     h.get_by_label("failed");
     h.get_by_label("content policy");
 
     h.get_by_label("Select #1").click();
     h.run();
     h.get_by_label("01-010#1 selected");
-    h.get_by_label("● #1");
+    h.get_by_label("• #1");
     assert!(h.query_by_label("Select #1").is_none());
     let p = Project::open(&tmp.path().join("film")).unwrap();
     let shot = p
@@ -259,5 +316,5 @@ fn opens_where_it_was_left() {
     h.run();
     h.get_by_label("Shots").click();
     h.run();
-    h.get_by_label("ผกาเดินเข้าป่า");
+    assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาเดินเข้าป่า");
 }

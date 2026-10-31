@@ -286,6 +286,43 @@ impl Project {
     }
 
     pub fn add_line(&self, r: ShotRef, who: &str, text: &str, at: Option<f64>) -> Result<Shot> {
+        let line = self.line(who, text, at)?;
+        let mut shot = self.shot(r)?;
+        shot.lines.push(line);
+        self.save_shot(r, &shot)?;
+        Ok(shot)
+    }
+
+    /// Replaces line `i` (from 0).
+    pub fn set_line(
+        &self,
+        r: ShotRef,
+        i: usize,
+        who: &str,
+        text: &str,
+        at: Option<f64>,
+    ) -> Result<Shot> {
+        let line = self.line(who, text, at)?;
+        let mut shot = self.shot(r)?;
+        match shot.lines.get_mut(i) {
+            Some(l) => *l = line,
+            None => return invalid(format!("{r} has no line {}", i + 1)),
+        }
+        self.save_shot(r, &shot)?;
+        Ok(shot)
+    }
+
+    pub fn remove_line(&self, r: ShotRef, i: usize) -> Result<Shot> {
+        let mut shot = self.shot(r)?;
+        if i >= shot.lines.len() {
+            return invalid(format!("{r} has no line {}", i + 1));
+        }
+        shot.lines.remove(i);
+        self.save_shot(r, &shot)?;
+        Ok(shot)
+    }
+
+    fn line(&self, who: &str, text: &str, at: Option<f64>) -> Result<Line> {
         let who = who.trim_start_matches('@');
         let el = self.element(who)?;
         if el.kind != crate::Kind::Cast {
@@ -297,14 +334,11 @@ impl Project {
         if at.is_some_and(|a| a.is_nan() || a < 0.0) {
             return invalid("a line starts at 0 seconds or later");
         }
-        let mut shot = self.shot(r)?;
-        shot.lines.push(Line {
+        Ok(Line {
             who: who.to_string(),
             text: text.to_string(),
             at,
-        });
-        self.save_shot(r, &shot)?;
-        Ok(shot)
+        })
     }
 
     /// The shot before `r` in film order, crossing chapter boundaries.

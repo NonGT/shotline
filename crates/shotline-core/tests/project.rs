@@ -146,3 +146,28 @@ fn shot_survives_save_and_load() {
     );
     assert_eq!(p.shot(r).unwrap(), shot);
 }
+
+#[test]
+fn lines_are_edited_and_removed() {
+    let (_dir, p) = new_project();
+    p.add_element(Kind::Cast, "Paka", None, "").unwrap();
+    p.add_element(Kind::Set, "Forest", None, "").unwrap();
+    p.add_chapter("Into the forest").unwrap();
+    let r = p.add_shot("1", None, Shot::default()).unwrap();
+    p.add_line(r, "paka", "hi", None).unwrap();
+    p.add_line(r, "@paka", "bye", Some(2.0)).unwrap();
+
+    let s = p.set_line(r, 0, "paka", "hello", Some(0.5)).unwrap();
+    assert_eq!(
+        (s.lines[0].text.as_str(), s.lines[0].at),
+        ("hello", Some(0.5))
+    );
+    assert!(p.set_line(r, 0, "forest", "hi", None).is_err());
+    assert!(p.set_line(r, 0, "paka", " ", None).is_err());
+    assert!(p.set_line(r, 5, "paka", "hi", None).is_err());
+
+    let s = p.remove_line(r, 0).unwrap();
+    assert_eq!(s.lines.len(), 1);
+    assert_eq!(p.shot(r).unwrap().lines[0].text, "bye");
+    assert!(p.remove_line(r, 1).is_err());
+}
