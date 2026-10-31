@@ -18,3 +18,6 @@ shotline-media = { version = "0.1.0", path = "../shotline-media" }
 egui_kittest = "0.37.0"
 jiff = "0.2.38"
 tempfile = "3.27.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21.2", default-features = false }

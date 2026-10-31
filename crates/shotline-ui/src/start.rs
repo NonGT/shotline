@@ -1,4 +1,5 @@
-//! What the window shows before a film is open: make a new one or pick one.
+//! The window around the film: a start page when none is open, and the commands of the File and Edit
+//! menus.
 
 use std::path::{Path, PathBuf};
 
@@ -10,43 +11,73 @@ use crate::{App, caption, hint, read, theme};
 
 const RECENT: usize = 8;
 
+/// What the menus can ask for, whichever menu it comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MenuCommand {
+    NewFilm,
+    OpenFilm,
+    OpenRecent(PathBuf),
+    CloseFilm,
+    Undo,
+    Redo,
+}
+
 pub struct Shell {
     user_dir: PathBuf,
     git: Option<Git>,
     testing: bool,
     themed: bool,
+    /// The window title last sent.
+    titled: String,
+    here: PathBuf,
+    recent: Vec<(PathBuf, String)>,
     screen: Screen,
+    /// New Film asked for over an open film.
+    dialog: Option<Form>,
+    #[cfg(target_os = "macos")]
+    menu: Option<crate::menu::NativeMenu>,
 }
 
 enum Screen {
-    Start(Start),
+    Start(Form),
     Film(Box<App>),
 }
 
-struct Start {
+/// Name and place of a new film.
+struct Form {
     name: String,
     folder: String,
     git: bool,
-    recent: Vec<(PathBuf, String)>,
     error: Option<String>,
 }
+
+enum Opened {
+    Existing(PathBuf),
+    New {
+        dir: PathBuf,
+        name: String,
+        git: bool,
+    },
+}
+
+/// What to say once the film is open, good or bad.
+type Note = Result<String, String>;
 
 impl Shell {
     /// Opens `project`, or without one asks for one; new films go in `here` unless changed.
     pub fn new(project: Option<Project>, user_dir: PathBuf, here: &Path) -> Shell {
-        let start = Start {
-            name: String::new(),
-            folder: here.display().to_string(),
-            git: true,
-            recent: recent(&user_dir),
-            error: None,
-        };
         let mut shell = Shell {
+            recent: recent(&user_dir),
             user_dir,
             git: Git::find(),
             testing: false,
             themed: false,
-            screen: Screen::Start(start),
+            titled: String::new(),
+            here: here.to_path_buf(),
+            screen: Screen::Start(Form::new(here)),
+            dialog: None,
+            #[cfg(target_os = "macos")]
+            menu: None,
         };
         if let Some(p) = project {
             shell.open(p, None);
@@ -65,6 +96,13 @@ impl Shell {
         self
     }
 
+    /// Puts File and Edit in the system's menu bar.
+    #[cfg(target_os = "macos")]
+    pub fn with_native_menu(mut self, ctx: &egui::Context) -> Shell {
+        self.menu = Some(crate::menu::NativeMenu::install(ctx));
+        self
+    }
+
     pub fn film(&self) -> Option<&App> {
         match &self.screen {
             Screen::Film(app) => Some(app),
@@ -72,34 +110,125 @@ impl Shell {
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
-        let opened = match &mut self.screen {
-            Screen::Film(app) => return app.show(ui),
-            // The fonts only take from the next frame on.
-            Screen::Start(_) if !self.themed => {
-                self.themed = true;
-                theme::apply(ui.ctx());
-                ui.ctx().request_repaint();
-                return;
+    pub fn command(&mut self, cmd: MenuCommand) {
+        match cmd {
+            MenuCommand::NewFilm => {
+                let folder = match &self.screen {
+                    // Next to the film that's open.
+                    Screen::Film(app) => app.project.root.parent().unwrap_or(&self.here),
+                    Screen::Start(_) => return,
+                };
+                self.dialog = Some(Form::new(folder));
             }
-            Screen::Start(s) => s.show(ui, self.git.is_some()),
+            MenuCommand::OpenFilm => {
+                if let Some(d) = rfd::FileDialog::new()
+                    .set_directory(self.folder())
+                    .pick_folder()
+                {
+                    self.go(Opened::Existing(d));
+                }
+            }
+            MenuCommand::OpenRecent(d) => self.go(Opened::Existing(d)),
+            MenuCommand::CloseFilm => {
+                if let Screen::Film(app) = &mut self.screen {
+                    app.flush();
+                    let here = app
+                        .project
+                        .root
+                        .parent()
+                        .unwrap_or(&self.here)
+                        .to_path_buf();
+                    self.screen = Screen::Start(Form::new(&here));
+                    self.dialog = None;
+                }
+            }
+            MenuCommand::Undo | MenuCommand::Redo => {
+                if let Screen::Film(app) = &mut self.screen {
+                    if cmd == MenuCommand::Undo {
+                        app.undo();
+                    } else {
+                        app.redo();
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn show(&mut self, ui: &mut egui::Ui) {
+        // The fonts only take from the next frame on.
+        if !self.themed {
+            self.themed = true;
+            theme::apply(ui.ctx());
+            ui.ctx().request_repaint();
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        self.native_menu(ui.ctx());
+        let has_git = self.git.is_some();
+        let opened = match &mut self.screen {
+            Screen::Film(app) => {
+                app.show(ui);
+                let (opened, closed) = match &mut self.dialog {
+                    Some(f) => new_film_dialog(ui, f, has_git),
+                    None => (None, false),
+                };
+                if closed {
+                    self.dialog = None;
+                }
+                opened
+            }
+            Screen::Start(form) => start_page(ui, form, has_git, &self.recent),
         };
-        let Some(dir) = opened else { return };
-        let made = match dir {
+        if let Some(o) = opened {
+            self.go(o);
+        }
+        let title = title(self.film().map(|a| &a.project));
+        if title != self.titled {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.titled = title;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn native_menu(&mut self, ctx: &egui::Context) {
+        let film = self.film().is_some();
+        let Some(menu) = &mut self.menu else { return };
+        let cmds = menu.poll();
+        let (undo, redo) = match &self.screen {
+            // Typing has its own undo, and the menu would take the keys from it.
+            Screen::Film(_) if ctx.egui_wants_keyboard_input() => (false, false),
+            Screen::Film(app) => (
+                app.history.undo_what().is_some(),
+                app.history.redo_what().is_some(),
+            ),
+            Screen::Start(_) => (false, false),
+        };
+        menu.sync(undo, redo, film, &self.recent);
+        for c in cmds {
+            self.command(c);
+        }
+    }
+
+    fn folder(&self) -> PathBuf {
+        match &self.screen {
+            Screen::Film(app) => app.project.root.parent().unwrap_or(&self.here).into(),
+            Screen::Start(f) => expand(&f.folder),
+        }
+    }
+
+    /// Opens or makes a film; a failure is shown on the form it came from.
+    fn go(&mut self, o: Opened) {
+        let made = match o {
             Opened::Existing(dir) => Project::discover(&dir).map(|p| (p, None)),
             Opened::New { dir, name, git } => self.create(&dir, &name, git),
         };
         match made {
-            Ok((p, note)) => {
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
-                self.open(p, note);
-            }
-            Err(e) => {
-                if let Screen::Start(s) = &mut self.screen {
-                    s.error = Some(e.to_string());
-                }
-            }
+            Ok((p, note)) => self.open(p, note),
+            Err(e) => match (&mut self.dialog, &mut self.screen) {
+                (Some(f), _) | (None, Screen::Start(f)) => f.error = Some(e.to_string()),
+                (None, Screen::Film(app)) => app.error(e.to_string()),
+            },
         }
     }
 
@@ -123,7 +252,11 @@ impl Shell {
     }
 
     fn open(&mut self, p: Project, note: Option<Note>) {
+        if let Screen::Film(app) = &mut self.screen {
+            app.flush();
+        }
         remember(&self.user_dir, &p.root);
+        self.recent = recent(&self.user_dir);
         let mut app = App::new(p, self.user_dir.clone()).with_git(self.git.clone());
         app = if self.testing {
             app.with_viewer(None).silent()
@@ -136,48 +269,102 @@ impl Shell {
             None => {}
         }
         self.screen = Screen::Film(Box::new(app));
+        self.dialog = None;
     }
 }
 
-/// What to say once the film is open, good or bad.
-type Note = Result<String, String>;
-
-enum Opened {
-    Existing(PathBuf),
-    New {
-        dir: PathBuf,
-        name: String,
-        git: bool,
-    },
+/// What the form gave, and whether the dialog was closed without it.
+fn new_film_dialog(ui: &mut egui::Ui, form: &mut Form, has_git: bool) -> (Option<Opened>, bool) {
+    let mut out = None;
+    let mut cancel = false;
+    let modal = egui::Modal::new(egui::Id::unique("new film")).show(ui.ctx(), |ui| {
+        ui.set_width(460.0);
+        ui.heading("New film");
+        ui.add_space(10.0);
+        out = form.show(ui, has_git, |ui| cancel = ui.button("Cancel").clicked());
+    });
+    (out, cancel || modal.should_close())
 }
 
-impl Start {
-    fn show(&mut self, ui: &mut egui::Ui, has_git: bool) -> Option<Opened> {
-        let mut out = None;
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let w = 460.0_f32.min(ui.available_width());
-                ui.add_space(72.0);
-                ui.vertical_centered(|ui| {
-                    ui.set_max_width(w);
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        out = self.new_film(ui, has_git).or_else(|| self.open_film(ui));
-                    });
+fn start_page(
+    ui: &mut egui::Ui,
+    form: &mut Form,
+    has_git: bool,
+    recent: &[(PathBuf, String)],
+) -> Option<Opened> {
+    let mut out = None;
+    egui::CentralPanel::default().show(ui, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let w = 460.0_f32.min(ui.available_width());
+            ui.add_space(72.0);
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(w);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.label(
+                        RichText::new("shotline")
+                            .font(theme::slate())
+                            .color(theme::PAPER),
+                    );
+                    ui.add_space(32.0);
+                    ui.heading("New film");
+                    ui.add_space(10.0);
+                    out = form
+                        .show(ui, has_git, |_| {})
+                        .or_else(|| open_film(ui, &form.folder, recent));
                 });
             });
         });
-        out
+    });
+    out
+}
+
+fn open_film(ui: &mut egui::Ui, folder: &str, recent: &[(PathBuf, String)]) -> Option<Opened> {
+    let mut out = None;
+    ui.add_space(36.0);
+    ui.heading("Open a film");
+    ui.add_space(10.0);
+    if ui.button("Choose a folder").clicked()
+        && let Some(d) = rfd::FileDialog::new()
+            .set_directory(expand(folder))
+            .pick_folder()
+    {
+        out = Some(Opened::Existing(d));
+    }
+    if !recent.is_empty() {
+        ui.add_space(14.0);
+        caption(ui, "Recent");
+    }
+    for (dir, name) in recent {
+        let row = ui.add(
+            egui::Button::new(
+                RichText::new(format!("{name}  {}", dir.display())).color(theme::GRAPHITE),
+            )
+            .frame(false),
+        );
+        if row.clicked() {
+            out = Some(Opened::Existing(dir.clone()));
+        }
+    }
+    out
+}
+
+impl Form {
+    fn new(folder: &Path) -> Form {
+        Form {
+            name: String::new(),
+            folder: folder.display().to_string(),
+            git: true,
+            error: None,
+        }
     }
 
-    fn new_film(&mut self, ui: &mut egui::Ui, has_git: bool) -> Option<Opened> {
-        ui.label(
-            RichText::new("shotline")
-                .font(theme::slate())
-                .color(theme::PAPER),
-        );
-        ui.add_space(32.0);
-        ui.heading("New film");
-        ui.add_space(10.0);
+    /// The fields and the Create button, with anything `buttons` adds after it.
+    fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        has_git: bool,
+        buttons: impl FnOnce(&mut egui::Ui),
+    ) -> Option<Opened> {
         let label = caption(ui, "Name");
         let name = ui
             .add(
@@ -196,8 +383,7 @@ impl Start {
                     .margin(egui::vec2(8.0, 6.0)),
             )
             .labelled_by(label.id);
-            let choose = ui.button("Choose");
-            if choose.clicked()
+            if ui.button("Choose").clicked()
                 && let Some(d) = rfd::FileDialog::new()
                     .set_directory(expand(&self.folder))
                     .pick_folder()
@@ -205,7 +391,7 @@ impl Start {
                 self.folder = d.display().to_string();
             }
         });
-        let dir = self.new_dir();
+        let dir = self.dir();
         if let Some(d) = &dir {
             hint(ui, &format!("Makes {}", d.display()));
         }
@@ -214,7 +400,13 @@ impl Start {
             ui.checkbox(&mut self.git, "Keep history with git");
         }
         ui.add_space(10.0);
-        let create = ui.add_enabled(dir.is_some(), egui::Button::new("Create film"));
+        let create = ui
+            .horizontal(|ui| {
+                let create = ui.add_enabled(dir.is_some(), egui::Button::new("Create film"));
+                buttons(ui);
+                create
+            })
+            .inner;
         let enter = name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if let Some(e) = &self.error {
             ui.add_space(6.0);
@@ -230,38 +422,8 @@ impl Start {
         }
     }
 
-    fn open_film(&mut self, ui: &mut egui::Ui) -> Option<Opened> {
-        let mut out = None;
-        ui.add_space(36.0);
-        ui.heading("Open a film");
-        ui.add_space(10.0);
-        if ui.button("Choose a folder").clicked()
-            && let Some(d) = rfd::FileDialog::new()
-                .set_directory(expand(&self.folder))
-                .pick_folder()
-        {
-            out = Some(Opened::Existing(d));
-        }
-        if !self.recent.is_empty() {
-            ui.add_space(14.0);
-            caption(ui, "Recent");
-        }
-        for (dir, name) in &self.recent {
-            let row = ui.add(
-                egui::Button::new(
-                    RichText::new(format!("{name}  {}", dir.display())).color(theme::GRAPHITE),
-                )
-                .frame(false),
-            );
-            if row.clicked() {
-                out = Some(Opened::Existing(dir.clone()));
-            }
-        }
-        out
-    }
-
     /// Where a film with the typed name would go.
-    fn new_dir(&self) -> Option<PathBuf> {
+    fn dir(&self) -> Option<PathBuf> {
         let name = self.name.trim();
         if name.is_empty() || self.folder.trim().is_empty() {
             return None;

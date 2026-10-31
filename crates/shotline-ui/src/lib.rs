@@ -4,6 +4,8 @@
 
 mod edit;
 mod git;
+#[cfg(target_os = "macos")]
+mod menu;
 mod player;
 mod start;
 mod theme;
@@ -24,7 +26,7 @@ use shotline_media::Ffmpeg;
 use edit::{Action, Form, History, LineForm};
 use git::{Dialog, Repo};
 use player::{Audio, Deck, Player};
-pub use start::Shell;
+pub use start::{MenuCommand, Shell};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -166,6 +168,10 @@ impl App {
     pub fn with_viewer(mut self, viewer: Option<PathBuf>) -> App {
         self.viewer = viewer;
         self
+    }
+
+    pub fn project(&self) -> &Project {
+        &self.project
     }
 
     pub fn with_git(mut self, git: Option<Git>) -> App {
@@ -1119,7 +1125,14 @@ pub fn run(project: Option<Project>, user_dir: PathBuf) -> anyhow::Result<()> {
     eframe::run_native(
         &title,
         options,
-        Box::new(move |_| Ok(Box::new(Shell::new(project, user_dir, &here)))),
+        Box::new(move |cc| {
+            let shell = Shell::new(project, user_dir, &here);
+            #[cfg(target_os = "macos")]
+            let shell = shell.with_native_menu(&cc.egui_ctx);
+            #[cfg(not(target_os = "macos"))]
+            let _ = cc;
+            Ok(Box::new(shell))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("can't open the window: {e}"))
 }

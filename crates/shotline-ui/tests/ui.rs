@@ -9,7 +9,7 @@ use egui_kittest::kittest::Queryable;
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{Op, Quote};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
-use shotline_ui::{App, Shell, Tab};
+use shotline_ui::{App, MenuCommand, Shell, Tab};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
 fn film(dir: &Path) -> Project {
@@ -281,6 +281,56 @@ fn start_a_film() {
     h.get_by_label_contains("Rain  ").click();
     h.run();
     assert!(h.state().film().is_some());
+}
+
+#[test]
+fn file_and_edit_commands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_git(None)
+        .testing();
+    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+
+    // Edit > Undo takes back the last save.
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
+    plot.focus();
+    plot.type_text("!");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.state_mut().command(MenuCommand::Undo);
+    h.run();
+    assert_eq!(p.shot(R).unwrap().plot, "ผกาเดินเข้าป่า");
+
+    // File > New Film over the open one, given up, then made.
+    h.state_mut().command(MenuCommand::NewFilm);
+    h.run();
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(h.query_by_label("Create film").is_none());
+    assert_eq!(h.state().film().unwrap().project().config.name, "Rain");
+    h.state_mut().command(MenuCommand::NewFilm);
+    h.run();
+    let name = h.get_by_role_and_label(Role::TextInput, "Name");
+    name.focus();
+    name.type_text("Sun");
+    h.run();
+    // Next to the film that was open.
+    h.get_by_label(&format!("Makes {}", tmp.path().join("sun").display()));
+    h.get_by_label("Create film").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().film().unwrap().project().config.name, "Sun");
+
+    h.state_mut().command(MenuCommand::CloseFilm);
+    h.run();
+    assert!(h.state().film().is_none());
+    h.get_by_label_contains("Sun  ");
+    h.get_by_label_contains("Rain  ");
 }
 
 #[test]
