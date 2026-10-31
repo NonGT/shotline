@@ -253,3 +253,53 @@ fn frame_and_sound_pipes() {
     let secs = samples as f64 / 2.0 / 48000.0;
     assert!((0.9..1.1).contains(&secs), "{secs}s of sound");
 }
+
+fn line(dir: &Path, name: &str, secs: f64) -> PathBuf {
+    let path = dir.join(name);
+    let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    assert!(
+        Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("sine=frequency=330:duration={secs}"))
+            .args(["-c:a", "libmp3lame"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    path
+}
+
+#[test]
+fn lines_join_into_one_clip() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let clips = vec![
+        shotline_media::lines::Clip {
+            path: line(dir.path(), "a.mp3", 1.0),
+            at: None,
+        },
+        shotline_media::lines::Clip {
+            path: line(dir.path(), "b.mp3", 2.0),
+            at: None,
+        },
+    ];
+    let out = dir.path().join("lines.wav");
+    let starts = ff.join_lines(&clips, &out).unwrap();
+    assert_eq!(starts.len(), 2);
+    // mp3 pads a little, so the second line starts just past 1.3.
+    assert!((starts[1] - 1.3).abs() < 0.1, "{starts:?}");
+    let len = ff.audio_duration(&out).unwrap();
+    assert!((len - (starts[1] + 2.0)).abs() < 0.1, "{len}");
+
+    let timed = vec![shotline_media::lines::Clip {
+        path: clips[0].path.clone(),
+        at: Some(2.5),
+    }];
+    ff.join_lines(&timed, &out).unwrap();
+    let len = ff.audio_duration(&out).unwrap();
+    assert!(
+        (len - 3.5).abs() < 0.1,
+        "silence before a timed line: {len}"
+    );
+}

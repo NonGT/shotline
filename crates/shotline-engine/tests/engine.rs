@@ -291,7 +291,8 @@ async fn talking(shot_params: &str, budgets: Budgets) -> Film {
         },
     )
     .unwrap();
-    f.p.add_line(R, "paka", "we go on before dark").unwrap();
+    f.p.add_line(R, "paka", "we go on before dark", None)
+        .unwrap();
     f.p.config.recipes = toml::from_str::<toml::Table>(
         r#"
 [[talking]]
@@ -425,11 +426,6 @@ async fn redo_only_the_last_step() {
 #[tokio::test]
 async fn recipe_mistakes_are_caught_before_spending() {
     let f = talking("", Budgets::default()).await;
-    f.p.add_line(R, "paka", "and again").unwrap();
-    let e = f.plan(R).await.unwrap_err().to_string();
-    assert!(e.contains("lip sync takes one audio clip"), "{e}");
-
-    let f = talking("", Budgets::default()).await;
     let mut el = f.p.element("paka").unwrap();
     el.voice = None;
     f.p.add_element(Kind::Cast, "Kan", None, "").unwrap();
@@ -438,4 +434,52 @@ async fn recipe_mistakes_are_caught_before_spending() {
     f.p.save_shot(R, &shot).unwrap();
     let e = f.plan(R).await.unwrap_err().to_string();
     assert!(e.contains("@kan has no voice"), "{e}");
+}
+
+#[tokio::test]
+async fn lines_are_joined_for_lip_sync() {
+    if shotline_media::Ffmpeg::find().is_err() {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    }
+    let f = talking("", Budgets::default()).await;
+    // A second of speech, then 0.45s starting at 2s.
+    f.p.add_line(R, "paka", "and again", Some(2.0)).unwrap();
+    let plan = f.plan(R).await.unwrap();
+    let what: Vec<_> = plan.steps.iter().map(|s| s.what.as_str()).collect();
+    assert_eq!(
+        what,
+        [
+            "line 1 by @paka",
+            "line 2 by @paka",
+            "video",
+            "video.lipsync"
+        ]
+    );
+    let out = take(&f.p, &f.books, &f.plugins, &plan, &fast(), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(out.error, None);
+    let jobs = &out.take.jobs;
+    let lipsync = &jobs[3];
+    for line in &jobs[..2] {
+        assert!(lipsync.inputs.contains(&line.id.to_string()));
+    }
+    let joined = f.p.job_dir(lipsync.id).join("lines.wav");
+    let len = shotline_media::Ffmpeg::find()
+        .unwrap()
+        .audio_duration(&joined)
+        .unwrap();
+    assert!((len - 2.45).abs() < 0.05, "{len}");
+
+    // Redoing only lip sync joins the same lines again, for free.
+    let t1 = f.p.take(R, "1").unwrap();
+    let again = shotline_engine::plan(&f.p, &f.catalog, &f.books, &f.plugins, R, Some((&t1, 3)))
+        .await
+        .unwrap();
+    let out = take(&f.p, &f.books, &f.plugins, &again, &fast(), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(out.error, None);
+    assert!(f.p.job_dir(out.job.id).join("lines.wav").is_file());
 }

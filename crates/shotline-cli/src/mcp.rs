@@ -282,6 +282,8 @@ pub struct Line {
     /// @handle of the cast member
     who: String,
     text: String,
+    /// Seconds into the shot it starts (default: after the line before)
+    at: Option<f64>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -584,8 +586,9 @@ impl Server {
         Parameters(p): Parameters<Line>,
         ctx: RequestContext<RoleServer>,
     ) -> Reply {
-        self.cli(a(["shot", "line", &p.shot, &p.who, &p.text]), None, &ctx)
-            .await
+        let mut args = a(["shot", "line", &p.shot, &p.who, &p.text]);
+        opt(&mut args, "--at", p.at);
+        self.cli(args, None, &ctx).await
     }
 
     /// List shots, all or one chapter's.

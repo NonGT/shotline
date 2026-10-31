@@ -2,7 +2,7 @@
 //! forward, book what it cost. Shared by the CLI and later the MCP server and UI.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,8 +38,9 @@ enum StepKind {
     Line(usize),
     /// The shot's video; `audio` sends the spoken lines along.
     Generate { audio: bool },
-    /// Anything working on the video so far: lip sync, upscale, ...
-    Process,
+    /// Anything working on the video so far: lip sync, upscale, ... `join` mixes the lines
+    /// into one clip first.
+    Process { join: bool },
 }
 
 /// One job of a take.
@@ -69,6 +70,8 @@ pub struct Plan {
     pub steps: Vec<StepPlan>,
     pub total: f64,
     pub currency: String,
+    /// When each line starts, if it says.
+    line_starts: Vec<Option<f64>>,
 }
 
 fn to_json(t: &toml::Table) -> serde_json::Map<String, serde_json::Value> {
@@ -269,18 +272,22 @@ pub async fn plan(
                 };
                 req.inputs
                     .insert("video".into(), pending(project, "video.mp4"));
+                let mut join = false;
                 if *op == Op::VideoLipsync {
-                    match shot.lines.len() {
-                        1 => {}
-                        0 => bail!("lip sync needs a line, {r} has none"),
-                        n => bail!(
-                            "lip sync takes one audio clip and {r} has {n} lines; joining them comes with the media work"
-                        ),
+                    if shot.lines.is_empty() {
+                        bail!("lip sync needs a line, {r} has none");
                     }
-                    req.inputs
-                        .insert("audio".into(), pending(project, "line0.mp3"));
+                    join = shot.lines.len() > 1
+                        || shot.lines.iter().any(|l| l.at.is_some_and(|a| a > 0.0));
+                    if join {
+                        shotline_media::Ffmpeg::find().with_context(|| {
+                            format!("lip sync takes one clip, so {r}'s lines get joined first")
+                        })?;
+                    }
+                    let audio = if join { "lines.wav" } else { "line0.mp3" };
+                    req.inputs.insert("audio".into(), pending(project, audio));
                 }
-                steps.push((StepKind::Process, op.to_string(), plugin, req));
+                steps.push((StepKind::Process { join }, op.to_string(), plugin, req));
             }
         }
     }
@@ -350,6 +357,7 @@ pub async fn plan(
         steps: out,
         total,
         currency: books.currency.clone(),
+        line_starts: shot.lines.iter().map(|l| l.at).collect(),
     })
 }
 
@@ -797,11 +805,23 @@ pub async fn take(
                     }
                 }
             }
-            StepKind::Process => {
+            StepKind::Process { join } => {
                 let (v, vid) = video.clone().context("no video to work on yet")?;
                 req.inputs.insert("video".into(), v);
                 inputs.push(vid.to_string());
-                if req.inputs.contains_key("audio") {
+                if join && let Some(j) = &job {
+                    let out = project.job_dir(j.id).join("lines.wav");
+                    if let Err(e) = join_lines(plan, &audio, &out) {
+                        let now = project.clock.now();
+                        let id = j.id.to_string();
+                        for h in held.iter().skip_while(|h| **h != id) {
+                            books.release(now, h, None)?;
+                        }
+                        return Err(e);
+                    }
+                    req.inputs.insert("audio".into(), out);
+                    inputs.extend(audio.values().map(|(_, id)| id.to_string()));
+                } else if req.inputs.contains_key("audio") {
                     let (a, aid) = audio.get(&0).context("the line's audio is missing")?;
                     req.inputs.insert("audio".into(), a.clone());
                     inputs.push(aid.to_string());
@@ -848,6 +868,21 @@ pub async fn take(
     }
     let last = last.context("nothing ran")?;
     outcome(project, r, take_id, last, None)
+}
+
+/// The lines' audio as one clip for lip sync, kept in the lip sync job's folder.
+fn join_lines(plan: &Plan, audio: &BTreeMap<usize, (PathBuf, Ulid)>, out: &Path) -> Result<()> {
+    let clips: Vec<_> = audio
+        .iter()
+        .map(|(i, (path, _))| shotline_media::lines::Clip {
+            path: path.clone(),
+            at: plan.line_starts.get(*i).copied().flatten(),
+        })
+        .collect();
+    shotline_media::Ffmpeg::find()?
+        .join_lines(&clips, out)
+        .with_context(|| format!("joining {}'s lines for lip sync", plan.shot))?;
+    Ok(())
 }
 
 fn outcome(

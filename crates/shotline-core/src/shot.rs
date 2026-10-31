@@ -89,6 +89,9 @@ pub struct Shot {
 pub struct Line {
     pub who: String,
     pub text: String,
+    /// Seconds into the shot it starts; without it, it follows the line before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,7 +285,7 @@ impl Project {
         Ok(out)
     }
 
-    pub fn add_line(&self, r: ShotRef, who: &str, text: &str) -> Result<Shot> {
+    pub fn add_line(&self, r: ShotRef, who: &str, text: &str, at: Option<f64>) -> Result<Shot> {
         let who = who.trim_start_matches('@');
         let el = self.element(who)?;
         if el.kind != crate::Kind::Cast {
@@ -291,10 +294,14 @@ impl Project {
         if text.trim().is_empty() {
             return invalid("the line is empty");
         }
+        if at.is_some_and(|a| a.is_nan() || a < 0.0) {
+            return invalid("a line starts at 0 seconds or later");
+        }
         let mut shot = self.shot(r)?;
         shot.lines.push(Line {
             who: who.to_string(),
             text: text.to_string(),
+            at,
         });
         self.save_shot(r, &shot)?;
         Ok(shot)

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 pub mod colour;
+pub mod lines;
 pub mod play;
 pub mod render;
 

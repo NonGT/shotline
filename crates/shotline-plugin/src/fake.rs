@@ -11,7 +11,9 @@
 //!
 //! `usage` answers with the contents of `shotline-fake-usage.json` in the working directory, if
 //! there is one. The balance starts at 100 USD for each process. `fake/metered` quotes in
-//! `fake-second`, which has no rate anywhere; the balance drops 0.03 USD a second.
+//! `fake-second`, which has no rate anywhere; the balance drops 0.03 USD a second. `fake/text`
+//! answers with the last line of its prompt, and `fake/tts` with a silent WAV a twentieth of a
+//! second long per character.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -116,6 +118,27 @@ fn models() -> Vec<ModelInfo> {
             ..ModelInfo::default()
         },
     ]
+}
+
+/// 16-bit mono 16 kHz WAV of silence.
+fn silence(secs: f64) -> Vec<u8> {
+    let rate = 16_000u32;
+    let data = (secs * rate as f64) as u32 * 2;
+    let mut w = Vec::with_capacity(44 + data as usize);
+    w.extend(b"RIFF");
+    w.extend((36 + data).to_le_bytes());
+    w.extend(b"WAVEfmt ");
+    w.extend(16u32.to_le_bytes());
+    w.extend(1u16.to_le_bytes());
+    w.extend(1u16.to_le_bytes());
+    w.extend(rate.to_le_bytes());
+    w.extend((rate * 2).to_le_bytes());
+    w.extend(2u16.to_le_bytes());
+    w.extend(16u16.to_le_bytes());
+    w.extend(b"data");
+    w.extend(data.to_le_bytes());
+    w.resize(44 + data as usize, 0);
+    w
 }
 
 fn kind_param(req: &Request, key: &str) -> Result<Option<ErrorKind>> {
@@ -351,12 +374,11 @@ impl Plugin for FakePlugin {
             Op::TextGenerate => ("out.txt", MediaKind::Data),
             _ => ("out.mp4", MediaKind::Video),
         };
+        let prompt = req.prompt.as_deref().unwrap_or("").trim();
         let body = match req.op {
-            Op::TextGenerate => {
-                let prompt = req.prompt.as_deref().unwrap_or("").trim();
-                format!("{}\n", prompt.lines().last().unwrap_or(""))
-            }
-            _ => format!("fake {kind:?} from {job}\n"),
+            Op::TextGenerate => format!("{}\n", prompt.lines().last().unwrap_or("")).into_bytes(),
+            Op::AudioTts => silence(prompt.chars().count() as f64 / 20.0),
+            _ => format!("fake {kind:?} from {job}\n").into_bytes(),
         };
         let io = |e: std::io::Error| PluginError::new(ErrorKind::Other, e.to_string());
         std::fs::create_dir_all(output_dir).map_err(io)?;

@@ -356,6 +356,9 @@ enum ShotCmd {
         shot: ShotRef,
         who: String,
         text: String,
+        /// Seconds into the shot it starts (default: after the line before)
+        #[arg(long)]
+        at: Option<f64>,
     },
     /// Draft the prompt in English from the plot with the text model
     Draft {
@@ -564,8 +567,9 @@ fn run(cli: Cli) -> Result<()> {
             shot,
             ref who,
             ref text,
+            at,
         }) => {
-            let s = open()?.add_line(shot, who, text)?;
+            let s = open()?.add_line(shot, who, text, at)?;
             println!(
                 "{shot} has {} line{}",
                 s.lines.len(),

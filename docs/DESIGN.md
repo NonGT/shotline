@@ -287,8 +287,9 @@ only pays for the rest.
 Free steps fit on the end, for example `op = "video.upscale"`, `plugin = "local"`,
 `model = "ffmpeg/lanczos"`, `params = { scale = 2 }`, or `video.interpolate` with `rife`.
 
-Lip sync takes one audio clip, so for now it needs a shot with one line; joining several comes
-with the media work.
+Lip sync takes one audio clip. A shot with several lines (or a line with `at`) gets them mixed
+into `lines.wav` in the lip sync job's folder first: each line starts at its `at` seconds, or 0.3s
+after the line before. Redoing lip sync with `--from-step` joins the same lines again for free.
 
 ## Continuity
 
@@ -424,7 +425,7 @@ shotline shot add <chapter> [--after id] --plot ... [--prompt ...] [--duration n
 shotline shot add ... [--plugin p] [--model m] [--recipe r]
 shotline shot set <shot> [--title] [--plot] [--prompt] [--frame-prompt] [--duration] [--transition] [--recipe]
 shotline shot draft <shot> [--as video|image|translate] [--write] [--plugin p] [--model m] [--yes]
-shotline shot line <shot> <who> <text>
+shotline shot line <shot> <who> <text> [--at s]
 shotline shot ls [chapter]
 shotline shot show <id>
 shotline prompt <shot>

@@ -32,6 +32,7 @@ fn film() -> (TempDir, Project, ShotRef) {
                 lines: vec![Line {
                     who: "paka".into(),
                     text: "ไปกันเถอะ".into(),
+                    at: None,
                 }],
                 ..Shot::default()
             },
