@@ -140,6 +140,68 @@ fn edit_a_shot() {
 }
 
 #[test]
+fn undo_and_redo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness(tmp.path());
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let p = Project::open(&tmp.path().join("film")).unwrap();
+
+    // Two fields saved at once come back as one step.
+    let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
+    plot.focus();
+    plot.type_text("!");
+    h.run();
+    let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Prompt");
+    prompt.focus();
+    prompt.type_text("!");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    let edited = p.shot(R).unwrap();
+    assert_eq!(edited.plot, "ผกาเดินเข้าป่า!");
+    assert_eq!(edited.prompt, "@paka walks into the trees!");
+
+    h.get_by_label("Undo").click();
+    h.run();
+    h.run();
+    let s = p.shot(R).unwrap();
+    assert_eq!(s.plot, "ผกาเดินเข้าป่า");
+    assert_eq!(s.prompt, "@paka walks into the trees");
+    assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาเดินเข้าป่า");
+    h.get_by_label("undid the change to 01-010");
+    assert!(h.query_by_label("Undo").is_none());
+
+    h.key_press_modifiers(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::Z,
+    );
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap(), edited);
+    h.get_by_label("redid the change to 01-010");
+
+    h.get_by_label("Select #1").click();
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap(), edited);
+
+    // Changed by something else since: undo leaves it alone.
+    let mut s = edited.clone();
+    s.title = "Paka runs".into();
+    p.save_shot(R, &s).unwrap();
+    h.get_by_label("Undo").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap(), s);
+    h.get_by_label("01-010 was changed outside the app since");
+}
+
+#[test]
 fn browse_and_select_a_take() {
     let tmp = tempfile::tempdir().unwrap();
     let mut h = harness(tmp.path());

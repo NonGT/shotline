@@ -19,7 +19,7 @@ use shotline_core::{
 };
 use shotline_media::Ffmpeg;
 
-use edit::{Action, Form, LineForm};
+use edit::{Action, Form, History, LineForm};
 use player::{Audio, Deck, Player};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +81,7 @@ pub struct App {
     place: Option<(Tab, Option<ShotRef>)>,
     themed: bool,
     form: Form,
+    history: History,
 }
 
 const VIEWERS: [&str; 2] = ["mpv", "ffplay"];
@@ -142,6 +143,7 @@ impl App {
             place: None,
             themed: false,
             form: Form::default(),
+            history: History::default(),
         };
         app.reload();
         app
@@ -391,17 +393,36 @@ impl App {
                     });
                 });
             });
-        if let Some((msg, err)) = &self.status {
-            let (msg, err) = (msg.clone(), *err);
-            egui::Panel::bottom("status").show(ui, |ui| {
-                let color = if err {
-                    ui.visuals().error_fg_color
-                } else {
-                    ui.visuals().weak_text_color()
-                };
-                ui.label(RichText::new(msg).color(color));
+        let (msg, err) = self.status.clone().unwrap_or_default();
+        egui::Panel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::RACK)
+                    .inner_margin(egui::vec2(16.0, 0.0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.set_height(36.0);
+                    let color = if err { theme::FLAG } else { theme::GRAPHITE };
+                    ui.label(RichText::new(msg).color(color));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let cmd = if ui.ctx().os() == egui::os::OperatingSystem::Mac {
+                            "Cmd"
+                        } else {
+                            "Ctrl"
+                        };
+                        // Right to left: Redo first so it ends up on the right.
+                        let redo = self.history.redo_what();
+                        if history_button(ui, "Redo", redo, &format!("{cmd}+Shift+Z")) {
+                            self.redo();
+                        }
+                        let undo = self.history.undo_what();
+                        if history_button(ui, "Undo", undo, &format!("{cmd}+Z")) {
+                            self.undo();
+                        }
+                    });
+                });
             });
-        }
         if self.tab != tab
             && !matches!(self.tab, Tab::Shots | Tab::Cut)
             && let Some(d) = &mut self.deck
@@ -418,6 +439,17 @@ impl App {
         self.keep_place();
         if ui.memory(|m| m.focused().is_none()) && ui.ctx().dragged_id().is_none() {
             self.flush();
+            // In a text box these keys undo typing instead.
+            let key = |shift| {
+                let m = egui::Modifiers::COMMAND;
+                let m = if shift { m | egui::Modifiers::SHIFT } else { m };
+                ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(m, egui::Key::Z)))
+            };
+            if key(true) {
+                self.redo();
+            } else if key(false) {
+                self.undo();
+            }
         }
     }
 
@@ -562,9 +594,7 @@ impl App {
         ui.separator();
         ui.add_space(8.0);
         self.take_list(ui, r, s, &mut acts);
-        for a in acts {
-            self.apply(a);
-        }
+        self.apply(acts);
     }
 
     /// Plot, prompt and lines: what the shot says.
@@ -619,10 +649,7 @@ impl App {
         for (i, l) in f.lines.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 line_fields(ui, i, l, &cast, 80.0);
-                if ui
-                    .add(egui::Button::new(RichText::new("Remove").color(theme::DUST)).frame(false))
-                    .clicked()
-                {
+                if quiet_button(ui, "Remove").clicked() {
                     acts.push(Action::RemoveLine(r, i));
                 }
             });
@@ -1024,6 +1051,18 @@ fn line_fields(
 /// What to do about something missing.
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).color(theme::DUST));
+}
+
+fn history_button(ui: &mut egui::Ui, text: &str, what: Option<String>, keys: &str) -> bool {
+    what.is_some_and(|w| {
+        ui.button(text)
+            .on_hover_text(format!("{text} {w} ({keys})"))
+            .clicked()
+    })
+}
+
+fn quiet_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.add(egui::Button::new(RichText::new(text).color(theme::DUST)).frame(false))
 }
 
 /// A take's button: the number is in the row already, but screen readers and tests get it too.

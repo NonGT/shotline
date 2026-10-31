@@ -1,6 +1,7 @@
 //! Changing the project from the app. Widgets only edit `Form`; once nothing has focus the form is
 //! compared with the shot as read from disk, and each difference becomes an `Action`. `apply` is
-//! the one place that writes, through shotline-core like the CLI.
+//! the one place that writes, through shotline-core like the CLI, and it keeps each shot as it was
+//! before and after so the change can be undone.
 
 use shotline_core::ledger::money;
 use shotline_core::{Shot, ShotRef, Take, Transition};
@@ -65,6 +66,63 @@ pub(crate) enum Action {
     SetLine(ShotRef, usize, LineForm),
     RemoveLine(ShotRef, usize),
     Select(Take),
+}
+
+impl Action {
+    fn shot(&self) -> ShotRef {
+        match self {
+            Action::Set(r, _)
+            | Action::AddLine(r, _)
+            | Action::SetLine(r, ..)
+            | Action::RemoveLine(r, _) => *r,
+            Action::Select(t) => t.shot,
+        }
+    }
+}
+
+struct Change {
+    shot: ShotRef,
+    before: Shot,
+    after: Shot,
+}
+
+impl Change {
+    /// The shot as it is now and as it will be once this change is undone, or redone.
+    fn ends(&self, back: bool) -> (&Shot, &Shot) {
+        if back {
+            (&self.after, &self.before)
+        } else {
+            (&self.before, &self.after)
+        }
+    }
+}
+
+/// What one save did, as a whole: undo takes back every shot it touched.
+struct Step {
+    changes: Vec<Change>,
+}
+
+impl Step {
+    fn what(&self) -> String {
+        let shots: Vec<String> = self.changes.iter().map(|c| c.shot.to_string()).collect();
+        format!("the change to {}", shots.join(" and "))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct History {
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+}
+
+impl History {
+    pub fn undo_what(&self) -> Option<String> {
+        self.undo.last().map(Step::what)
+    }
+
+    pub fn redo_what(&self) -> Option<String> {
+        self.redo.last().map(Step::what)
+    }
 }
 
 impl Form {
@@ -135,30 +193,97 @@ impl App {
         if self.form.shot != Some(r) {
             return;
         }
-        for a in self.form.changes(r, &s, self.project.config.duration) {
-            self.apply(a);
+        let acts = self.form.changes(r, &s, self.project.config.duration);
+        self.apply(acts);
+    }
+
+    /// Writes the actions as one step of the undo history.
+    pub(crate) fn apply(&mut self, acts: Vec<Action>) {
+        let mut step = Step { changes: vec![] };
+        for a in acts {
+            let r = a.shot();
+            let before = self.project.shot(r);
+            let added = matches!(a, Action::AddLine(..));
+            match self.write(a) {
+                Ok(msg) => {
+                    if let (Ok(before), Ok(after)) = (before, self.project.shot(r)) {
+                        match step.changes.iter_mut().find(|c| c.shot == r) {
+                            Some(c) => c.after = after,
+                            None => step.changes.push(Change {
+                                shot: r,
+                                before,
+                                after,
+                            }),
+                        }
+                    }
+                    self.info(msg);
+                    if added {
+                        self.form.new.text.clear();
+                        self.form.new.at.clear();
+                    }
+                    self.reload();
+                }
+                Err(e) => {
+                    self.error(e.to_string());
+                    // Back to what's on disk, or a bad value would be retried every frame.
+                    let new = self.form.new.clone();
+                    self.fill_form();
+                    self.form.new = new;
+                }
+            }
+        }
+        step.changes.retain(|c| c.before != c.after);
+        if !step.changes.is_empty() {
+            self.history.undo.push(step);
+            self.history.redo.clear();
         }
     }
 
-    pub(crate) fn apply(&mut self, a: Action) {
-        let added = matches!(a, Action::AddLine(..));
-        match self.write(a) {
-            Ok(msg) => {
-                self.info(msg);
-                if added {
-                    self.form.new.text.clear();
-                    self.form.new.at.clear();
-                }
-                self.reload();
+    pub(crate) fn undo(&mut self) {
+        self.travel(true);
+    }
+
+    pub(crate) fn redo(&mut self) {
+        self.travel(false);
+    }
+
+    fn travel(&mut self, back: bool) {
+        self.flush();
+        let from = if back {
+            &mut self.history.undo
+        } else {
+            &mut self.history.redo
+        };
+        let Some(step) = from.pop() else { return };
+        match self.restore(&step, back) {
+            Ok(()) => {
+                let done = if back { "undid" } else { "redid" };
+                self.info(format!("{done} {}", step.what()));
+                let to = if back {
+                    &mut self.history.redo
+                } else {
+                    &mut self.history.undo
+                };
+                to.push(step);
             }
-            Err(e) => {
-                self.error(e.to_string());
-                // Back to what's on disk, or a bad value would be retried every frame.
-                let new = self.form.new.clone();
-                self.fill_form();
-                self.form.new = new;
+            // The step is dropped: the files moved on without it.
+            Err(e) => self.error(e.to_string()),
+        }
+        self.reload();
+    }
+
+    fn restore(&self, step: &Step, back: bool) -> anyhow::Result<()> {
+        // Something else, like the co-director over MCP, may have changed the shot since; don't
+        // write over that.
+        for c in &step.changes {
+            if self.project.shot(c.shot)? != *c.ends(back).0 {
+                anyhow::bail!("{} was changed outside the app since", c.shot);
             }
         }
+        for c in &step.changes {
+            self.project.save_shot(c.shot, c.ends(back).1)?;
+        }
+        Ok(())
     }
 
     fn write(&mut self, a: Action) -> anyhow::Result<String> {
