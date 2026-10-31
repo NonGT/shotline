@@ -103,6 +103,11 @@ fn models() -> Vec<ModelInfo> {
             ..ModelInfo::default()
         },
         ModelInfo {
+            id: "fake/text".into(),
+            op: Op::TextGenerate,
+            ..ModelInfo::default()
+        },
+        ModelInfo {
             id: "fake/image".into(),
             op: Op::ImageGenerate,
             ref_image: Some("image {n}".into()),
@@ -199,6 +204,12 @@ fn price(req: &Request) -> Quote {
             unit: "USD".into(),
             units: Some(1.0),
             unit_name: Some("image".into()),
+        },
+        "fake/text" => Quote {
+            amount: 0.001,
+            unit: "USD".into(),
+            units: None,
+            unit_name: None,
         },
         "fake/smooth" => Quote {
             amount: 0.0,
@@ -330,18 +341,26 @@ impl Plugin for FakePlugin {
     }
 
     async fn fetch(&self, job: &str, output_dir: &Path) -> Result<Outputs> {
-        let op = {
+        let req = {
             let jobs = self.jobs.lock().unwrap();
-            jobs.get(job).ok_or_else(|| not_found(job))?.req.op.clone()
+            jobs.get(job).ok_or_else(|| not_found(job))?.req.clone()
         };
-        let (file, kind) = match op {
+        let (file, kind) = match req.op {
             Op::AudioTts | Op::AudioMusic | Op::AudioSfx => ("out.wav", MediaKind::Audio),
             Op::ImageGenerate | Op::ImageEdit => ("out.png", MediaKind::Image),
+            Op::TextGenerate => ("out.txt", MediaKind::Data),
             _ => ("out.mp4", MediaKind::Video),
+        };
+        let body = match req.op {
+            Op::TextGenerate => {
+                let prompt = req.prompt.as_deref().unwrap_or("").trim();
+                format!("{}\n", prompt.lines().last().unwrap_or(""))
+            }
+            _ => format!("fake {kind:?} from {job}\n"),
         };
         let io = |e: std::io::Error| PluginError::new(ErrorKind::Other, e.to_string());
         std::fs::create_dir_all(output_dir).map_err(io)?;
-        std::fs::write(output_dir.join(file), format!("fake {kind:?} from {job}\n")).map_err(io)?;
+        std::fs::write(output_dir.join(file), body).map_err(io)?;
         let mut env: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
         env.sort();
         Ok(Outputs {

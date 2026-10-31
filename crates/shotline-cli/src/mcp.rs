@@ -269,6 +269,8 @@ pub struct ShotSet {
     title: Option<String>,
     plot: Option<String>,
     prompt: Option<String>,
+    /// What the storyboard frame is made from instead of the prompt; "" clears it
+    frame_prompt: Option<String>,
     duration: Option<f64>,
     transition: Option<String>,
     recipe: Option<String>,
@@ -557,7 +559,7 @@ impl Server {
         self.cli(args, None, &ctx).await
     }
 
-    /// Change a shot's title, plot, prompt, duration, transition or recipe.
+    /// Change a shot's title, plot, prompt, frame prompt, duration, transition or recipe.
     #[tool]
     async fn shot_set(
         &self,
@@ -568,6 +570,7 @@ impl Server {
         opt(&mut args, "--title", p.title);
         opt(&mut args, "--plot", p.plot);
         opt(&mut args, "--prompt", p.prompt);
+        opt(&mut args, "--frame-prompt", p.frame_prompt);
         opt(&mut args, "--duration", p.duration);
         opt(&mut args, "--transition", p.transition);
         opt(&mut args, "--recipe", p.recipe);

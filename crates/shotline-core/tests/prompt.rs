@@ -253,6 +253,12 @@ fn storyboard_frame_is_the_start_frame() {
     assert_eq!(b.aspect, "9:16");
 
     let mut shot = p.shot(r).unwrap();
+    shot.frame_prompt = Some("@paka stands at the edge of the trees".into());
+    p.save_shot(r, &shot).unwrap();
+    let b = image(&p, ImageFor::Frame(r)).unwrap();
+    assert!(b.text.contains("image 2) stands at the edge"), "{}", b.text);
+
+    let mut shot = p.shot(r).unwrap();
     shot.frame = Some("chapters/01-into-the-forest/shots/010.png".into());
     p.save_shot(r, &shot).unwrap();
     fs::write(dir.path().join(shot.frame.as_ref().unwrap()), b"png").unwrap();

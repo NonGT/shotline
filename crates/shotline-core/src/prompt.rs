@@ -81,6 +81,11 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
     let duration = shot.duration.unwrap_or(cfg.duration);
     let spec = &catalog.get(&plugin, &model, &Op::VideoGenerate)?.info;
     let mut warnings = vec![];
+    if shot.prompt.trim().is_empty() {
+        warnings.push(format!(
+            "{r} has no prompt yet, `shotline shot draft {r}` can write one from the plot"
+        ));
+    }
     let (text, references) = resolve(project, spec, &shot.prompt, &shot.elements, &mut warnings)?;
     let mut parts = vec![text];
     add_layers(project, &references, &mut parts)?;
@@ -252,8 +257,8 @@ pub fn build_image(
         }
         ImageFor::Frame(r) => {
             let shot = project.shot(*r)?;
-            let (text, references) =
-                resolve(project, spec, &shot.prompt, &shot.elements, &mut warnings)?;
+            let prompt = shot.frame_prompt.as_deref().unwrap_or(&shot.prompt);
+            let (text, references) = resolve(project, spec, prompt, &shot.elements, &mut warnings)?;
             let mut parts = vec![];
             if let Some(t) = project.template("storyboard")? {
                 parts.push(render(&t, &[]));

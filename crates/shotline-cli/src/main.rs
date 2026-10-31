@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use shotline_core::ledger::report::By;
-use shotline_core::{Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voice, build};
+use shotline_core::{Draft, Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voice, build};
 
 mod cost;
+mod draft;
 mod image;
 mod mcp;
 mod plugins;
@@ -159,6 +160,33 @@ impl ImageArgs {
     }
 }
 
+#[derive(clap::Args)]
+struct TextArgs {
+    /// Text plugin instead of [text] in shotline.toml
+    #[arg(long)]
+    plugin: Option<String>,
+    /// Text model instead of [text] in shotline.toml
+    #[arg(long)]
+    model: Option<String>,
+    /// Save the draft without asking
+    #[arg(long)]
+    write: bool,
+    /// Don't ask before spending (nor whether to save, without --write)
+    #[arg(long)]
+    yes: bool,
+}
+
+impl TextArgs {
+    fn ask(&self) -> draft::Ask<'_> {
+        draft::Ask {
+            plugin: self.plugin.as_deref(),
+            model: self.model.as_deref(),
+            yes: self.yes,
+            write: self.write,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum CostCmd {
     /// Check nobody edited the ledger
@@ -245,6 +273,12 @@ enum ElementCmd {
         #[command(flatten)]
         image: ImageArgs,
     },
+    /// Translate an element's description into English with the text model
+    Draft {
+        handle: String,
+        #[command(flatten)]
+        text: TextArgs,
+    },
     /// Give a cast member a voice for their lines
     Voice {
         handle: String,
@@ -281,7 +315,8 @@ enum ShotCmd {
         title: String,
         #[arg(long, default_value = "")]
         plot: String,
-        #[arg(long)]
+        /// Can be left out and drafted from the plot later with `shot draft`
+        #[arg(long, default_value = "")]
         prompt: String,
         #[arg(long)]
         duration: Option<f64>,
@@ -306,6 +341,9 @@ enum ShotCmd {
         plot: Option<String>,
         #[arg(long)]
         prompt: Option<String>,
+        /// What the storyboard frame is made from instead of the prompt; "" clears it
+        #[arg(long)]
+        frame_prompt: Option<String>,
         #[arg(long)]
         duration: Option<f64>,
         #[arg(long)]
@@ -318,6 +356,16 @@ enum ShotCmd {
         shot: ShotRef,
         who: String,
         text: String,
+    },
+    /// Draft the prompt in English from the plot with the text model
+    Draft {
+        shot: ShotRef,
+        /// video (the prompt), image (the storyboard frame's prompt) or translate (the plot
+        /// word for word, as the prompt)
+        #[arg(long = "as", default_value = "video")]
+        how: Draft,
+        #[command(flatten)]
+        text: TextArgs,
     },
     Ls {
         chapter: Option<String>,
@@ -385,6 +433,10 @@ fn run(cli: Cli) -> Result<()> {
                 println!("{}", p.rel(&dest));
             }
         }
+        Cmd::Element(ElementCmd::Draft {
+            ref handle,
+            ref text,
+        }) => draft::element(&open()?, handle, &text.ask())?,
         Cmd::Element(ElementCmd::Voice {
             ref handle,
             ref plugin,
@@ -481,12 +533,16 @@ fn run(cli: Cli) -> Result<()> {
             ref title,
             ref plot,
             ref prompt,
+            ref frame_prompt,
             duration,
             transition,
             ref recipe,
         }) => {
             let p = open()?;
             let mut s = p.shot(shot)?;
+            if let Some(t) = frame_prompt {
+                s.frame_prompt = (!t.is_empty()).then(|| t.clone());
+            }
             if let Some(t) = title {
                 s.title = t.clone();
             }
@@ -516,6 +572,11 @@ fn run(cli: Cli) -> Result<()> {
                 if s.lines.len() == 1 { "" } else { "s" }
             );
         }
+        Cmd::Shot(ShotCmd::Draft {
+            shot,
+            how,
+            ref text,
+        }) => draft::shot(&open()?, shot, how, &text.ask())?,
         Cmd::Shot(ShotCmd::Ls { ref chapter }) => {
             let p = open()?;
             for (r, s) in p.shots(chapter.as_deref())? {
@@ -523,7 +584,7 @@ fn run(cli: Cli) -> Result<()> {
                 let label = [&s.title, &s.plot, &s.prompt]
                     .into_iter()
                     .find(|t| !t.is_empty())
-                    .unwrap();
+                    .map_or("", |t| t.as_str());
                 println!("{r}  {:<8} {secs:>4}s  {label}", s.transition);
             }
         }

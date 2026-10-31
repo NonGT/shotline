@@ -182,6 +182,13 @@ impl Project {
         Ok(el)
     }
 
+    pub fn set_description(&self, handle: &str, description: &str) -> Result<Element> {
+        let mut el = self.element(handle)?;
+        el.description = description.to_string();
+        fsx::write_toml(&self.element_file(el.kind, &el.handle), &el)?;
+        Ok(el)
+    }
+
     pub fn anchors(&self, el: &Element) -> Result<Vec<PathBuf>> {
         Ok(fsx::list(&self.anchor_dir(el))?
             .into_iter()

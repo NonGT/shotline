@@ -33,6 +33,8 @@ pub struct Config {
     pub prompt: PromptLayers,
     /// What anchors and storyboard frames are made with.
     pub image: ImageConfig,
+    /// What drafts prompts from plot.
+    pub text: TextConfig,
 }
 
 impl Default for Config {
@@ -50,6 +52,7 @@ impl Default for Config {
             recipes: BTreeMap::new(),
             prompt: PromptLayers::default(),
             image: ImageConfig::default(),
+            text: TextConfig::default(),
         }
     }
 }
@@ -73,6 +76,22 @@ impl Default for ImageConfig {
             model: "fal-ai/nano-banana".into(),
             resolution: None,
             aspect: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextConfig {
+    pub plugin: String,
+    pub model: String,
+}
+
+impl Default for TextConfig {
+    fn default() -> Self {
+        Self {
+            plugin: "venice".into(),
+            model: "claude-haiku-5-5".into(),
         }
     }
 }

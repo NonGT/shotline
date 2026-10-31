@@ -126,6 +126,22 @@ aspect = "9:16"                # defaults to the project's
 
 With references attached, fal goes to the model's `/edit` endpoint and Venice to `multi-edit`.
 
+Plot can be written in Thai and the prompt drafted from it by a text model (`text.generate`).
+`shot draft` fills its template with the plot, the elements and their @handles, who speaks and the
+current prompt: `draft-video.md` asks for a video prompt, `draft-image.md` for a still (saved as
+the shot's `frame_prompt`, which storyboard frames use instead of the prompt) and `translate.md`
+for a plain translation. `element draft` translates a description. Lines are never sent, they
+stay Thai for TTS and lip sync. A draft that uses a @handle that isn't an element is refused. It
+shows the draft and asks before saving, unless `--write`.
+
+```toml
+[text]
+plugin = "venice"
+model = "claude-haiku-5-5"
+```
+
+The agent can still write prompts itself over MCP; this is for working without one.
+
 ## Operations
 
 shotline core works with a fixed set of operations it understands, so it can chain them and check
@@ -142,6 +158,7 @@ audio.tts          text + voice -> audio
 audio.music        prompt -> audio
 audio.sfx          prompt -> audio
 audio.transcribe   audio -> text with timings
+text.generate      prompt -> text                      draft English prompts from Thai plot
 x.<name>           files + params -> files and/or JSON, for anything else
 ```
 
@@ -398,13 +415,15 @@ shotline doctor
 shotline plugin ls | doctor <name> | balance [name]
 shotline element add <kind> <name> [--handle h] [--desc ...]
 shotline element anchor <handle> (--file img | --generate [--prompt ..] [--plugin p] [--model m] [--yes])
+shotline element draft <handle> [--write] [--plugin p] [--model m] [--yes]
 shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--sample f] [--set k=v]
 shotline element ls
 shotline chapter add <title>
 shotline chapter ls
-shotline shot add <chapter> [--after id] --plot ... --prompt ... [--duration n] [--transition cut|continue]
+shotline shot add <chapter> [--after id] --plot ... [--prompt ...] [--duration n] [--transition cut|continue]
 shotline shot add ... [--plugin p] [--model m] [--recipe r]
-shotline shot set <shot> [--title] [--plot] [--prompt] [--duration] [--transition] [--recipe]
+shotline shot set <shot> [--title] [--plot] [--prompt] [--frame-prompt] [--duration] [--transition] [--recipe]
+shotline shot draft <shot> [--as video|image|translate] [--write] [--plugin p] [--model m] [--yes]
 shotline shot line <shot> <who> <text>
 shotline shot ls [chapter]
 shotline shot show <id>
@@ -529,7 +548,6 @@ windows.
 
 ## Not sure yet
 
-- Should shotline translate Thai plot text into English prompts, or leave that to the agent?
 - Colour matching gets harder when the previous take came from a different model.
 - Hooks (run something after every take) or are recipes enough?
 - Should plugins be able to add their own CLI commands, or only operations?

@@ -104,8 +104,50 @@ fn edit_list() -> serde_json::Value {
     json!({"data": data})
 }
 
+/// Per million tokens, in and out.
+fn text_list() -> serde_json::Value {
+    let data: Vec<_> = venice::models()
+        .iter()
+        .filter(|m| m.op == Op::TextGenerate)
+        .map(|m| {
+            json!({"id": m.id, "model_spec": {"pricing": {
+                "input": {"usd": 0.1, "diem": 0.1}, "output": {"usd": 0.5, "diem": 0.5}
+            }}})
+        })
+        .collect();
+    json!({"data": data})
+}
+
 async fn mock() -> MockServer {
     let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(query_param("type", "text"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(text_list()))
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(
+            json!({"messages": [{"role": "user", "content": "empty"}]}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "<think>hmm</think>"}}]
+        })))
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "venice_parameters": {"include_venice_system_prompt": false}
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant",
+                "content": "<think>plan</think>\n@paka walks into the trees at dusk."}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 200, "total_tokens": 1200}
+        })))
+        .mount(&s)
+        .await;
     Mock::given(method("GET"))
         .and(path("/models"))
         .and(query_param("type", "image"))
@@ -280,6 +322,43 @@ async fn images() {
         Err(Error::Plugin(e)) => assert_eq!(e.kind, ErrorKind::ContentPolicy),
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn text() {
+    let s = mock().await;
+    let v = Venice::new(Some("k".into()), &s.uri());
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = Request {
+        op: Op::TextGenerate,
+        model: "claude-haiku-5-5".into(),
+        prompt: Some("ผกาเดินเข้าป่า".into()),
+        ..Request::default()
+    };
+    // 14 characters in, and the whole 2048 tokens out.
+    let q = v.quote(&r).await.unwrap().amount;
+    assert!((q - (14.0 * 0.1 + 2048.0 * 0.5) / 1e6).abs() < 1e-12, "{q}");
+    let job = v.run(&r, dir.path()).await.unwrap();
+    let st = v.poll(&job).await.unwrap();
+    assert_eq!(st.state, State::Done);
+    let cost = st.cost.unwrap();
+    assert!((cost.amount - 0.0002).abs() < 1e-12, "{cost:?}");
+    assert_eq!(cost.units, Some(1200.0));
+    let out = v.fetch(&job, &dir.path().join("o")).await.unwrap();
+    assert_eq!(out.outputs[0].file, "out.txt");
+    assert_eq!(out.outputs[0].kind, MediaKind::Data);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("o/out.txt")).unwrap(),
+        "@paka walks into the trees at dusk."
+    );
+
+    r.prompt = Some("empty".into());
+    assert!(
+        v.run(&r, dir.path()).await.is_err(),
+        "only thinking, no answer"
+    );
+    r.model = "no-such-text".into();
+    assert!(v.quote(&r).await.is_err());
 }
 
 #[tokio::test]

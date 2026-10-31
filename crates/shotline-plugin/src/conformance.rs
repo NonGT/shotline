@@ -172,7 +172,7 @@ fn output_kind(op: &Op) -> Option<MediaKind> {
             MediaKind::Video
         }
         Op::AudioTts | Op::AudioMusic | Op::AudioSfx => MediaKind::Audio,
-        Op::AudioTranscribe => MediaKind::Data,
+        Op::AudioTranscribe | Op::TextGenerate => MediaKind::Data,
         Op::Custom(_) => return None,
     })
 }
@@ -194,9 +194,11 @@ fn sample_request(m: &ModelInfo, dir: &Path) -> std::io::Result<Request> {
         ..Request::default()
     };
     match m.op {
-        Op::ImageGenerate | Op::VideoGenerate | Op::AudioMusic | Op::AudioSfx => {
-            req.prompt = Some("conformance test".into())
-        }
+        Op::ImageGenerate
+        | Op::VideoGenerate
+        | Op::AudioMusic
+        | Op::AudioSfx
+        | Op::TextGenerate => req.prompt = Some("conformance test".into()),
         Op::AudioTts => req.prompt = Some("conformance test".into()),
         Op::ImageEdit => {
             req.prompt = Some("conformance test".into());

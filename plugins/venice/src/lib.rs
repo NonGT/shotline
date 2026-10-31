@@ -10,6 +10,10 @@
 //! with references go to `POST /image/multi-edit` with the model's `-edit` twin, which answers
 //! with the image itself. Prices come from the model lists (`GET /models?type=image` and
 //! `?type=inpaint` for the edit twins).
+//!
+//! Text goes to `POST /chat/completions` (OpenAI style) and is done right away too. Prices are
+//! USD per million tokens in and out, from `GET /models?type=text`; the answer's `usage` says
+//! how many were used.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -40,6 +44,18 @@ const IMAGES: &[(&str, usize, &[&str])] = &[
     ("gpt-image-2", 6, &["1K", "2K", "4K"]),
 ];
 
+/// Text models for drafting prompts. Venice has many more; add one here to use it.
+const TEXTS: &[&str] = &[
+    "claude-haiku-5-5",
+    "claude-sonnet-5-5",
+    "gemini-3-6-flash",
+    "deepseek-v4-flash",
+    "qwen3-235b-a22b-instruct-2507",
+];
+
+/// Room for the answer. Drafts are a paragraph; the quote assumes all of it gets used.
+const MAX_TOKENS: u64 = 2048;
+
 pub fn models() -> Vec<ModelInfo> {
     let mut models = vec![ModelInfo {
         id: "minimax-h3-max-reference-to-video".into(),
@@ -59,6 +75,13 @@ pub fn models() -> Vec<ModelInfo> {
         audio_input: true,
         ..ModelInfo::default()
     }];
+    for id in TEXTS {
+        models.push(ModelInfo {
+            id: id.to_string(),
+            op: Op::TextGenerate,
+            ..ModelInfo::default()
+        });
+    }
     for (id, max, resolutions) in IMAGES {
         models.push(ModelInfo {
             id: id.to_string(),
@@ -82,12 +105,14 @@ pub struct Venice {
     refs: Mutex<HashMap<String, Vec<usize>>>,
     /// Model lists for image prices: (`type=image`, `type=inpaint`).
     prices: tokio::sync::Mutex<Option<(Value, Value)>>,
+    text_prices: tokio::sync::Mutex<Option<Value>>,
     next: Mutex<u64>,
 }
 
 enum Done {
     Bytes(Vec<u8>),
     Url(String),
+    Text(String, Option<Quote>),
 }
 
 struct Resp {
@@ -121,6 +146,7 @@ impl Venice {
             done: Mutex::new(HashMap::new()),
             refs: Mutex::new(HashMap::new()),
             prices: tokio::sync::Mutex::new(None),
+            text_prices: tokio::sync::Mutex::new(None),
             next: Mutex::new(0),
         }
     }
@@ -201,6 +227,52 @@ impl Venice {
         })
     }
 
+    /// USD per million tokens (in, out) for a text model.
+    async fn text_rates(&self, model: &str) -> Result<(f64, f64)> {
+        let mut cached = self.text_prices.lock().await;
+        if cached.is_none() {
+            *cached = Some(self.model_list("text").await?);
+        }
+        text_rates(cached.as_ref().unwrap(), model).ok_or_else(|| {
+            PluginError::new(
+                ErrorKind::Validation,
+                format!("Venice's model list has no price for {model}"),
+            )
+            .field("model")
+            .into()
+        })
+    }
+
+    async fn text(&self, req: &Request) -> Result<String> {
+        let r = self.post("/chat/completions", &text_body(req)).await?;
+        let v = r.json();
+        if r.status >= 300 {
+            return Err(map_error(r.status, &v, &[]).into());
+        }
+        let text = v
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .map(strip_thinking)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| other(format!("Venice sent no text: {v}")))?;
+        let cost = match self.text_rates(&req.model).await {
+            Ok(rates) => text_cost(&v, rates),
+            Err(_) => None,
+        };
+        let job = format!("{TEXT_JOB}{}#{}", req.model, self.next_id());
+        self.done
+            .lock()
+            .unwrap()
+            .insert(job.clone(), Done::Text(text, cost));
+        Ok(job)
+    }
+
+    fn next_id(&self) -> u64 {
+        let mut next = self.next.lock().unwrap();
+        *next += 1;
+        *next
+    }
+
     async fn image(&self, req: &Request) -> Result<String> {
         let (path, b, refs) = image_body(req)?;
         let r = self.post(path, &b).await?;
@@ -227,12 +299,7 @@ impl Venice {
                 .decode(b64)
                 .map_err(|e| other(format!("Venice's image isn't base64: {e}")))?
         };
-        let n = {
-            let mut next = self.next.lock().unwrap();
-            *next += 1;
-            *next
-        };
-        let job = format!("{IMAGE_JOB}{}#{n}", req.model);
+        let job = format!("{IMAGE_JOB}{}#{}", req.model, self.next_id());
         self.done
             .lock()
             .unwrap()
@@ -241,8 +308,75 @@ impl Venice {
     }
 }
 
-/// Image jobs are done by the time `run` returns; their handles start with this.
+/// Image and text jobs are done by the time `run` returns; their handles start with these.
 const IMAGE_JOB: &str = "image:";
+const TEXT_JOB: &str = "text:";
+
+pub fn text_body(req: &Request) -> Value {
+    let mut b = json!({
+        "model": req.model,
+        "messages": [{"role": "user", "content": req.prompt.clone().unwrap_or_default()}],
+        "max_tokens": MAX_TOKENS,
+        "venice_parameters": {
+            "include_venice_system_prompt": false,
+            "strip_thinking_response": true,
+        },
+    });
+    for (k, v) in &req.params {
+        b[k] = v.clone();
+    }
+    b
+}
+
+/// Models that think out loud may still send their thinking along.
+fn strip_thinking(text: &str) -> String {
+    let t = match text.rfind("</think>") {
+        Some(i) => &text[i + "</think>".len()..],
+        None => text,
+    };
+    t.trim().to_string()
+}
+
+/// USD per million tokens (in, out) from a `type=text` model list.
+pub fn text_rates(list: &Value, id: &str) -> Option<(f64, f64)> {
+    let m = list
+        .get("data")?
+        .as_array()?
+        .iter()
+        .find(|m| m.get("id").and_then(Value::as_str) == Some(id))?;
+    let p = m.pointer("/model_spec/pricing")?;
+    Some((
+        p.pointer("/input/usd")?.as_f64()?,
+        p.pointer("/output/usd")?.as_f64()?,
+    ))
+}
+
+/// Most a request can cost: every character a token, and the whole answer used.
+pub fn text_quote(req: &Request, (input, output): (f64, f64)) -> Quote {
+    let chars = req.prompt.as_deref().unwrap_or("").chars().count() as f64;
+    Quote {
+        amount: (chars * input + MAX_TOKENS as f64 * output) / 1e6,
+        unit: "USD".into(),
+        units: None,
+        unit_name: None,
+    }
+}
+
+/// What a chat answer cost, from its `usage`.
+pub fn text_cost(answer: &Value, (input, output): (f64, f64)) -> Option<Quote> {
+    let used = |k: &str| {
+        answer
+            .pointer(&format!("/usage/{k}"))
+            .and_then(Value::as_f64)
+    };
+    let (i, o) = (used("prompt_tokens")?, used("completion_tokens")?);
+    Some(Quote {
+        amount: (i * input + o * output) / 1e6,
+        unit: "USD".into(),
+        units: Some(i + o),
+        unit_name: Some("tokens".into()),
+    })
+}
 
 /// USD for one image from a Venice model list entry: per resolution or flat, plus any charge
 /// for input images past the ones included.
@@ -416,7 +550,7 @@ pub fn body(req: &Request) -> Result<(Map<String, Value>, Vec<usize>)> {
         return Err(PluginError::new(
             ErrorKind::Unsupported,
             format!(
-                "the Venice plugin does video.generate and image.generate, not {}",
+                "the Venice plugin does video.generate, image.generate and text.generate, not {}",
                 req.op
             ),
         )
@@ -504,6 +638,9 @@ impl Plugin for Venice {
     }
 
     async fn quote(&self, req: &Request) -> Result<Quote> {
+        if req.op == Op::TextGenerate {
+            return Ok(text_quote(req, self.text_rates(&req.model).await?));
+        }
         if req.op == Op::ImageGenerate {
             return Ok(Quote {
                 amount: self.image_price(req).await?,
@@ -542,6 +679,9 @@ impl Plugin for Venice {
         if req.op == Op::ImageGenerate {
             return self.image(req).await;
         }
+        if req.op == Op::TextGenerate {
+            return self.text(req).await;
+        }
         let (b, refs) = body(req)?;
         let r = self.post("/video/queue", &Value::Object(b)).await?;
         let v = r.json();
@@ -559,10 +699,14 @@ impl Plugin for Venice {
 
     async fn poll(&self, job: &str) -> Result<Status> {
         let (model, id) = split(job)?;
-        if self.done.lock().unwrap().contains_key(job) {
-            return Ok(status(State::Done));
+        if let Some(d) = self.done.lock().unwrap().get(job) {
+            let mut s = status(State::Done);
+            if let Done::Text(_, cost) = d {
+                s.cost = cost.clone();
+            }
+            return Ok(s);
         }
-        if job.starts_with(IMAGE_JOB) {
+        if job.starts_with(IMAGE_JOB) || job.starts_with(TEXT_JOB) {
             return Err(PluginError::new(ErrorKind::NotFound, format!("{job} is gone")).into());
         }
         let r = self
@@ -641,6 +785,7 @@ impl Plugin for Venice {
         })?;
         let bytes = match done {
             Done::Bytes(b) => b,
+            Done::Text(t, _) => t.into_bytes(),
             Done::Url(u) => self
                 .http
                 .get(u)
@@ -655,6 +800,8 @@ impl Plugin for Venice {
         };
         let (file, kind) = if job.starts_with(IMAGE_JOB) {
             ("out.png", MediaKind::Image)
+        } else if job.starts_with(TEXT_JOB) {
+            ("out.txt", MediaKind::Data)
         } else {
             ("out.mp4", MediaKind::Video)
         };

@@ -32,7 +32,8 @@ shotline init my-film && cd my-film
 shotline element add cast "Paka" --desc "team lead, 30s"
 shotline element anchor paka --file paka.png   # or --generate
 shotline chapter add "Into the forest"
-shotline shot add 1 --prompt "@paka walks into the trees"
+shotline shot add 1 --plot "ผกาเดินเข้าป่า"
+shotline shot draft 01-010                      # English prompt from the plot
 shotline prompt 01-010
 shotline ui
 ```

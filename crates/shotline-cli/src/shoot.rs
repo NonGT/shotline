@@ -143,7 +143,7 @@ pub fn quote(p: &Project, target: &str) -> Result<()> {
     Ok(())
 }
 
-fn confirm(question: &str) -> Result<bool> {
+pub fn confirm(question: &str) -> Result<bool> {
     print!("{question} [y/N] ");
     std::io::stdout().flush()?;
     let mut line = String::new();

@@ -1,3 +1,4 @@
+mod draft;
 mod element;
 mod error;
 mod fsx;
@@ -12,12 +13,15 @@ pub mod slug;
 mod template;
 mod timeline;
 
+pub use draft::{BuiltDraft, Draft, DraftFor, build_draft, finish_draft};
 pub use element::{Element, Kind, Voice};
 pub use error::{Error, Result};
 pub use job::{Clock, Cost, Job, JobStatus, SystemClock, Take, TestClock};
 pub use model::{Catalog, ModelSpec};
 pub use money::{Measured, MeasuredRates, UserConfig};
-pub use project::{CONFIG_FILE, Config, ImageConfig, Money, Project, PromptLayers, Step, user_dir};
+pub use project::{
+    CONFIG_FILE, Config, ImageConfig, Money, Project, PromptLayers, Step, TextConfig, user_dir,
+};
 pub use prompt::{Built, BuiltImage, ImageFor, Reference, StartFrame, build, build_image};
 pub use shot::{Chapter, Line, ModelOverride, Shot, ShotRef, Transition};
 pub use shotline_ledger as ledger;

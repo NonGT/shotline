@@ -23,10 +23,11 @@ pub enum Op {
     AudioMusic,
     AudioSfx,
     AudioTranscribe,
+    TextGenerate,
     Custom(String),
 }
 
-const STANDARD_OPS: [(Op, &str); 10] = [
+const STANDARD_OPS: [(Op, &str); 11] = [
     (Op::ImageGenerate, "image.generate"),
     (Op::ImageEdit, "image.edit"),
     (Op::VideoGenerate, "video.generate"),
@@ -37,6 +38,7 @@ const STANDARD_OPS: [(Op, &str); 10] = [
     (Op::AudioMusic, "audio.music"),
     (Op::AudioSfx, "audio.sfx"),
     (Op::AudioTranscribe, "audio.transcribe"),
+    (Op::TextGenerate, "text.generate"),
 ];
 
 impl Op {
@@ -156,7 +158,8 @@ pub struct Reference {
 pub struct Request {
     pub op: Op,
     pub model: String,
-    /// Generation prompt, or the text to speak for audio.tts.
+    /// Generation prompt, the text to speak for audio.tts, or the whole request for
+    /// text.generate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -79,6 +79,9 @@ pub struct Shot {
     /// continue shots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame: Option<String>,
+    /// What the storyboard frame is made from, if not `prompt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_prompt: Option<String>,
 }
 
 /// Something a cast member says in the shot.

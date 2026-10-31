@@ -16,6 +16,18 @@ const DEFAULTS: &[(&str, &str)] = &[
         "storyboard",
         include_str!("../../../assets/prompts/storyboard.md"),
     ),
+    (
+        "draft-video",
+        include_str!("../../../assets/prompts/draft-video.md"),
+    ),
+    (
+        "draft-image",
+        include_str!("../../../assets/prompts/draft-image.md"),
+    ),
+    (
+        "translate",
+        include_str!("../../../assets/prompts/translate.md"),
+    ),
 ];
 
 impl Project {

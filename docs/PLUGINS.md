@@ -104,6 +104,7 @@ audio.tts          prompt (the text) + voice -> audio
 audio.music        prompt -> audio
 audio.sfx          prompt -> audio
 audio.transcribe   inputs.audio -> data (text with timings)
+text.generate      prompt -> data (out.txt, the text)
 x.<name>           anything else
 ```
 
