@@ -97,7 +97,7 @@ fn browse_and_select_a_take() {
     h.get_by_label("Select #1").click();
     h.run();
     h.get_by_label("01-010#1 selected");
-    h.get_by_label("#1 (selected)");
+    h.get_by_label("● #1");
     assert!(h.query_by_label("Select #1").is_none());
     let p = Project::open(&tmp.path().join("film")).unwrap();
     let shot = p
