@@ -1,11 +1,14 @@
-//! The macOS menu bar. Items send `MenuCommand`s; the shell keeps their enabled state in step.
+//! The system menu bar on macOS and Windows. Items send `MenuCommand`s; the shell keeps their
+//! enabled state in step.
+//!
+//! On Windows the shortcuts are only shown in the menu, not translated by it: the keys reach egui,
+//! which handles them like on Linux.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use eframe::egui;
 use muda::accelerator::Accelerator;
-use muda::{AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
 use crate::start::MenuCommand;
 
@@ -27,85 +30,116 @@ fn item(text: &str, keys: Option<&str>) -> MenuItem {
     MenuItem::new(text, true, keys)
 }
 
+const REDO: &str = if cfg!(target_os = "windows") {
+    "Ctrl+Y"
+} else {
+    "CmdOrCtrl+Shift+Z"
+};
+
 impl NativeMenu {
-    pub fn install(ctx: &egui::Context) -> NativeMenu {
+    pub fn install(cc: &eframe::CreationContext) -> NativeMenu {
         let (tx, events) = mpsc::channel();
-        let ctx = ctx.clone();
+        let ctx = cc.egui_ctx.clone();
         MenuEvent::set_event_handler(Some(move |e| {
             let _ = tx.send(e);
             ctx.request_repaint();
         }));
 
-        let about = AboutMetadata {
-            name: Some("shotline".into()),
-            version: Some(env!("CARGO_PKG_VERSION").into()),
-            ..Default::default()
-        };
         let sep = PredefinedMenuItem::separator;
-        let app = Submenu::with_items(
-            "shotline",
-            true,
-            &[
-                &PredefinedMenuItem::about(None, Some(about)),
-                &sep(),
-                &PredefinedMenuItem::services(None),
-                &sep(),
-                &PredefinedMenuItem::hide(None),
-                &PredefinedMenuItem::hide_others(None),
-                &PredefinedMenuItem::show_all(None),
-                &sep(),
-                &PredefinedMenuItem::quit(None),
-            ],
-        )
-        .expect("app menu");
-
-        let new = item("New Film…", Some("CmdOrCtrl+N"));
-        let open = item("Open Film…", Some("CmdOrCtrl+O"));
-        let recent = Submenu::new("Open Recent", true);
-        let close = item("Close Film", Some("CmdOrCtrl+W"));
-        let file = Submenu::with_items("File", true, &[&new, &open, &recent, &sep(), &close])
+        let new = item("&New Film…", Some("CmdOrCtrl+N"));
+        let open = item("&Open Film…", Some("CmdOrCtrl+O"));
+        let recent = Submenu::new("Open &Recent", true);
+        let close = item("&Close Film", Some("CmdOrCtrl+W"));
+        let file = Submenu::with_items("&File", true, &[&new, &open, &recent, &sep(), &close])
+            .expect("file menu");
+        #[cfg(target_os = "windows")]
+        file.append_items(&[&sep(), &PredefinedMenuItem::quit(Some("E&xit"))])
             .expect("file menu");
 
-        let undo = item("Undo", Some("CmdOrCtrl+Z"));
-        let redo = item("Redo", Some("CmdOrCtrl+Shift+Z"));
-        let edit = Submenu::with_items(
-            "Edit",
-            true,
-            &[
-                &undo,
-                &redo,
-                &sep(),
-                &PredefinedMenuItem::cut(None),
-                &PredefinedMenuItem::copy(None),
-                &PredefinedMenuItem::paste(None),
-                &PredefinedMenuItem::select_all(None),
-            ],
-        )
-        .expect("edit menu");
-
-        let window = Submenu::with_items(
-            "Window",
-            true,
-            &[
-                &PredefinedMenuItem::minimize(None),
-                &PredefinedMenuItem::maximize(Some("Zoom")),
-                &sep(),
-                &PredefinedMenuItem::bring_all_to_front(None),
-            ],
-        )
-        .expect("window menu");
-
-        let menu = Menu::with_items(&[&app, &file, &edit, &window]).expect("menu bar");
-        menu.init_for_nsapp();
-        window.set_as_windows_menu_for_nsapp();
-
-        let commands = vec![
+        let undo = item("&Undo", Some("CmdOrCtrl+Z"));
+        let redo = item("&Redo", Some(REDO));
+        let edit = Submenu::with_items("&Edit", true, &[&undo, &redo, &sep()]).expect("edit menu");
+        #[allow(unused_mut)]
+        let mut commands = vec![
             (new.id().clone(), MenuCommand::NewFilm),
             (open.id().clone(), MenuCommand::OpenFilm),
             (close.id().clone(), MenuCommand::CloseFilm),
             (undo.id().clone(), MenuCommand::Undo),
             (redo.id().clone(), MenuCommand::Redo),
         ];
+        // The system's own items work on macOS. On Windows they'd go to the window, which
+        // doesn't know them, so these ask egui instead.
+        #[cfg(target_os = "macos")]
+        edit.append_items(&[
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ])
+        .expect("edit menu");
+        #[cfg(target_os = "windows")]
+        for (text, keys, cmd) in [
+            ("Cu&t", "Ctrl+X", MenuCommand::Cut),
+            ("&Copy", "Ctrl+C", MenuCommand::Copy),
+            ("&Paste", "Ctrl+V", MenuCommand::Paste),
+            ("Select &All", "Ctrl+A", MenuCommand::SelectAll),
+        ] {
+            let i = item(text, Some(keys));
+            edit.append(&i).expect("edit menu");
+            commands.push((i.id().clone(), cmd));
+        }
+
+        #[cfg(target_os = "macos")]
+        let menu = {
+            let about = muda::AboutMetadata {
+                name: Some("shotline".into()),
+                version: Some(env!("CARGO_PKG_VERSION").into()),
+                ..Default::default()
+            };
+            let app = Submenu::with_items(
+                "shotline",
+                true,
+                &[
+                    &PredefinedMenuItem::about(None, Some(about)),
+                    &sep(),
+                    &PredefinedMenuItem::services(None),
+                    &sep(),
+                    &PredefinedMenuItem::hide(None),
+                    &PredefinedMenuItem::hide_others(None),
+                    &PredefinedMenuItem::show_all(None),
+                    &sep(),
+                    &PredefinedMenuItem::quit(None),
+                ],
+            )
+            .expect("app menu");
+            let window = Submenu::with_items(
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(None),
+                    &PredefinedMenuItem::maximize(Some("Zoom")),
+                    &sep(),
+                    &PredefinedMenuItem::bring_all_to_front(None),
+                ],
+            )
+            .expect("window menu");
+            let menu = Menu::with_items(&[&app, &file, &edit, &window]).expect("menu bar");
+            menu.init_for_nsapp();
+            window.set_as_windows_menu_for_nsapp();
+            menu
+        };
+        #[cfg(target_os = "windows")]
+        let menu = {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let menu = Menu::with_items(&[&file, &edit]).expect("menu bar");
+            if let Ok(RawWindowHandle::Win32(h)) = cc.window_handle().map(|h| h.as_raw()) {
+                // SAFETY: eframe's own window, open for as long as the app is.
+                let _ =
+                    unsafe { menu.init_for_hwnd_with_theme(h.hwnd.get(), muda::MenuTheme::Dark) };
+            }
+            menu
+        };
+
         let mut menu = NativeMenu {
             _menu: menu,
             events,

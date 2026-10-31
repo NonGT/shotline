@@ -4,7 +4,7 @@
 
 mod edit;
 mod git;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
 mod player;
 mod start;
@@ -479,7 +479,15 @@ impl App {
                 let m = if shift { m | egui::Modifiers::SHIFT } else { m };
                 ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(m, egui::Key::Z)))
             };
-            if key(true) {
+            // Ctrl+Y as well on Windows and Linux.
+            let y = !cfg!(target_os = "macos")
+                && ui.input_mut(|i| {
+                    i.consume_shortcut(&egui::KeyboardShortcut::new(
+                        egui::Modifiers::COMMAND,
+                        egui::Key::Y,
+                    ))
+                });
+            if y || key(true) {
                 self.redo();
             } else if key(false) {
                 self.undo();
@@ -1127,9 +1135,9 @@ pub fn run(project: Option<Project>, user_dir: PathBuf) -> anyhow::Result<()> {
         options,
         Box::new(move |cc| {
             let shell = Shell::new(project, user_dir, &here);
-            #[cfg(target_os = "macos")]
-            let shell = shell.with_native_menu(&cc.egui_ctx);
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            let shell = shell.with_native_menu(cc);
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let _ = cc;
             Ok(Box::new(shell))
         }),

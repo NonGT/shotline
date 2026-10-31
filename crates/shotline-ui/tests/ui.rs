@@ -307,7 +307,8 @@ fn file_and_edit_commands() {
     assert_eq!(p.shot(R).unwrap().plot, "ผกาเดินเข้าป่า");
 
     // File > New Film over the open one, given up, then made.
-    h.state_mut().command(MenuCommand::NewFilm);
+    // The shortcut works without the menu too, as on Windows and Linux.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
     h.run();
     h.get_by_label("Cancel").click();
     h.run();

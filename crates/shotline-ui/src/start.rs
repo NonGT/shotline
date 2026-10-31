@@ -20,6 +20,10 @@ pub enum MenuCommand {
     CloseFilm,
     Undo,
     Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
 }
 
 pub struct Shell {
@@ -34,7 +38,9 @@ pub struct Shell {
     screen: Screen,
     /// New Film asked for over an open film.
     dialog: Option<Form>,
-    #[cfg(target_os = "macos")]
+    /// Edit commands for egui, sent with the next frame.
+    edits: Vec<MenuCommand>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     menu: Option<crate::menu::NativeMenu>,
 }
 
@@ -76,7 +82,8 @@ impl Shell {
             here: here.to_path_buf(),
             screen: Screen::Start(Form::new(here)),
             dialog: None,
-            #[cfg(target_os = "macos")]
+            edits: vec![],
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             menu: None,
         };
         if let Some(p) = project {
@@ -97,9 +104,9 @@ impl Shell {
     }
 
     /// Puts File and Edit in the system's menu bar.
-    #[cfg(target_os = "macos")]
-    pub fn with_native_menu(mut self, ctx: &egui::Context) -> Shell {
-        self.menu = Some(crate::menu::NativeMenu::install(ctx));
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn with_native_menu(mut self, cc: &eframe::CreationContext) -> Shell {
+        self.menu = Some(crate::menu::NativeMenu::install(cc));
         self
     }
 
@@ -142,6 +149,9 @@ impl Shell {
                     self.dialog = None;
                 }
             }
+            MenuCommand::Cut | MenuCommand::Copy | MenuCommand::Paste | MenuCommand::SelectAll => {
+                self.edits.push(cmd)
+            }
             MenuCommand::Undo | MenuCommand::Redo => {
                 if let Screen::Film(app) = &mut self.screen {
                     if cmd == MenuCommand::Undo {
@@ -162,8 +172,10 @@ impl Shell {
             ui.ctx().request_repaint();
             return;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.native_menu(ui.ctx());
+        self.keys(ui);
+        self.send_edits(ui.ctx());
         let has_git = self.git.is_some();
         let opened = match &mut self.screen {
             Screen::Film(app) => {
@@ -190,7 +202,49 @@ impl Shell {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    /// The File shortcuts, where the menu doesn't take them first.
+    fn keys(&mut self, ui: &egui::Ui) {
+        let key = |k| {
+            ui.input_mut(|i| {
+                i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k))
+            })
+        };
+        let cmd = if key(egui::Key::N) {
+            MenuCommand::NewFilm
+        } else if key(egui::Key::O) {
+            MenuCommand::OpenFilm
+        } else if key(egui::Key::W) {
+            MenuCommand::CloseFilm
+        } else {
+            return;
+        };
+        self.command(cmd);
+    }
+
+    fn send_edits(&mut self, ctx: &egui::Context) {
+        for e in self.edits.drain(..) {
+            let vc = match e {
+                MenuCommand::Cut => egui::ViewportCommand::RequestCut,
+                MenuCommand::Copy => egui::ViewportCommand::RequestCopy,
+                MenuCommand::Paste => egui::ViewportCommand::RequestPaste,
+                _ => {
+                    ctx.input_mut(|i| {
+                        i.events.push(egui::Event::Key {
+                            key: egui::Key::A,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::COMMAND,
+                        })
+                    });
+                    continue;
+                }
+            };
+            ctx.send_viewport_cmd(vc);
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn native_menu(&mut self, ctx: &egui::Context) {
         let film = self.film().is_some();
         let Some(menu) = &mut self.menu else { return };

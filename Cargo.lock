@@ -4579,6 +4579,7 @@ dependencies = [
  "image",
  "jiff",
  "muda",
+ "raw-window-handle",
  "rfd",
  "shotline-core",
  "shotline-media",
