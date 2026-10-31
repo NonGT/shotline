@@ -10,6 +10,7 @@ anyhow = "1.0.104"
 cpal = "0.18.2"
 eframe = { version = "0.37.0", features = ["persistence"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.17.2"
 shotline-core = { version = "0.1.0", path = "../shotline-core" }
 shotline-media = { version = "0.1.0", path = "../shotline-media" }
 

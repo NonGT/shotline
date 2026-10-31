@@ -9,7 +9,7 @@ use egui_kittest::kittest::Queryable;
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{Op, Quote};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
-use shotline_ui::{App, Tab};
+use shotline_ui::{App, Shell, Tab};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
 fn film(dir: &Path) -> Project {
@@ -245,6 +245,42 @@ fn keeps_history_with_git() {
     // Committed is the new starting point.
     assert!(h.query_by_label("Undo").is_none());
     assert!(h.query_by_label_contains("Commit").is_none());
+}
+
+#[test]
+fn start_a_film() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let git = Git::find().map(|g| g.with_identity("Test", "test@example.com"));
+    let shell = Shell::new(None, home.clone(), tmp.path())
+        .with_git(git.clone())
+        .testing();
+    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    let name = h.get_by_role_and_label(Role::TextInput, "Name");
+    name.focus();
+    name.type_text("Rain");
+    h.run();
+    let dir = tmp.path().join("rain");
+    h.get_by_label(&format!("Makes {}", dir.display()));
+    h.get_by_label("Create film").click();
+    h.run();
+    h.run();
+    assert_eq!(Project::open(&dir).unwrap().config.name, "Rain");
+    assert!(h.state().film().is_some());
+    h.get_by_label("Shots");
+    if let Some(g) = &git {
+        assert!(g.is_repo(&dir));
+        h.get_by_label_contains("git history started at");
+    }
+
+    // The next time it's in the list.
+    let shell = Shell::new(None, home, tmp.path()).testing();
+    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    h.get_by_label_contains("Rain  ").click();
+    h.run();
+    assert!(h.state().film().is_some());
 }
 
 #[test]

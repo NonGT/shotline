@@ -22,8 +22,9 @@ Very early. So far you can set up a project, add cast/sets/props with anchor ima
 into chapters and shots, preview the exact prompt each shot would send, and install and check
 plugins, quote and generate takes (fal, Venice, ElevenLabs voices, WaveSpeed lip sync) with
 every cost on record, chain continue shots, and render the cut with colour matching and music.
-`shotline ui` opens a small desktop app to browse the film, play takes (two side by side if you
-like) and the cut, pick takes and see costs. On Linux building it needs ALSA headers
+`shotline ui` opens a small desktop app to browse and edit the film, play takes (two side by side
+if you like) and the cut, pick takes, see costs and commit to git. A new film starts its own git
+history unless you pass `--no-git`. On Linux building it needs ALSA headers
 (`libasound2-dev`). The plan is in [docs/DESIGN.md](docs/DESIGN.md).
 
 ```

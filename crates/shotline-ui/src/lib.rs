@@ -5,6 +5,7 @@
 mod edit;
 mod git;
 mod player;
+mod start;
 mod theme;
 
 use std::collections::{HashMap, HashSet};
@@ -23,6 +24,7 @@ use shotline_media::Ffmpeg;
 use edit::{Action, Form, History, LineForm};
 use git::{Dialog, Repo};
 use player::{Audio, Deck, Player};
+pub use start::Shell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -1100,14 +1102,16 @@ fn act(ui: &mut egui::Ui, text: &str, take: usize) -> egui::Response {
     r
 }
 
-impl eframe::App for App {
+impl eframe::App for Shell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
 }
 
-pub fn run(project: Project, user_dir: PathBuf) -> anyhow::Result<()> {
-    let title = format!("{} - shotline", project.config.name);
+/// Opens the film, or without one a page to make or pick one.
+pub fn run(project: Option<Project>, user_dir: PathBuf) -> anyhow::Result<()> {
+    let title = start::title(project.as_ref());
+    let here = std::env::current_dir()?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 720.0]),
         ..Default::default()
@@ -1115,7 +1119,7 @@ pub fn run(project: Project, user_dir: PathBuf) -> anyhow::Result<()> {
     eframe::run_native(
         &title,
         options,
-        Box::new(move |_| Ok(Box::new(App::new(project, user_dir).remember_place()))),
+        Box::new(move |_| Ok(Box::new(Shell::new(project, user_dir, &here)))),
     )
     .map_err(|e| anyhow::anyhow!("can't open the window: {e}"))
 }

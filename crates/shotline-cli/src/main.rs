@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use shotline_core::ledger::report::By;
-use shotline_core::{Draft, Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voice, build};
+use shotline_core::{
+    Draft, Git, Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voice, build,
+};
 
 mod cost;
 mod draft;
@@ -34,6 +36,9 @@ enum Cmd {
         dir: PathBuf,
         #[arg(long)]
         name: Option<String>,
+        /// Don't start a git repository for the film
+        #[arg(long)]
+        no_git: bool,
     },
     /// Cast, sets and props
     #[command(subcommand)]
@@ -386,12 +391,12 @@ fn main() {
 }
 
 #[cfg(feature = "ui")]
-fn ui(p: Project) -> Result<()> {
+fn ui(p: Option<Project>) -> Result<()> {
     shotline_ui::run(p, shotline_core::user_dir())
 }
 
 #[cfg(not(feature = "ui"))]
-fn ui(_: Project) -> Result<()> {
+fn ui(_: Option<Project>) -> Result<()> {
     bail!("this shotline was built without the ui feature")
 }
 
@@ -404,9 +409,20 @@ fn run(cli: Cli) -> Result<()> {
     };
 
     match cli.cmd {
-        Cmd::Init { ref dir, ref name } => {
+        Cmd::Init {
+            ref dir,
+            ref name,
+            no_git,
+        } => {
             let p = Project::init(dir, name.as_deref())?;
             println!("created {} in {}", p.config.name, dir.display());
+            // Inside a repository already, the film is just another folder of it.
+            if let Some(git) = Git::find().filter(|g| !no_git && !g.is_repo(dir)) {
+                match git.init(dir, &format!("start {}", p.config.name)) {
+                    Ok(h) => println!("started its git history at {h}"),
+                    Err(e) => eprintln!("no git history: {e}"),
+                }
+            }
         }
 
         Cmd::Story { ref set } => doc(&open()?, "story.md", set.as_deref())?,
@@ -742,11 +758,17 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Mcp => mcp::serve(cli.project.clone())?,
         Cmd::Ui { ref dir } => {
-            let p = match dir {
-                Some(d) => Project::discover(d)?,
-                None => open()?,
+            // Outside a film the app asks for one.
+            let p = match (dir, &cli.project) {
+                (Some(d), _) => Project::discover(d),
+                (None, Some(d)) => Project::open(d),
+                (None, None) => Project::discover(&std::env::current_dir()?),
             };
-            ui(p)?;
+            match p {
+                Ok(p) => ui(Some(p))?,
+                Err(shotline_core::Error::NotAProject(_)) => ui(None)?,
+                Err(e) => return Err(e.into()),
+            }
         }
         Cmd::FakePlugin => {
             plugins::runtime().block_on(shotline_plugin::serve(

@@ -410,7 +410,7 @@ says.
 ## Commands
 
 ```
-shotline init <dir>
+shotline init <dir> [--no-git]
 shotline story | style [--set text]
 shotline doctor
 shotline plugin ls | doctor <name> | balance [name]
@@ -479,6 +479,13 @@ Anchors and storyboard frames are shrunk to 512px thumbnails when first shown: g
 are often 2-4K, past the texture size some GPUs allow. egui ships no Thai font, so Noto Sans
 Thai (`assets/fonts`, OFL) is built in; system ones looked different everywhere and Ayuthaya left
 a gap after every leading vowel.
+
+Shots are edited in place and saved once a field is left; every save is one undo step (Cmd+Z,
+Cmd+Shift+Z, or the buttons in the bottom bar). Undo puts the shot file back only if nothing else
+changed it since, so it never writes over the co-director's work. The bottom bar also commits the
+film with the user's own git, with a message naming the shots and elements that changed; a commit
+clears the undo steps, and anything older is git's job. Outside a film the app opens on a page to
+make one (with `git init`, like `shotline init` unless `--no-git`) or pick a recent one.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first.
