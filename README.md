@@ -49,4 +49,5 @@ RIFE if you have `rife-ncnn-vulkan`), for use in recipes.
 
 Needs ffmpeg. API keys go in your environment or `~/.config/shotline/.env`.
 
-MIT licensed.
+MIT licensed. The app has Noto Sans Thai built in, under the SIL Open Font License
+(`assets/fonts/OFL.txt`).

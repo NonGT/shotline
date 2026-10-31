@@ -704,25 +704,11 @@ fn short(s: &str, n: usize) -> String {
     }
 }
 
-/// Thai (and other scripts egui doesn't ship) from the system's own fonts, as a fallback.
+/// egui ships no Thai, so Noto Sans Thai is built in as a fallback. System Thai fonts vary too
+/// much: Ayuthaya, for one, leaves a gap after every leading vowel.
 fn fonts(ctx: &egui::Context) {
-    const THAI: &[(&str, u32)] = &[
-        ("/System/Library/Fonts/Supplemental/Ayuthaya.ttf", 0),
-        ("/System/Library/Fonts/Thonburi.ttc", 0),
-        ("/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf", 0),
-        ("/usr/share/fonts/opentype/noto/NotoSansThai-Regular.ttf", 0),
-        ("/usr/share/fonts/noto/NotoSansThai-Regular.ttf", 0),
-        ("C:\\Windows\\Fonts\\LeelawUI.ttf", 0),
-        ("C:\\Windows\\Fonts\\tahoma.ttf", 0),
-    ];
-    let Some((bytes, index)) = THAI
-        .iter()
-        .find_map(|(p, i)| std::fs::read(p).ok().map(|b| (b, *i)))
-    else {
-        return;
-    };
-    let mut data = egui::FontData::from_owned(bytes);
-    data.index = index;
+    let bytes = include_bytes!("../../../assets/fonts/NotoSansThai-Regular.ttf");
+    let data = egui::FontData::from_static(bytes);
     ctx.add_font(egui::epaint::text::FontInsert::new(
         "thai",
         data,

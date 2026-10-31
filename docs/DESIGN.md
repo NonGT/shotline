@@ -476,8 +476,9 @@ selected takes back to back as they are; colour matching and music only happen i
 still hands a take to mpv or ffplay to see it full size.
 
 Anchors and storyboard frames are shrunk to 512px thumbnails when first shown: generated images
-are often 2-4K, past the texture size some GPUs allow. Thai text uses a font from the system
-(Thonburi/Ayuthaya, Noto Sans Thai, Leelawadee or Tahoma), since egui ships none.
+are often 2-4K, past the texture size some GPUs allow. egui ships no Thai font, so Noto Sans
+Thai (`assets/fonts`, OFL) is built in; system ones looked different everywhere and Ayuthaya left
+a gap after every leading vowel.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first.
