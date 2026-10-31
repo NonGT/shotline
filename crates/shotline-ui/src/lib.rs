@@ -27,6 +27,24 @@ pub enum Tab {
     Cost,
 }
 
+impl Tab {
+    const ALL: [(Tab, &str); 5] = [
+        (Tab::Story, "Story"),
+        (Tab::Elements, "Elements"),
+        (Tab::Shots, "Shots"),
+        (Tab::Cut, "Cut"),
+        (Tab::Cost, "Cost"),
+    ];
+
+    fn name(self) -> &'static str {
+        Tab::ALL.iter().find(|(t, _)| *t == self).unwrap().1
+    }
+
+    fn named(name: &str) -> Option<Tab> {
+        Tab::ALL.iter().find(|(_, n)| *n == name).map(|(t, _)| *t)
+    }
+}
+
 /// Everything shown, read from disk at once so a frame never touches the filesystem.
 #[derive(Default)]
 struct Film {
@@ -53,6 +71,8 @@ pub struct App {
     takes: Vec<Take>,
     status: Option<(String, bool)>,
     thumbs: Thumbs,
+    /// The tab and shot last written to the place file, when the app keeps one.
+    place: Option<(Tab, Option<ShotRef>)>,
 }
 
 const VIEWERS: [&str; 2] = ["mpv", "ffplay"];
@@ -111,6 +131,7 @@ impl App {
             takes: vec![],
             status: None,
             thumbs: Thumbs::default(),
+            place: None,
         };
         app.reload();
         app
@@ -120,6 +141,44 @@ impl App {
     pub fn with_viewer(mut self, viewer: Option<PathBuf>) -> App {
         self.viewer = viewer;
         self
+    }
+
+    fn place_file(&self) -> PathBuf {
+        self.project.root.join(".shotline/cache/ui-place")
+    }
+
+    /// Opens on the tab and shot it was last on, and keeps track from here on, so a restart
+    /// lands in the same place.
+    pub fn remember_place(mut self) -> App {
+        let text = read(&self.place_file());
+        for line in text.lines() {
+            match line.split_once('=') {
+                Some(("tab", t)) => self.tab = Tab::named(t).unwrap_or(self.tab),
+                Some(("shot", r)) => {
+                    if let Ok(r) = r.parse() {
+                        self.open_shot(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.place = Some((self.tab, self.shot));
+        self
+    }
+
+    fn keep_place(&mut self) {
+        let now = (self.tab, self.shot);
+        if self.place.is_none_or(|p| p == now) {
+            return;
+        }
+        self.place = Some(now);
+        let mut text = format!("tab={}\n", self.tab.name());
+        if let Some(r) = self.shot {
+            text += &format!("shot={r}\n");
+        }
+        let file = self.place_file();
+        let _ = std::fs::create_dir_all(file.parent().unwrap());
+        let _ = std::fs::write(file, text);
     }
 
     /// Plays without sound and never touches the sound device, for tests.
@@ -280,13 +339,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.heading(&self.project.config.name);
                 ui.separator();
-                for (tab, name) in [
-                    (Tab::Story, "Story"),
-                    (Tab::Elements, "Elements"),
-                    (Tab::Shots, "Shots"),
-                    (Tab::Cut, "Cut"),
-                    (Tab::Cost, "Cost"),
-                ] {
+                for (tab, name) in Tab::ALL {
                     ui.selectable_value(&mut self.tab, tab, name);
                 }
                 ui.separator();
@@ -320,6 +373,7 @@ impl App {
             Tab::Cut => self.cut(ui),
             Tab::Cost => self.costs(ui),
         }
+        self.keep_place();
     }
 
     fn story(&mut self, ui: &mut egui::Ui) {
@@ -702,7 +756,7 @@ pub fn run(project: Project, user_dir: PathBuf) -> anyhow::Result<()> {
         options,
         Box::new(move |cc| {
             fonts(&cc.egui_ctx);
-            Ok(Box::new(App::new(project, user_dir)))
+            Ok(Box::new(App::new(project, user_dir).remember_place()))
         }),
     )
     .map_err(|e| anyhow::anyhow!("can't open the window: {e}"))

@@ -232,3 +232,32 @@ fn elements_story_and_cost() {
     h.get_by_label("in the cut 0, thrown away 0.4, other 0");
     h.get_by_label("01-010");
 }
+
+#[test]
+fn opens_where_it_was_left() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let home = tmp.path().join("home");
+    let app = App::new(p.clone(), home.clone())
+        .with_viewer(None)
+        .silent()
+        .remember_place();
+    let mut h = Harness::builder()
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    h.get_by_label("Cut").click();
+    h.run();
+
+    let app = App::new(p, home).silent().remember_place();
+    assert_eq!(app.tab(), Tab::Cut);
+    let mut h = Harness::builder()
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Shots").click();
+    h.run();
+    h.get_by_label("ผกาเดินเข้าป่า");
+}

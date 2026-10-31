@@ -482,6 +482,11 @@ are often 2-4K, past the texture size some GPUs allow. Thai text uses a font fro
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first.
 
+It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window
+was. When working on the UI, keep it open with
+`watchexec -r -w target/ui-restart --ignore-nothing -- target/debug/shotline ui <film>` and
+`touch target/ui-restart` after a build to restart it on the new code.
+
 ## Code layout
 
 ```
