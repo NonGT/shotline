@@ -3,6 +3,7 @@
 //! both always agree.
 
 mod edit;
+mod git;
 mod player;
 mod theme;
 
@@ -14,12 +15,13 @@ use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
 use shotline_core::ledger::report::{self, By, Row, Summary};
 use shotline_core::{
-    Chapter, CutShot, Element, JobStatus, Kind, Project, Shot, ShotRef, Take, Transition,
+    Chapter, CutShot, Element, Git, JobStatus, Kind, Project, Shot, ShotRef, Take, Transition,
     UserConfig,
 };
 use shotline_media::Ffmpeg;
 
 use edit::{Action, Form, History, LineForm};
+use git::{Dialog, Repo};
 use player::{Audio, Deck, Player};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,11 @@ pub struct App {
     themed: bool,
     form: Form,
     history: History,
+    git: Option<Git>,
+    repo: Repo,
+    /// When `repo` was last read, in egui's seconds.
+    repo_at: f64,
+    dialog: Option<Dialog>,
 }
 
 const VIEWERS: [&str; 2] = ["mpv", "ffplay"];
@@ -144,6 +151,10 @@ impl App {
             themed: false,
             form: Form::default(),
             history: History::default(),
+            git: Git::find(),
+            repo: Repo::None,
+            repo_at: 0.0,
+            dialog: None,
         };
         app.reload();
         app
@@ -152,6 +163,12 @@ impl App {
     /// What "Open" runs with the file as its last argument, to watch a take full size.
     pub fn with_viewer(mut self, viewer: Option<PathBuf>) -> App {
         self.viewer = viewer;
+        self
+    }
+
+    pub fn with_git(mut self, git: Option<Git>) -> App {
+        self.git = git;
+        self.refresh_repo();
         self
     }
 
@@ -205,6 +222,7 @@ impl App {
 
     fn reload(&mut self) {
         self.thumbs = Thumbs::default();
+        self.refresh_repo();
         if let Err(e) = self.load() {
             self.error(e.to_string());
         }
@@ -411,7 +429,8 @@ impl App {
                         } else {
                             "Ctrl"
                         };
-                        // Right to left: Redo first so it ends up on the right.
+                        // Right to left, so the last added sits leftmost.
+                        self.git_button(ui);
                         let redo = self.history.redo_what();
                         if history_button(ui, "Redo", redo, &format!("{cmd}+Shift+Z")) {
                             self.redo();
@@ -435,6 +454,13 @@ impl App {
             Tab::Shots => self.shots(ui),
             Tab::Cut => self.cut(ui),
             Tab::Cost => self.costs(ui),
+        }
+        self.git_dialog(ui);
+        // Files change outside the app too, from the CLI or the co-director.
+        let now = ui.input(|i| i.time);
+        if now - self.repo_at > 5.0 {
+            self.repo_at = now;
+            self.refresh_repo();
         }
         self.keep_place();
         if ui.memory(|m| m.focused().is_none()) && ui.ctx().dragged_id().is_none() {

@@ -8,7 +8,7 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{Op, Quote};
-use shotline_core::{Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
+use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
 use shotline_ui::{App, Tab};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
@@ -199,6 +199,52 @@ fn undo_and_redo() {
     h.run();
     assert_eq!(p.shot(R).unwrap(), s);
     h.get_by_label("01-010 was changed outside the app since");
+}
+
+#[test]
+fn keeps_history_with_git() {
+    let Some(git) = Git::find() else {
+        eprintln!("skipped: no git");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let app = App::new(film(tmp.path()), tmp.path().join("home"))
+        .with_viewer(None)
+        .with_git(Git::find().map(|g| g.with_identity("Test", "test@example.com")))
+        .silent();
+    let mut h = Harness::builder().build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    let dir = tmp.path().join("film");
+
+    h.get_by_label("Keep history with git").click();
+    h.run();
+    h.get_by_label("Start history").click();
+    h.run();
+    h.get_by_label_contains("git history started at");
+    assert!(git.is_repo(&dir));
+    assert!(h.query_by_label_contains("Commit").is_none());
+
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
+    plot.focus();
+    plot.type_text("!");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    h.get_by_label("Undo");
+    h.get_by_label("Commit 1 change").click();
+    h.run();
+    assert_eq!(field(&h, Role::TextInput, "Message"), "edit 01-010");
+    h.get_by_label("Commit").click();
+    h.run();
+    h.run();
+    h.get_by_label_contains(": edit 01-010");
+    assert!(git.changes(&dir).unwrap().is_empty());
+    // Committed is the new starting point.
+    assert!(h.query_by_label("Undo").is_none());
+    assert!(h.query_by_label_contains("Commit").is_none());
 }
 
 #[test]
