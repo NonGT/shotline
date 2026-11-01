@@ -24,8 +24,8 @@ use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
 use shotline_core::protocol::{Description, ModelInfo, Op, VoiceInfo};
 use shotline_core::{
-    Chapter, CutShot, Element, Git, JobStatus, Kind, Project, Shot, ShotRef, Take, Timeline,
-    Transition,
+    Chapter, CutShot, Element, Git, JobStatus, Kind, LIP_SYNCED, Project, SPOKEN, Shot, ShotRef,
+    Take, Timeline, Transition,
 };
 use shotline_media::Ffmpeg;
 
@@ -1533,23 +1533,44 @@ impl App {
                     );
                 });
                 ui.end_row();
-                let recipes: Vec<String> = self.project.config.recipes.keys().cloned().collect();
-                if !recipes.is_empty() || s.recipe.is_some() {
-                    ui.weak("Recipe");
-                    egui::ComboBox::from_id_salt("recipe")
-                        .selected_text(f.recipe.as_deref().unwrap_or("video only"))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut f.recipe, None, "video only");
-                            for rc in recipes {
-                                ui.selectable_value(&mut f.recipe, Some(rc.clone()), rc);
-                            }
-                        })
-                        .response
-                        .widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Recipe")
-                        });
-                    ui.end_row();
+                let l = ui.weak("Lines spoken");
+                // The film's own recipes too, unless they stand in for these.
+                let mut picks: Vec<(Option<String>, String)> = vec![
+                    (None, "no".into()),
+                    (Some(SPOKEN.into()), "by the video model".into()),
+                    (Some(LIP_SYNCED.into()), "lip synced after".into()),
+                ];
+                for rc in self.project.config.recipes.keys() {
+                    if rc != SPOKEN && rc != LIP_SYNCED {
+                        picks.push((Some(rc.clone()), format!("recipe {rc}")));
+                    }
                 }
+                if let Some(rc) = &f.recipe
+                    && !picks.iter().any(|(p, _)| p.as_ref() == Some(rc))
+                {
+                    picks.push((Some(rc.clone()), format!("recipe {rc}")));
+                }
+                let now = picks
+                    .iter()
+                    .find(|(p, _)| *p == f.recipe)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_default();
+                egui::ComboBox::from_id_salt("recipe")
+                    .selected_text(now)
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for (p, name) in picks {
+                            ui.selectable_value(&mut f.recipe, p, name);
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "by the video model: each line is made with the speaker's voice and sent \
+                         along for the video model to lip sync. Lip synced after: the video is \
+                         made as usual, then lip synced with WaveSpeed.",
+                    )
+                    .labelled_by(l.id);
+                ui.end_row();
                 flags = shot_model(ui, f, &models, &film, s);
             });
         for flag in flags {

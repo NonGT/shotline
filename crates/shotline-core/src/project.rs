@@ -127,6 +127,41 @@ pub struct Step {
     pub params: toml::Table,
 }
 
+/// Every film has these unless shotline.toml has a recipe of the same name: the lines spoken
+/// with the speakers' voices, then the video model lip syncs them itself...
+pub const SPOKEN: &str = "spoken";
+/// ...or the video is made as usual and lip synced after.
+pub const LIP_SYNCED: &str = "lip-synced";
+
+fn builtin_recipe(name: &str) -> Option<Vec<Step>> {
+    use shotline_protocol::Op;
+    let step = |op, audio| Step {
+        op,
+        plugin: None,
+        model: None,
+        audio,
+        params: toml::Table::new(),
+    };
+    match name {
+        SPOKEN => Some(vec![
+            step(Op::AudioTts, false),
+            step(Op::VideoGenerate, true),
+        ]),
+        LIP_SYNCED => {
+            let mut sync = step(Op::VideoLipsync, false);
+            sync.plugin = Some("wavespeed".into());
+            sync.model = Some("sync/lipsync-3".into());
+            sync.params.insert("sync_mode".into(), "silence".into());
+            Some(vec![
+                step(Op::AudioTts, false),
+                step(Op::VideoGenerate, false),
+                sync,
+            ])
+        }
+        _ => None,
+    }
+}
+
 /// Which extra parts get added to a shot's prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -317,7 +352,10 @@ impl Project {
         match self.config.recipes.get(name) {
             Some(steps) if !steps.is_empty() => Ok(steps.clone()),
             Some(_) => invalid(format!("recipe {name} has no steps")),
-            None => invalid(format!("no recipe called {name} in {CONFIG_FILE}")),
+            None => builtin_recipe(name).map_or_else(
+                || invalid(format!("no recipe called {name} in {CONFIG_FILE}")),
+                Ok,
+            ),
         }
     }
 

@@ -318,7 +318,8 @@ pub struct ShotAdd {
     transition: Option<String>,
     plugin: Option<String>,
     model: Option<String>,
-    /// Recipe from shotline.toml, e.g. talking
+    /// How lines are spoken: "spoken" (the video model lip syncs them), "lip-synced" (lip
+    /// synced after), a recipe from shotline.toml, or "" for not at all
     recipe: Option<String>,
 }
 
@@ -333,6 +334,8 @@ pub struct ShotSet {
     frame_prompt: Option<String>,
     duration: Option<f64>,
     transition: Option<String>,
+    /// How lines are spoken: "spoken" (the video model lip syncs them), "lip-synced" (lip
+    /// synced after), a recipe from shotline.toml, or "" for not at all
     recipe: Option<String>,
     /// Video model instead of the film's (see plugin_ls); "" goes back to the film's
     model: Option<String>,

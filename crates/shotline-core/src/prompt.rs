@@ -198,13 +198,23 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
         }
     }
     let steps = project.steps(&shot)?;
+    for step in &steps {
+        if let (Some(p), Some(m)) = (&step.plugin, &step.model)
+            && catalog.find(p, m, &step.op).is_none()
+        {
+            warnings.push(format!(
+                "{p} {m} isn't installed, so its {} step can't run",
+                step.op
+            ));
+        }
+    }
     if !shot.lines.is_empty() && !steps.iter().any(|s| s.op == Op::AudioTts) {
         warnings.push("the lines won't be spoken: the shot's recipe has no audio.tts step".into());
     }
     if steps.iter().any(|s| s.op == Op::VideoGenerate && s.audio) {
         if !spec.audio_input {
             warnings.push(format!(
-                "{} doesn't take audio, use a video.lipsync step",
+                "{} doesn't take audio, so the lines have to be lip synced after",
                 spec.id
             ));
         } else if let Some(max) = spec.max_audio

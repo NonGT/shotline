@@ -411,6 +411,8 @@ enum ShotCmd {
         duration: Option<f64>,
         #[arg(long)]
         transition: Option<Transition>,
+        /// How lines are spoken: spoken, lip-synced, a recipe from shotline.toml, or "" for not
+        /// at all
         #[arg(long)]
         recipe: Option<String>,
         /// Video model instead of the film's; "" goes back to the film's

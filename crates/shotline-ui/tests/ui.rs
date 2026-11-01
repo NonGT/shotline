@@ -1543,6 +1543,31 @@ fn set_the_format_on_the_story_tab() {
 }
 
 #[test]
+fn how_lines_are_spoken() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness(tmp.path());
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let p = Project::open(&tmp.path().join("film")).unwrap();
+    h.get_by_role_and_label(Role::ComboBox, "Lines spoken")
+        .click();
+    h.run();
+    h.get_by_label("lip synced after");
+    h.get_by_label("by the video model").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().recipe.as_deref(), Some("spoken"));
+    h.get_by_role_and_label(Role::ComboBox, "Lines spoken")
+        .click();
+    h.run();
+    h.get_by_label("no").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().recipe, None);
+}
+
+#[test]
 fn a_shot_on_another_model() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());

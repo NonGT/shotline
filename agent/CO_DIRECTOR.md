@@ -32,7 +32,8 @@ the ... budget", stop and tell the user. Never raise a budget or retry around it
    - Use `transition: "continue"` when a shot carries straight on from the one before (same
      moment, same place). It starts on the last frame of that shot's selected take and is colour
      matched in the cut. Use `cut` for anything else.
-   - Dialogue goes in `shot_line`, not the prompt.
+   - Dialogue goes in `shot_line`, not the prompt. Lines are only spoken with a recipe:
+     `recipe: "spoken"` if the video model takes audio, `"lip-synced"` if not.
 6. Check: `prompt` shows exactly what a shot will send. Fix it with `shot_set`.
    A storyboard frame (`frame`) is optional: a cheap still of the shot's first frame that the
    video then starts on. Worth it for key shots, to agree on framing before paying for video.

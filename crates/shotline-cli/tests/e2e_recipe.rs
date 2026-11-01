@@ -322,3 +322,38 @@ fn upscale_and_interpolate_steps() {
                 .and(predicate::str::contains("01-020#2 done · 4 fake-second")),
         );
 }
+
+#[test]
+fn built_in_ways_to_speak() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    let run = |args: &[&str]| shotline(&tmp).args(args).assert().success();
+    run(&["shot", "line", "01-010", "paka", "ไปกัน"]);
+    run(&[
+        "element",
+        "voice",
+        "paka",
+        "--plugin",
+        "fake",
+        "--model",
+        "fake/tts",
+        "--voice-id",
+        "v1",
+    ]);
+
+    // The video model speaks them: tts, then video with the audio.
+    run(&["shot", "set", "01-010", "--recipe", "spoken"]);
+    run(&["quote", "01-010"])
+        .stdout(predicate::str::contains("0  line 1 by @paka"))
+        .stdout(predicate::str::contains("1  video").and(predicate::str::contains("2  ").not()));
+
+    // Lip synced after needs WaveSpeed, which isn't installed here.
+    run(&["shot", "set", "01-010", "--recipe", "lip-synced"]);
+    run(&["prompt", "01-010"]).stderr(predicate::str::contains(
+        "wavespeed sync/lipsync-3 isn't installed, so its video.lipsync step can't run",
+    ));
+
+    run(&["shot", "set", "01-010", "--recipe", ""]);
+    tmp.child("film/chapters/01-one/shots/010.toml")
+        .assert(predicate::str::contains("recipe").not());
+}
