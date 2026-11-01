@@ -81,9 +81,9 @@ fn default_kind() -> Kind {
     Kind::Cast
 }
 
-const IMAGE_EXTS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+pub(crate) const IMAGE_EXTS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 
-fn is_image(path: &Path) -> bool {
+pub(crate) fn is_image(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))

@@ -432,6 +432,42 @@ enum ShotCmd {
         #[arg(long)]
         at: Option<f64>,
     },
+    /// A picture of the shot's own sent along with its prompt, after the elements' anchors.
+    /// Without options, lists them.
+    Image {
+        shot: ShotRef,
+        #[arg(long, conflicts_with_all = ["generate", "remove", "edit"])]
+        file: Option<PathBuf>,
+        #[arg(long, conflicts_with_all = ["remove", "edit"])]
+        generate: bool,
+        /// What to make, naming elements as @handles
+        #[arg(long, default_value = "", requires = "generate")]
+        prompt: String,
+        /// What it shows; the video prompt gets "Image 3: <note>."
+        #[arg(long, default_value = "")]
+        note: String,
+        /// An image to go along instead of the named elements' anchors, a file or an http(s)
+        /// URL
+        #[arg(long = "ref", requires = "generate")]
+        refs: Vec<String>,
+        /// e.g. 1:1 or 9:16, instead of the shot's
+        #[arg(long, requires = "generate")]
+        aspect: Option<String>,
+        /// e.g. 1K or 2K, for models that have a choice
+        #[arg(long, requires = "generate")]
+        resolution: Option<String>,
+        /// Put the prompt into English with the text model first, if it isn't
+        #[arg(long, requires = "generate")]
+        translate: bool,
+        /// Take image n (from 1) off the shot
+        #[arg(long, conflicts_with = "edit")]
+        remove: Option<usize>,
+        /// Change image n's note to --note
+        #[arg(long)]
+        edit: Option<usize>,
+        #[command(flatten)]
+        image: ImageArgs,
+    },
     /// Draft the prompt in English from the plot with the text model
     Draft {
         shot: ShotRef,
@@ -488,7 +524,7 @@ impl shotline_ui::Host for Plugins {
 
     fn anchor_quote(&self, film: &Path, ask: &shotline_ui::AnchorAsk) -> Result<String> {
         let p = Project::open(film)?;
-        image::anchor_quote(&p, &ask.handle, &anchor_make(ask, None))
+        image::quote(&p, target(ask), &anchor_make(ask, None))
     }
 
     fn render(&self, film: &Path, on: &mut dyn FnMut(String)) -> Result<(PathBuf, String)> {
@@ -516,12 +552,34 @@ impl shotline_ui::Host for Plugins {
         fetch::image(&Project::open(film)?, url)
     }
 
+    fn take_quote(&self, film: &Path, shot: ShotRef) -> Result<String> {
+        shoot::take_quote(&Project::open(film)?, shot)
+    }
+
+    fn take(
+        &self,
+        film: &Path,
+        shot: ShotRef,
+        at: &str,
+        on: &mut dyn FnMut(String),
+    ) -> Result<String> {
+        shoot::take_at(&Project::open(film)?, shot, at, on)
+    }
+
     fn make_anchor(&self, film: &Path, ask: &shotline_ui::AnchorAsk, at: &str) -> Result<PathBuf> {
         let p = Project::open(film)?;
-        match image::anchor_image(&p, &ask.handle, &anchor_make(ask, Some(at)))? {
+        match image::image(&p, target(ask), &anchor_make(ask, Some(at)))? {
             Some((_, out)) => Ok(out),
             None => bail!("nothing was made"),
         }
+    }
+}
+
+#[cfg(feature = "ui")]
+fn target(ask: &shotline_ui::AnchorAsk) -> image::Target<'_> {
+    match ask.shot {
+        Some(r) => image::Target::Shot(r),
+        None => image::Target::Anchor(&ask.handle),
     }
 }
 
@@ -782,6 +840,47 @@ fn run(cli: Cli) -> Result<()> {
             p.save_shot(shot, &s)?;
             println!("{shot} saved");
         }
+        Cmd::Shot(ShotCmd::Image {
+            shot,
+            ref file,
+            generate,
+            ref prompt,
+            ref note,
+            ref refs,
+            ref aspect,
+            ref resolution,
+            translate,
+            remove,
+            edit,
+            ref image,
+        }) => {
+            let p = open()?;
+            let n = |n: usize| anyhow::Context::context(n.checked_sub(1), "images count from 1");
+            if let Some(f) = file {
+                let dest = p.add_shot_image(shot, f, note)?;
+                println!("{}", p.rel(&dest));
+            } else if generate {
+                let mut m = image.make(prompt);
+                m.refs = image::given(&p, refs)?;
+                m.aspect = aspect.as_deref();
+                m.resolution = resolution.as_deref();
+                m.translate = translate;
+                image::shot_image(&p, shot, &m, note)?;
+            } else if let Some(i) = remove {
+                let img = p.remove_shot_image(shot, n(i)?)?;
+                println!("{} taken off {shot}", img.file);
+            } else if let Some(i) = edit {
+                p.set_shot_image_note(shot, n(i)?, note)?;
+                println!("{shot} saved");
+            } else {
+                for (i, img) in p.shot(shot)?.images.iter().enumerate() {
+                    match img.note.as_str() {
+                        "" => println!("{}  {}", i + 1, img.file),
+                        note => println!("{}  {}  {note}", i + 1, img.file),
+                    }
+                }
+            }
+        }
         Cmd::Shot(ShotCmd::Line {
             shot,
             ref who,
@@ -838,7 +937,11 @@ fn run(cli: Cli) -> Result<()> {
             if !b.references.is_empty() {
                 println!("references:");
                 for r in &b.references {
-                    println!("  {:<12} @{:<16} {}", r.label, r.handle, r.path);
+                    let whose = match r.handle.as_str() {
+                        "" => String::new(),
+                        h => format!("@{h}"),
+                    };
+                    println!("  {:<12} {whose:<17} {}", r.label, r.path);
                 }
             }
             println!("\n{}", b.text);

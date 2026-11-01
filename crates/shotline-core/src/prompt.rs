@@ -1,7 +1,7 @@
 use shotline_protocol::{ModelInfo, Op};
 
 use crate::template::render;
-use crate::{Catalog, Project, Result, ShotRef, Transition, handle};
+use crate::{Catalog, Project, Result, Shot, ShotRef, Transition, handle};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reference {
@@ -65,6 +65,16 @@ pub enum ImageFor {
     },
     /// A shot's storyboard frame: the first frame of the video.
     Frame(ShotRef),
+    /// A picture for a shot to send along, e.g. a place or a prop that isn't an element.
+    ShotImage {
+        shot: ShotRef,
+        prompt: String,
+        /// As for an anchor; None sends the anchors of the elements the prompt names.
+        refs: Option<Vec<std::path::PathBuf>>,
+        /// Instead of the shot's shape.
+        aspect: Option<String>,
+        resolution: Option<String>,
+    },
 }
 
 /// An image request, worked out without spending anything.
@@ -101,7 +111,17 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
             "{r} has no prompt yet, `shotline shot draft {r}` can write one from the plot"
         ));
     }
-    let (text, references) = resolve(project, spec, &shot.prompt, &shot.elements, &mut warnings)?;
+    let (mut text, mut references) =
+        resolve(project, spec, &shot.prompt, &shot.elements, &mut warnings)?;
+    own_images(
+        project,
+        spec,
+        r,
+        &shot,
+        &mut text,
+        &mut references,
+        &mut warnings,
+    )?;
     let mut parts = vec![text];
     add_layers(project, &references, &mut parts)?;
 
@@ -257,7 +277,7 @@ pub fn build_image(
                     std::slice::from_ref(&el.handle),
                     &mut warnings,
                 )?,
-                Some(files) => chosen(project, spec, &el, prompt, files, &mut warnings)?,
+                Some(files) => chosen(project, spec, Some(&el), prompt, files, &mut warnings)?,
             };
             // Making the first anchor of an element is the point, not something to warn about.
             let first = format!("@{} has no anchor images", el.handle);
@@ -281,7 +301,17 @@ pub fn build_image(
         ImageFor::Frame(r) => {
             let shot = project.shot(*r)?;
             let prompt = shot.frame_prompt.as_deref().unwrap_or(&shot.prompt);
-            let (text, references) = resolve(project, spec, prompt, &shot.elements, &mut warnings)?;
+            let (mut text, mut references) =
+                resolve(project, spec, prompt, &shot.elements, &mut warnings)?;
+            own_images(
+                project,
+                spec,
+                *r,
+                &shot,
+                &mut text,
+                &mut references,
+                &mut warnings,
+            )?;
             let mut parts = vec![];
             if let Some(t) = project.template("storyboard")? {
                 parts.push(render(&t, &[]));
@@ -298,10 +328,32 @@ pub fn build_image(
                 .unwrap_or_else(|| cfg.aspect.clone());
             (parts, references, aspect)
         }
+        ImageFor::ShotImage {
+            shot: r,
+            prompt,
+            refs,
+            aspect,
+            ..
+        } => {
+            let shot = project.shot(*r)?;
+            let (text, references) = match refs {
+                None => resolve(project, spec, prompt, &[], &mut warnings)?,
+                Some(files) => chosen(project, spec, None, prompt, files, &mut warnings)?,
+            };
+            let aspect = aspect
+                .clone()
+                .or_else(|| shot.model.and_then(|m| m.aspect))
+                .unwrap_or_else(|| cfg.aspect.clone());
+            (vec![text], references, aspect)
+        }
     };
     add_layers(project, &references, &mut parts)?;
     let resolution = match what {
         ImageFor::Anchor {
+            resolution: Some(r),
+            ..
+        }
+        | ImageFor::ShotImage {
             resolution: Some(r),
             ..
         } => Some(r.clone()),
@@ -406,7 +458,7 @@ fn resolve(
 fn chosen(
     project: &Project,
     spec: &ModelInfo,
-    el: &crate::Element,
+    el: Option<&crate::Element>,
     prompt: &str,
     files: &[std::path::PathBuf],
     warnings: &mut Vec<String>,
@@ -431,11 +483,14 @@ fn chosen(
         }
         return Ok((text.trim().to_string(), vec![]));
     };
-    let own: Vec<_> = project
-        .anchors(el)?
-        .iter()
-        .map(|a| project.rel(a))
-        .collect();
+    let own: Vec<_> = match el {
+        Some(el) => project
+            .anchors(el)?
+            .iter()
+            .map(|a| project.rel(a))
+            .collect(),
+        None => vec![],
+    };
     let mut references = vec![];
     let mut shown = vec![];
     for f in files {
@@ -447,10 +502,9 @@ fn chosen(
         }
         references.push(Reference {
             label,
-            handle: if mine {
-                el.handle.clone()
-            } else {
-                String::new()
+            handle: match el {
+                Some(el) if mine => el.handle.clone(),
+                _ => String::new(),
             },
             path,
         });
@@ -464,7 +518,9 @@ fn chosen(
             spec.id,
         ));
     }
-    if !shown.is_empty() {
+    if let Some(el) = el
+        && !shown.is_empty()
+    {
         text = format!(
             "{} {} as shown in {}.",
             text.trim(),
@@ -473,6 +529,63 @@ fn chosen(
         );
     }
     Ok((text.trim().to_string(), references))
+}
+
+/// The shot's own images, labelled after the elements' anchors, with a line for each note.
+fn own_images(
+    project: &Project,
+    spec: &ModelInfo,
+    r: ShotRef,
+    shot: &Shot,
+    text: &mut String,
+    references: &mut Vec<Reference>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    if shot.images.is_empty() {
+        return Ok(());
+    }
+    let Some(ref_image) = &spec.ref_image else {
+        warnings.push(format!(
+            "{} doesn't take reference images, so {r}'s own images are left out",
+            spec.id
+        ));
+        return Ok(());
+    };
+    let before = references.len();
+    let t = project.template("shot-image")?.unwrap_or_default();
+    let mut notes = vec![];
+    for img in &shot.images {
+        if !project.root.join(&img.file).is_file() {
+            warnings.push(format!("{} is gone, so it's left out", img.file));
+            continue;
+        }
+        let label = render(ref_image, &[("n", &(references.len() + 1).to_string())]);
+        if !img.note.trim().is_empty() {
+            notes.push(render(&t, &[("label", &label), ("note", img.note.trim())]));
+        }
+        references.push(Reference {
+            label,
+            handle: String::new(),
+            path: img.file.clone(),
+        });
+    }
+    if !notes.is_empty() {
+        *text = format!("{}\n\n{}", text.trim(), notes.join(" "))
+            .trim()
+            .to_string();
+    }
+    // Over the limit with the elements' anchors alone is already said.
+    if let Some(max) = spec.max_images
+        && references.len() > max
+        && before <= max
+    {
+        warnings.push(format!(
+            "{} reference images but {} takes at most {max}",
+            references.len(),
+            spec.id,
+        ));
+    }
+    Ok(())
 }
 
 /// style.md and the identity note.

@@ -205,12 +205,15 @@ fn show_balances(rt: &Runtime, opened: &Opened, b: &Books, quotes: &[(String, Qu
 
 /// Prints progress; remembers the last state so it isn't repeated every poll.
 fn printer(name: String) -> impl FnMut(Event) {
+    teller(name, |l| println!("{l}"))
+}
+
+/// Progress as lines, to `say`.
+fn teller(name: String, mut say: impl FnMut(String)) -> impl FnMut(Event) {
     let mut last: Option<State> = None;
     let mut name = name;
     move |ev| match ev {
-        Event::Reserved { total, currency } => {
-            println!("reserved {} {currency}", money(total))
-        }
+        Event::Reserved { total, currency } => say(format!("reserved {} {currency}", money(total))),
         Event::Step {
             index,
             of,
@@ -223,32 +226,37 @@ fn printer(name: String) -> impl FnMut(Event) {
             name = plugin.clone();
             if of > 1 {
                 let r = if reused { " (reused)" } else { "" };
-                println!("step {}/{of}: {what} · {plugin} {model}{r}", index + 1);
+                say(format!(
+                    "step {}/{of}: {what} · {plugin} {model}{r}",
+                    index + 1
+                ));
             }
         }
-        Event::Submitted { plugin_job } => println!("sent to {name} ({plugin_job})"),
-        Event::Cancelling => println!("cancelling..."),
-        Event::Measured(Some(a)) => {
-            println!("{name} balance dropped {} {}", money(a.amount), a.unit)
-        }
-        Event::Measured(None) => {
-            println!("{name} balance hasn't moved yet; booked the provider's price")
-        }
+        Event::Submitted { plugin_job } => say(format!("sent to {name} ({plugin_job})")),
+        Event::Cancelling => say("cancelling...".into()),
+        Event::Measured(Some(a)) => say(format!(
+            "{name} balance dropped {} {}",
+            money(a.amount),
+            a.unit
+        )),
+        Event::Measured(None) => say(format!(
+            "{name} balance hasn't moved yet; booked the provider's price"
+        )),
         Event::Learned {
             unit,
             rate,
             currency,
-        } => println!(
+        } => say(format!(
             "measured {unit} at {} {currency}, kept as a fallback rate",
             shotline_core::ledger::rate(rate)
-        ),
+        )),
         Event::Status(s) => {
             if last != Some(s.state) {
                 match s.progress {
                     Some(pr) if s.state == State::Running => {
-                        println!("running ({}%)", (pr * 100.0).round())
+                        say(format!("running ({}%)", (pr * 100.0).round()))
                     }
-                    _ => println!("{}", format!("{:?}", s.state).to_lowercase()),
+                    _ => say(format!("{:?}", s.state).to_lowercase()),
                 }
                 last = Some(s.state);
             }
@@ -265,15 +273,17 @@ fn on_ctrl_c(opts: &Options) {
     });
 }
 
-/// Quotes, asks, then runs a take of a shot. `from` reuses the steps before it from an earlier
-/// take (the latest by default).
-pub fn take(
-    p: &Project,
-    r: ShotRef,
-    yes: bool,
-    from: Option<usize>,
-    of: Option<&str>,
-) -> Result<()> {
+/// A take worked out and priced, with what it takes to run it. Fields drop in order, so the
+/// runtime goes after the plugins.
+struct Planned {
+    opened: Opened,
+    b: Books,
+    plan: Plan,
+    cost: String,
+    rt: Runtime,
+}
+
+fn plan_take(p: &Project, r: ShotRef, from: Option<usize>, of: Option<&str>) -> Result<Planned> {
     let installed = plugins::load();
     let catalog = plugins::catalog(p, &installed)?;
     let rt = plugins::runtime();
@@ -301,7 +311,84 @@ pub fn take(
         r,
         reuse.as_ref().map(|(t, n)| (t, *n)),
     ))?;
+    let cost = if let [only] = plan.steps.as_slice() {
+        price(&only.quote, only.base, &plan.currency, only.pricing)
+    } else {
+        format!("{} {}", money(plan.total), plan.currency)
+    };
+    Ok(Planned {
+        opened,
+        b,
+        plan,
+        cost,
+        rt,
+    })
+}
 
+/// What a take of the shot would cost, e.g. "0.40 USD". Free.
+pub fn take_quote(p: &Project, r: ShotRef) -> Result<String> {
+    Ok(plan_take(p, r, None, None)?.cost)
+}
+
+/// Runs a take if it still costs `at`, telling `say` how it goes. Returns a line about it.
+pub fn take_at(p: &Project, r: ShotRef, at: &str, say: impl FnMut(String)) -> Result<String> {
+    let Planned {
+        opened,
+        b,
+        plan,
+        cost,
+        rt,
+    } = plan_take(p, r, None, None)?;
+    if cost != at {
+        bail!("the price changed from {at} to {cost}; nothing spent");
+    }
+    let opts = options();
+    let outcome = rt.block_on(shotline_engine::take(
+        p,
+        &b,
+        &opened,
+        &plan,
+        &opts,
+        teller(plan.built.plugin.clone(), say),
+    ))?;
+    drop(opened);
+    let spent = spent(&outcome);
+    match &outcome.error {
+        None => Ok(format!("{} done · {spent}", outcome.take)),
+        Some(e) => bail!("{} {}: {e} ({spent})", outcome.take, outcome.job.status),
+    }
+}
+
+fn spent(outcome: &shotline_engine::Outcome) -> String {
+    let spent: Vec<String> = outcome
+        .take
+        .costs()
+        .iter()
+        .map(|c| format!("{} {}", money(c.amount), c.unit))
+        .collect();
+    if spent.is_empty() {
+        "nothing charged".to_string()
+    } else {
+        spent.join(" + ")
+    }
+}
+
+/// Quotes, asks, then runs a take of a shot. `from` reuses the steps before it from an earlier
+/// take (the latest by default).
+pub fn take(
+    p: &Project,
+    r: ShotRef,
+    yes: bool,
+    from: Option<usize>,
+    of: Option<&str>,
+) -> Result<()> {
+    let Planned {
+        opened,
+        b,
+        plan,
+        cost,
+        rt,
+    } = plan_take(p, r, from, of)?;
     for w in &plan.built.warnings {
         eprintln!("warning: {w}");
     }
@@ -319,12 +406,9 @@ pub fn take(
             ""
         }
     );
-    let cost = if let [only] = plan.steps.as_slice() {
-        price(&only.quote, only.base, &plan.currency, only.pricing)
-    } else {
+    if plan.steps.len() > 1 {
         print_steps(&plan);
-        format!("{} {}", money(plan.total), plan.currency)
-    };
+    }
     let quotes: Vec<(String, Quote)> = plan
         .steps
         .iter()
@@ -352,17 +436,7 @@ pub fn take(
     })?;
     drop(opened);
 
-    let spent: Vec<String> = outcome
-        .take
-        .costs()
-        .iter()
-        .map(|c| format!("{} {}", money(c.amount), c.unit))
-        .collect();
-    let spent = if spent.is_empty() {
-        "nothing charged".to_string()
-    } else {
-        spent.join(" + ")
-    };
+    let spent = spent(&outcome);
     match &outcome.error {
         None => {
             let file = outcome

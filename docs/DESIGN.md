@@ -71,6 +71,10 @@ frame = "chapters/01-forest/shots/010.png"   # optional storyboard frame, cut sh
 who = "kan"
 text = "เราต้องไปต่อก่อนมืด"
 
+[[image]]   # optional, the shot's own pictures, kept in shots/010/
+file = "chapters/01-forest/shots/010/01.png"
+note = "the rest stop by the stream"
+
 [model]   # optional, overrides project defaults
 plugin = "fal"
 id = "minimax/h3-max/reference-to-video"
@@ -105,7 +109,9 @@ The prompt that actually gets sent is put together from a few parts:
 1. the shot prompt
 2. @handles swapped for whatever the model expects (`Image 1` on fal, `<Picture 1>` on Venice),
    with the anchor images attached in the same order. An element with several anchors becomes
-   "Paka (shown in Image 1 and Image 2)"; "Image 1 and Image 2 walks" gets you two people
+   "Paka (shown in Image 1 and Image 2)"; "Image 1 and Image 2 walks" gets you two people.
+   The shot's own pictures come after, each with its note: "Image 5: the rest stop by the
+   stream." (`shot-image.md`)
 3. style.md
 4. a short identity note (keep faces/outfits from the references)
 5. for continue shots and storyboard frames, a note that it starts on the given frame
@@ -431,6 +437,8 @@ shotline shot set <shot> [--title] [--plot] [--prompt] [--frame-prompt] [--durat
                   [--model m [--plugin p]] [--resolution r]   "" goes back to the film's
 shotline shot draft <shot> [--as video|image|translate] [--write] [--plugin p] [--model m] [--yes]
 shotline shot line <shot> <who> <text> [--at s]
+shotline shot image <shot> [--file img | --generate --prompt .. [--ref f|url].. [--aspect a]
+                    [--resolution r] [--translate] | --remove n | --edit n] [--note ..]
 shotline shot ls [chapter]
 shotline shot show <id>
 shotline prompt <shot>
@@ -539,6 +547,11 @@ What's typed for an anchor can be put into English with the film's text model fi
 when the text isn't English and the text model's plugin and keys are there). It's a second small
 job, priced and agreed together with the image; the English goes into the prompt and is kept as
 `english` in the image's job.toml.
+
+A shot's page lists what goes to the video model under References: the anchors of the elements
+it names, then its own pictures (Add image… or Make image…, the same panel as for anchors), each
+with a note. Under Takes it says what might go wrong, shows the prompt as the model gets it, and
+Shoot a take… asks the price first and spends only on a second click, like `take`.
 
 It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window
 was. When working on the UI, keep it open with

@@ -267,3 +267,95 @@ fn translated_first() {
         .success()
         .stdout(predicate::str::contains("translation").not());
 }
+
+#[test]
+fn pictures_of_a_shot() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    tmp.child("cafe.png").write_binary(b"\x89PNG cafe").unwrap();
+    tmp.child("film/anchor.png")
+        .write_binary(b"\x89PNG paka")
+        .unwrap();
+    shotline(&tmp)
+        .args(["element", "anchor", "paka", "--file", "anchor.png"])
+        .assert()
+        .success();
+    shotline(&tmp)
+        .args(["shot", "image", "01-010", "--file", "../cafe.png"])
+        .args(["--note", "the café at night"])
+        .assert()
+        .success()
+        .stdout("chapters/01-one/shots/010/01.png\n");
+    // After Paka's anchor, named with its note.
+    shotline(&tmp)
+        .args(["prompt", "01-010"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Ref 1 walks\n\nRef 2: the café at night.",
+        ))
+        .stdout(predicate::str::contains(
+            "Ref 2                          chapters/01-one/shots/010/01.png",
+        ));
+
+    shotline(&tmp)
+        .args([
+            "shot",
+            "image",
+            "01-010",
+            "--generate",
+            "--prompt",
+            "@paka's desk",
+        ])
+        .args(["--note", "her desk", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "picture for 01-010 · fake fake/image · 0.04 USD",
+        ))
+        .stdout(predicate::str::contains("chapters/01-one/shots/010/02.png"));
+    // Paka's anchor went along, named in the image prompt.
+    let jobs = std::fs::read_dir(tmp.path().join("film/jobs")).unwrap();
+    let last = jobs.map(|e| e.unwrap().path()).max().unwrap();
+    let job: toml::Table =
+        toml::from_str(&std::fs::read_to_string(last.join("job.toml")).unwrap()).unwrap();
+    assert!(
+        job["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("image 1's desk"),
+        "{job}"
+    );
+    assert_eq!(job["shot"].as_str(), Some("01-010"));
+
+    shotline(&tmp)
+        .args([
+            "shot",
+            "image",
+            "01-010",
+            "--edit",
+            "1",
+            "--note",
+            "the café",
+        ])
+        .assert()
+        .success();
+    shotline(&tmp)
+        .args(["shot", "image", "01-010", "--remove", "2"])
+        .assert()
+        .success()
+        .stdout("chapters/01-one/shots/010/02.png taken off 01-010\n");
+    tmp.child("film/chapters/01-one/shots/010/02.png")
+        .assert(predicate::path::missing());
+    shotline(&tmp)
+        .args(["shot", "image", "01-010"])
+        .assert()
+        .success()
+        .stdout("1  chapters/01-one/shots/010/01.png  the café\n");
+    // A shot folder doesn't count as a shot.
+    shotline(&tmp)
+        .args(["shot", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("01-010").count(1));
+}

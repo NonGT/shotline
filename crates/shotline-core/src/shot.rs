@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,18 @@ pub struct Shot {
     /// What the storyboard frame is made from, if not `prompt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_prompt: Option<String>,
+    /// Pictures of its own that go along after the elements' anchors.
+    #[serde(default, rename = "image", skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ShotImage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShotImage {
+    /// Relative to the project root.
+    pub file: String,
+    /// What it shows, put in the prompt next to its label.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 impl Shot {
@@ -335,6 +347,68 @@ impl Project {
         }
         self.save_shot(r, &shot)?;
         Ok(shot)
+    }
+
+    /// Where a shot's own images are kept: chapters/01-x/shots/010/.
+    pub fn shot_image_dir(&self, r: ShotRef) -> Result<PathBuf> {
+        Ok(self.shot_path(r)?.with_extension(""))
+    }
+
+    /// Copies an image in as the shot's next one.
+    pub fn add_shot_image(&self, r: ShotRef, file: &Path, note: &str) -> Result<PathBuf> {
+        let mut shot = self.shot(r)?;
+        if !crate::element::is_image(file) {
+            return invalid(format!(
+                "{} isn't an image ({})",
+                file.display(),
+                crate::element::IMAGE_EXTS.join(", ")
+            ));
+        }
+        let ext = file
+            .extension()
+            .unwrap()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        let dir = self.shot_image_dir(r)?;
+        // max + 1 so removing 01 doesn't make the next one overwrite 02
+        let n = fsx::list(&dir)?
+            .iter()
+            .filter_map(|p| p.file_stem()?.to_str()?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let dest = dir.join(format!("{n:02}.{ext}"));
+        fsx::copy(file, &dest)?;
+        shot.images.push(ShotImage {
+            file: self.rel(&dest),
+            note: note.trim().to_string(),
+        });
+        self.save_shot(r, &shot)?;
+        Ok(dest)
+    }
+
+    /// Takes image `i` (from 0) off the shot, and deletes it if it's in the shot's folder.
+    pub fn remove_shot_image(&self, r: ShotRef, i: usize) -> Result<ShotImage> {
+        let mut shot = self.shot(r)?;
+        if i >= shot.images.len() {
+            return invalid(format!("{r} has no image {}", i + 1));
+        }
+        let img = shot.images.remove(i);
+        self.save_shot(r, &shot)?;
+        let path = self.root.join(&img.file);
+        if path.starts_with(self.shot_image_dir(r)?) {
+            let _ = std::fs::remove_file(&path);
+        }
+        Ok(img)
+    }
+
+    pub fn set_shot_image_note(&self, r: ShotRef, i: usize, note: &str) -> Result<()> {
+        let mut shot = self.shot(r)?;
+        let Some(img) = shot.images.get_mut(i) else {
+            return invalid(format!("{r} has no image {}", i + 1));
+        };
+        img.note = note.trim().to_string();
+        self.save_shot(r, &shot)
     }
 
     pub fn remove_line(&self, r: ShotRef, i: usize) -> Result<Shot> {

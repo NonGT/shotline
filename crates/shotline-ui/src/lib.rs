@@ -11,6 +11,7 @@ mod keys;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
 mod player;
+mod shoot;
 mod start;
 mod theme;
 
@@ -99,12 +100,25 @@ pub trait Host: Send + Sync {
     ) -> anyhow::Result<Vec<shotline_core::ledger::reconcile::Check>>;
     /// Spends, if the price is still `at`, and returns the image, not yet an anchor.
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf>;
+    /// What a take of the shot would cost, e.g. "0.40 USD". Free.
+    fn take_quote(&self, film: &Path, shot: ShotRef) -> anyhow::Result<String>;
+    /// Shoots a take, if the price is still `at`, telling `on` how it goes. Returns a line
+    /// about it.
+    fn take(
+        &self,
+        film: &Path,
+        shot: ShotRef,
+        at: &str,
+        on: &mut dyn FnMut(String),
+    ) -> anyhow::Result<String>;
 }
 
-/// A new anchor image for an element, made by an image model.
+/// A new image made by an image model: an element's anchor, or a picture for a shot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnchorAsk {
     pub handle: String,
+    /// Set for a shot's picture; `handle` is empty then.
+    pub shot: Option<ShotRef>,
     /// Added to the element's description.
     pub prompt: String,
     pub plugin: String,
@@ -162,6 +176,9 @@ pub struct App {
     /// Keys asked for, e.g. from a plugin that said it has none; the shell opens Settings.
     wants_keys: bool,
     maker: Option<anchor::Maker>,
+    /// The open shot as it would be sent; None once anything is read again.
+    built: Option<(ShotRef, Result<shotline_core::Built, String>)>,
+    shoot: Arc<Mutex<shoot::Shoot>>,
     /// timeline.toml as edited, saved once nothing has focus.
     timeline_form: Timeline,
     render: Arc<Mutex<cut::Render>>,
@@ -323,6 +340,8 @@ impl App {
             host: None,
             wants_keys: false,
             maker: None,
+            built: None,
+            shoot: Arc::default(),
             timeline_form: Timeline::default(),
             render: Arc::default(),
             cost_view: cost::View::default(),
@@ -358,10 +377,20 @@ impl App {
     fn add_made_anchor(&mut self) {
         let Some(m) = &mut self.maker else { return };
         let Some(out) = m.take_made() else { return };
-        match self.project.element(&m.handle) {
-            Ok(el) => {
+        let act = match &m.target {
+            anchor::For::Element(h) => self
+                .project
+                .element(h)
+                .map(|el| Action::AddAnchor(el, out.clone())),
+            anchor::For::Shot(r) => self
+                .project
+                .shot(*r)
+                .map(|_| Action::AddShotImage(*r, out.clone())),
+        };
+        match act {
+            Ok(a) => {
                 self.flush();
-                self.apply(vec![Action::AddAnchor(el, out)]);
+                self.apply(vec![a]);
             }
             Err(e) => self.status = Some((format!("made {}, but {e}", out.display()), true)),
         }
@@ -384,6 +413,45 @@ impl App {
                     })
             })
             .collect()
+    }
+
+    /// The Make image panel, open for whatever it's making.
+    fn show_maker(&mut self, ui: &mut egui::Ui, models: &[anchor::ImageModel]) {
+        let pool = self.anchor_pool();
+        let translator = self.translator();
+        let wants = self.maker.as_mut().unwrap().show(
+            ui,
+            models,
+            &pool,
+            &mut self.thumbs,
+            self.host.clone(),
+            &self.project.root,
+            translator,
+        );
+        let host = self.host.clone();
+        match (wants, host) {
+            (anchor::Wants::Price(ask), Some(host)) => {
+                self.flush();
+                let m = self.maker.as_ref().unwrap();
+                m.price(ui.ctx(), host, &self.project.root, ask);
+            }
+            (anchor::Wants::Make(ask, cost), Some(host)) => {
+                self.flush();
+                let m = self.maker.as_ref().unwrap();
+                m.make(ui.ctx(), host, &self.project.root, ask, cost);
+            }
+            (anchor::Wants::Zoom(p), _) => self.zoom = Some(p),
+            _ => {}
+        }
+    }
+
+    /// What an image is being made or priced for, e.g. "@paka" or "01-010".
+    fn making_for(&self) -> Option<String> {
+        let m = self.maker.as_ref().filter(|m| m.busy())?;
+        Some(match &m.target {
+            anchor::For::Element(h) => format!("@{h}"),
+            anchor::For::Shot(r) => r.to_string(),
+        })
     }
 
     /// The film's text model as "plugin · model", when it's installed and its keys are set.
@@ -490,6 +558,7 @@ impl App {
 
     fn reload(&mut self) {
         self.thumbs = Thumbs::default();
+        self.built = None;
         self.refresh_repo();
         if let Err(e) = self.load() {
             self.error(e.to_string());
@@ -652,6 +721,7 @@ impl App {
             theme::apply(ui.ctx());
         }
         self.add_made_anchor();
+        self.shoot_finished();
         let tab = self.tab;
         egui::Panel::top("bar")
             .frame(
@@ -1043,7 +1113,8 @@ impl App {
                 acts.push(Action::RemoveAnchor(el.clone(), a));
             }
             let models = self.image_models();
-            let making = self.maker.as_ref().is_some_and(|m| m.handle == el.handle);
+            let me = anchor::For::Element(el.handle.clone());
+            let making = self.maker.as_ref().is_some_and(|m| m.target == me);
             ui.horizontal(|ui| {
                 if ui.button("Add image…").clicked()
                     && let Some(file) = rfd::FileDialog::new()
@@ -1052,13 +1123,13 @@ impl App {
                 {
                     acts.push(Action::AddAnchor(el.clone(), file));
                 }
-                let busy = self.maker.as_ref().filter(|m| m.busy()).map(|m| m.handle.clone());
+                let busy = self.making_for();
                 if !models.is_empty()
                     && !making
                     && ui
                         .add_enabled(busy.is_none(), egui::Button::new("Make image…"))
                         .on_disabled_hover_text(format!(
-                            "still making one for @{}",
+                            "still making one for {}",
                             busy.unwrap_or_default()
                         ))
                         .clicked()
@@ -1066,7 +1137,7 @@ impl App {
                     let film = &self.project.config;
                     let cfg = &film.image;
                     self.maker = Some(anchor::Maker::new(
-                        &el.handle,
+                        me.clone(),
                         anchors.to_vec(),
                         &models,
                         (&cfg.plugin, &cfg.model),
@@ -1079,32 +1150,7 @@ impl App {
             });
             if making {
                 ui.add_space(6.0);
-                let pool = self.anchor_pool();
-                let translator = self.translator();
-                let wants = self.maker.as_mut().unwrap().show(
-                    ui,
-                    &models,
-                    &pool,
-                    &mut self.thumbs,
-                    self.host.clone(),
-                    &self.project.root,
-                    translator,
-                );
-                let host = self.host.clone();
-                match (wants, host) {
-                    (anchor::Wants::Price(ask), Some(host)) => {
-                        self.flush();
-                        let m = self.maker.as_ref().unwrap();
-                        m.price(ui.ctx(), host, &self.project.root, ask);
-                    }
-                    (anchor::Wants::Make(ask, cost), Some(host)) => {
-                        self.flush();
-                        let m = self.maker.as_ref().unwrap();
-                        m.make(ui.ctx(), host, &self.project.root, ask, cost);
-                    }
-                    (anchor::Wants::Zoom(p), _) => self.zoom = Some(p),
-                    _ => {}
-                }
+                self.show_maker(ui, &models);
             }
             if el.kind == Kind::Cast {
                 ui.add_space(20.0);
@@ -1288,7 +1334,8 @@ impl App {
                         }
                         ui.horizontal(|ui| {
                             ui.add_space(4.0);
-                            if quiet_button(ui, "Add shot")
+                            if ui
+                                .button("Add shot")
                                 .on_hover_text(format!("at the end of chapter {}", c.id()))
                                 .clicked()
                             {
@@ -1361,12 +1408,14 @@ impl App {
                 ui.set_width(side);
                 self.facts(ui, r, s);
                 ui.add_space(12.0);
-                if quiet_button(ui, "Add a shot after this one").clicked() {
+                if ui.button("Add a shot after this one").clicked() {
                     acts.push(Action::AddShot(r.chapter, Some(r.shot)));
                 }
             });
         });
         ui.add_space(20.0);
+        self.references(ui, r, s, &mut acts);
+        ui.add_space(12.0);
         ui.separator();
         ui.add_space(8.0);
         self.take_list(ui, r, s, &mut acts);
@@ -1428,7 +1477,7 @@ impl App {
         for (i, l) in f.lines.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 line_fields(ui, i, l, &cast, 80.0);
-                if quiet_button(ui, "Remove").clicked() {
+                if remove_button(ui).clicked() {
                     acts.push(Action::RemoveLine(r, i));
                 }
             });
@@ -1515,11 +1564,12 @@ impl App {
                 .color(theme::PAPER),
         );
         ui.add_space(4.0);
+        self.sent(ui, r);
+        ui.add_space(4.0);
+        self.shoot_row(ui, r);
+        ui.add_space(6.0);
         if self.takes.is_empty() {
-            hint(
-                ui,
-                &format!("No takes yet. Shoot one with shotline take {r}"),
-            );
+            hint(ui, "No takes yet.");
             return;
         }
         let mut play = None;
@@ -1817,10 +1867,6 @@ fn history_button(ui: &mut egui::Ui, text: &str, what: Option<String>, keys: &st
             .on_hover_text(format!("{text} {w} ({keys})"))
             .clicked()
     })
-}
-
-fn quiet_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(text).color(theme::DUST)).frame(false))
 }
 
 /// The voice by name from the plugin's list, or its ID typed in when there's no list. Returns

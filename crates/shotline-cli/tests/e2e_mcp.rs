@@ -143,6 +143,7 @@ fn lists_the_tools() {
         "format",
         "element_add",
         "shot_add",
+        "shot_image",
         "shot_set",
         "prompt",
         "quote",

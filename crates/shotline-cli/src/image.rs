@@ -89,21 +89,45 @@ fn make(
     Ok(Some((job, out)))
 }
 
-fn anchor_for(
+/// What a new image is for.
+#[derive(Clone, Copy)]
+pub enum Target<'a> {
+    Anchor(&'a str),
+    Shot(ShotRef),
+}
+
+/// What the image is for and how the ledger names it.
+fn image_for(
     p: &Project,
-    handle: &str,
+    t: Target,
     m: &Make,
     english: Option<&str>,
-) -> Result<(String, ImageFor)> {
-    let el = p.element(handle)?;
-    let what = ImageFor::Anchor {
-        handle: el.handle.clone(),
-        prompt: english.unwrap_or(m.prompt).to_string(),
-        refs: m.refs.clone(),
-        aspect: m.aspect.map(Into::into),
-        resolution: m.resolution.map(Into::into),
-    };
-    Ok((el.handle, what))
+) -> Result<(String, ImageFor, Option<ShotRef>)> {
+    let prompt = english.unwrap_or(m.prompt).to_string();
+    Ok(match t {
+        Target::Anchor(handle) => {
+            let el = p.element(handle)?;
+            let what = ImageFor::Anchor {
+                handle: el.handle.clone(),
+                prompt,
+                refs: m.refs.clone(),
+                aspect: m.aspect.map(Into::into),
+                resolution: m.resolution.map(Into::into),
+            };
+            (format!("anchor for @{}", el.handle), what, None)
+        }
+        Target::Shot(r) => {
+            p.shot(r)?;
+            let what = ImageFor::ShotImage {
+                shot: r,
+                prompt,
+                refs: m.refs.clone(),
+                aspect: m.aspect.map(Into::into),
+                resolution: m.resolution.map(Into::into),
+            };
+            (format!("picture for {r}"), what, Some(r))
+        }
+    })
 }
 
 /// The images an anchor is made from, when it isn't just the element's own: those (unless left
@@ -153,9 +177,10 @@ fn translation(p: &Project, m: &Make) -> Result<Option<(String, Request)>> {
     Ok(Some((b.plugin, req)))
 }
 
-/// What a new anchor image would cost, and its translation if there's one.
-pub fn anchor_quote(p: &Project, handle: &str, m: &Make) -> Result<String> {
-    let (plugin, req) = request(p, anchor_for(p, handle, m, None)?.1, m)?;
+/// What a new image would cost, and its translation if there's one.
+pub fn quote(p: &Project, t: Target, m: &Make) -> Result<String> {
+    let (_, what, _) = image_for(p, t, m, None)?;
+    let (plugin, req) = request(p, what, m)?;
     let image = quote_once(p, &plugin, &req)?;
     Ok(match translation(p, m)? {
         Some((tp, treq)) => format!("{image} + {} to translate", quote_once(p, &tp, &treq)?),
@@ -163,26 +188,15 @@ pub fn anchor_quote(p: &Project, handle: &str, m: &Make) -> Result<String> {
     })
 }
 
-/// Makes an image for an element, left in its job's folder. None if nothing was spent.
-pub fn anchor_image(
-    p: &Project,
-    handle: &str,
-    m: &Make,
-) -> Result<Option<(Job, std::path::PathBuf)>> {
+/// Makes an image, left in its job's folder. None if nothing was spent.
+pub fn image(p: &Project, t: Target, m: &Make) -> Result<Option<(Job, std::path::PathBuf)>> {
     let Some((tp, treq)) = translation(p, m)? else {
-        let (handle, what) = anchor_for(p, handle, m, None)?;
-        return make(
-            p,
-            what,
-            &format!("anchor for @{handle}"),
-            None,
-            m,
-            None,
-            m.go(),
-        );
+        let (label, what, shot) = image_for(p, t, m, None)?;
+        return make(p, what, &label, shot, m, None, m.go());
     };
+    let (label, _, shot) = image_for(p, t, m, None)?;
     // Two jobs, one price: agreed (or asked about) once for both.
-    let total = anchor_quote(p, handle, m)?;
+    let total = quote(p, t, m)?;
     match m.at {
         Some(agreed) if agreed != total => {
             bail!("the price changed from {agreed} to {total}; nothing spent")
@@ -190,16 +204,18 @@ pub fn anchor_image(
         Some(_) => {}
         None if m.yes => {}
         None => {
-            println!("anchor for @{handle}, translated first · {total}");
+            println!("{label}, translated first · {total}");
             if !confirm(&format!("spend {total}?"))? {
                 println!("nothing spent");
                 return Ok(None);
             }
         }
     }
-    let el = p.element(handle)?;
-    let label = format!("translation for @{}", el.handle);
-    let Some(job) = spend_once(p, &tp, &treq, None, &label, None, Go::Yes)? else {
+    let tlabel = format!(
+        "translation for {}",
+        label.split_once(" for ").map_or("", |x| x.1)
+    );
+    let Some(job) = spend_once(p, &tp, &treq, shot, &tlabel, None, Go::Yes)? else {
         return Ok(None);
     };
     let file = job
@@ -209,26 +225,48 @@ pub fn anchor_image(
     let raw = std::fs::read_to_string(p.job_dir(job.id).join(file))?;
     let english = finish_draft(p, &raw).with_context(|| format!("job {}", job.id))?;
     println!("in English: {english}");
-    let (handle, what) = anchor_for(p, handle, m, Some(&english))?;
-    make(
-        p,
-        what,
-        &format!("anchor for @{handle}"),
-        None,
-        m,
-        Some(&english),
-        Go::Yes,
-    )
+    let (label, what, shot) = image_for(p, t, m, Some(&english))?;
+    make(p, what, &label, shot, m, Some(&english), Go::Yes)
 }
 
 /// Makes a new anchor image for an element.
 pub fn anchor(p: &Project, handle: &str, m: &Make) -> Result<()> {
-    let Some((job, out)) = anchor_image(p, handle, m)? else {
+    let Some((job, out)) = image(p, Target::Anchor(handle), m)? else {
         return Ok(());
     };
     let dest = p.add_anchor(handle, &out)?;
     println!("{} · {} · job {}", p.rel(&dest), job_cost(&job), job.id);
     Ok(())
+}
+
+/// Makes a picture for a shot to send along with its prompt.
+pub fn shot_image(p: &Project, r: ShotRef, m: &Make, note: &str) -> Result<()> {
+    let Some((job, out)) = image(p, Target::Shot(r), m)? else {
+        return Ok(());
+    };
+    let dest = p.add_shot_image(r, &out, note)?;
+    println!("{} · {} · job {}", p.rel(&dest), job_cost(&job), job.id);
+    Ok(())
+}
+
+/// Files and URLs given as references, as paths. None when there are none.
+pub fn given(p: &Project, refs: &[String]) -> Result<Option<Vec<std::path::PathBuf>>> {
+    if refs.is_empty() {
+        return Ok(None);
+    }
+    let mut out = vec![];
+    for r in refs {
+        if crate::fetch::is_url(r) {
+            out.push(crate::fetch::image(p, r)?);
+        } else {
+            let f = std::env::current_dir()?.join(r);
+            if !f.is_file() {
+                bail!("{r} doesn't exist");
+            }
+            out.push(f);
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Next to the shot's file: chapters/01-x/shots/010.png.

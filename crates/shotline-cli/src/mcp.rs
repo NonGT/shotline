@@ -237,6 +237,37 @@ pub struct MakeAnchor {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ShotImage {
+    /// e.g. 01-010
+    shot: String,
+    /// Add this image (relative to the project folder)
+    file: Option<String>,
+    /// Make one with the image model from `prompt`; elements it names as @handles send their
+    /// anchors along
+    #[serde(default)]
+    generate: bool,
+    prompt: Option<String>,
+    /// What it shows; the video prompt gets "Image 3: <note>."
+    note: Option<String>,
+    /// Images to go along when making one, instead of the named elements' anchors
+    #[serde(default)]
+    refs: Vec<String>,
+    aspect: Option<String>,
+    resolution: Option<String>,
+    #[serde(default)]
+    translate: bool,
+    plugin: Option<String>,
+    model: Option<String>,
+    /// Take image n (from 1) off the shot
+    remove: Option<usize>,
+    /// Change image n's note to `note`
+    edit: Option<usize>,
+    /// Spend the money. Only after the user agreed to the price.
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct Frame {
     /// e.g. 01-010
     shot: String,
@@ -544,6 +575,42 @@ impl Server {
             args.push("--translate".into());
         }
         self.spend(args, p.confirm, &ctx).await
+    }
+
+    /// A shot's own pictures, sent to the video model after the anchors of the elements it names,
+    /// e.g. a place or a prop that isn't an element. Adds one from a file, makes one with the
+    /// image model (SPENDS MONEY; without confirm it only shows the price), removes one, changes
+    /// a note, or with nothing else lists them.
+    #[tool]
+    async fn shot_image(
+        &self,
+        Parameters(p): Parameters<ShotImage>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Reply {
+        let mut args = a(["shot", "image", &p.shot]);
+        opt(&mut args, "--note", p.note);
+        if let Some(f) = p.file {
+            args.extend(["--file".into(), f]);
+        } else if let Some(n) = p.remove {
+            args.extend(["--remove".into(), n.to_string()]);
+        } else if let Some(n) = p.edit {
+            args.extend(["--edit".into(), n.to_string()]);
+        } else if p.generate {
+            args.push("--generate".into());
+            opt(&mut args, "--prompt", p.prompt);
+            opt(&mut args, "--plugin", p.plugin);
+            opt(&mut args, "--model", p.model);
+            for r in p.refs {
+                args.extend(["--ref".into(), r]);
+            }
+            opt(&mut args, "--aspect", p.aspect);
+            opt(&mut args, "--resolution", p.resolution);
+            if p.translate {
+                args.push("--translate".into());
+            }
+            return self.spend(args, p.confirm, &ctx).await;
+        }
+        self.cli(args, None, &ctx).await
     }
 
     /// Give a shot a storyboard frame for its video to start on: made by the image model (SPENDS

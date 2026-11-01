@@ -1,9 +1,11 @@
-//! Making an anchor image with an image model: price first, then spend only on a second click.
+//! Making an image with an image model, an element's anchor or a shot's picture: price first,
+//! then spend only on a second click.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
+use shotline_core::ShotRef;
 
 use crate::{
     AnchorAsk, Host, Thumbs, caption, hint, remove_button, shape, short, spend_button, theme,
@@ -40,8 +42,15 @@ enum Fetch {
     Failed(String),
 }
 
+/// What the image is for.
+#[derive(Clone, PartialEq)]
+pub(crate) enum For {
+    Element(String),
+    Shot(ShotRef),
+}
+
 pub(crate) struct Maker {
-    pub handle: String,
+    pub target: For,
     pick: usize,
     prompt: String,
     /// Images to go along, in the order the prompt numbers them.
@@ -68,22 +77,22 @@ pub(crate) enum Wants {
 }
 
 impl Maker {
-    /// The element's own anchors go along to start with, so a new one keeps the look.
+    /// `refs` go along to start with: an element's own anchors, so a new one keeps the look.
     pub fn new(
-        handle: &str,
-        anchors: Vec<PathBuf>,
+        target: For,
+        refs: Vec<PathBuf>,
         models: &[ImageModel],
         preferred: (&str, &str),
         defaults: (String, Option<String>),
     ) -> Maker {
         Maker {
-            handle: handle.to_string(),
+            target,
             pick: models
                 .iter()
                 .position(|m| (m.plugin.as_str(), m.model.as_str()) == preferred)
                 .unwrap_or(0),
             prompt: String::new(),
-            refs: anchors,
+            refs,
             aspect: None,
             resolution: None,
             defaults,
@@ -228,12 +237,13 @@ impl Maker {
                             }
                         });
                     ui.add_space(6.0);
+                    let example = match self.target {
+                        For::Element(_) => "anything to add, e.g. side view, full body",
+                        For::Shot(_) => "what it shows, e.g. the café at night, from the door",
+                    };
                     ui.add(
                         egui::TextEdit::singleline(&mut self.prompt)
-                            .hint_text(
-                                RichText::new("anything to add, e.g. side view, full body")
-                                    .color(theme::DUST),
-                            )
+                            .hint_text(RichText::new(example).color(theme::DUST))
                             .desired_width(f32::INFINITY),
                     )
                     .widget_info(|| {
@@ -274,8 +284,13 @@ impl Maker {
                 {
                     self.resolution = None;
                 }
+                let (handle, shot) = match &self.target {
+                    For::Element(h) => (h.clone(), None),
+                    For::Shot(r) => (String::new(), Some(*r)),
+                };
                 let ask = AnchorAsk {
-                    handle: self.handle.clone(),
+                    handle,
+                    shot,
                     prompt: self.prompt.trim().to_string(),
                     plugin: m.plugin.clone(),
                     model: m.model.clone(),
@@ -494,10 +509,13 @@ impl Maker {
         if !self.refs.is_empty() {
             hint(
                 ui,
-                &format!(
-                    "Name them in the prompt by the label under each; @{}'s own are named for you.",
-                    self.handle
-                ),
+                &match &self.target {
+                    For::Element(h) => format!(
+                        "Name them in the prompt by the label under each; @{h}'s own are named \
+                         for you."
+                    ),
+                    For::Shot(_) => "Name them in the prompt by the label under each.".into(),
+                },
             );
         }
         zoom

@@ -79,7 +79,10 @@ fn harness(dir: &Path) -> Harness<'static, App> {
     let app = App::new(film(dir), dir.join("home"))
         .with_viewer(None)
         .silent();
-    Harness::builder().build_ui_state(|ui, app: &mut App| app.show(ui), app)
+    // Tall enough for a shot's takes, under its references.
+    Harness::builder()
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app)
 }
 
 fn field(h: &Harness<'static, App>, role: Role, label: &str) -> String {
@@ -246,6 +249,37 @@ impl Host for TestHost {
         Ok("3.5 USD left".into())
     }
 
+    fn take_quote(&self, _film: &Path, shot: ShotRef) -> anyhow::Result<String> {
+        assert_eq!(shot, R);
+        Ok("0.40 USD".into())
+    }
+
+    /// A take as the engine leaves one: a done job of the shot with a video.
+    fn take(
+        &self,
+        film: &Path,
+        shot: ShotRef,
+        at: &str,
+        on: &mut dyn FnMut(String),
+    ) -> anyhow::Result<String> {
+        assert_eq!((shot, at), (R, "0.40 USD"));
+        on("running (40%)".into());
+        let p = Project::open(film)?;
+        let mut j = Job::new(
+            Op::VideoGenerate,
+            "fal",
+            "minimax/h3-max/reference-to-video",
+        );
+        j.shot = Some(shot);
+        j.take = Some(p.new_take_id());
+        let mut j = p.create_job(j)?;
+        std::fs::write(p.job_dir(j.id).join("out.mp4"), "mp4")?;
+        j.outputs = vec!["out.mp4".into()];
+        j.status = JobStatus::Done;
+        p.save_job(&j)?;
+        Ok("01-010#3 done · 0.40 USD".into())
+    }
+
     fn anchor_quote(&self, _film: &Path, ask: &AnchorAsk) -> anyhow::Result<String> {
         assert_eq!(
             (ask.plugin.as_str(), ask.model.as_str()),
@@ -290,6 +324,13 @@ impl Host for TestHost {
     }
 
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf> {
+        if ask.shot.is_some() {
+            assert_eq!((ask.handle.as_str(), ask.prompt.as_str()), ("", "the café"));
+            assert!(ask.refs.is_empty());
+            let out = film.join(".shotline").join("cafe.png");
+            image::RgbImage::new(8, 8).save(&out)?;
+            return Ok(out);
+        }
         assert_eq!(
             (ask.handle.as_str(), ask.prompt.as_str(), at),
             ("paka", "side view", "$0.04")
@@ -460,6 +501,105 @@ fn make_an_anchor_image() {
     h.get_by_label("Undo").click();
     h.run();
     assert!(anchors(&p).is_empty());
+}
+
+#[test]
+fn a_shot_s_pictures_and_a_take() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let png = tmp.path().join("in.png");
+    image::RgbImage::new(8, 8).save(&png).unwrap();
+    p.add_anchor("paka", &png).unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(
+        vec![Description {
+            name: "fal".into(),
+            version: "1".into(),
+            protocol: 1,
+            env: vec![],
+            models: vec![
+                ModelInfo {
+                    id: "minimax/h3-max/reference-to-video".into(),
+                    op: Op::VideoGenerate,
+                    ref_image: Some("Image {n}".into()),
+                    max_images: Some(9),
+                    ..ModelInfo::default()
+                },
+                ModelInfo {
+                    id: "fal-ai/nano-banana".into(),
+                    op: Op::ImageGenerate,
+                    ref_image: Some("Image {n}".into()),
+                    ..ModelInfo::default()
+                },
+            ],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 1400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    h.get_by_label("References");
+    h.get_by_label("up to 9");
+    h.get_by_label("Image 1 · @paka");
+
+    // A picture of the shot's own, made with a prompt.
+    h.get_by_label("Make image…").click();
+    h.run();
+    let prompt = h.get_by_role_and_label(Role::TextInput, "Image prompt");
+    prompt.focus();
+    prompt.type_text("the café");
+    h.run();
+    h.get_by_label("Get price").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make it for $0.04")
+        .is_some()));
+    h.get_by_label("Make it for $0.04").click();
+    assert!(wait_for(&mut h, |_| !p.shot(R).unwrap().images.is_empty()));
+    h.run();
+    let img = &p.shot(R).unwrap().images[0];
+    assert_eq!(img.file, "chapters/01-into-the-forest/shots/010/01.png");
+    h.get_by_label("Image 2");
+
+    let note = h.get_by_role_and_label(Role::TextInput, "Note 1");
+    note.focus();
+    note.type_text("the café at night");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().images[0].note, "the café at night");
+    // The prompt as it's sent names it.
+    h.get_by_label_contains("What the model gets").click();
+    h.run();
+    h.get_by_label_contains("Image 2: the café at night.");
+
+    h.get_by_label("Remove").click();
+    h.run();
+    assert!(p.shot(R).unwrap().images.is_empty());
+    assert!(!p.root.join(&img.file).exists());
+    h.get_by_label("Undo").click();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().images.len(), 1);
+    assert!(p.root.join(&img.file).exists());
+
+    // A take: priced, then shot on a second click.
+    let before = p.takes(R).unwrap().len();
+    h.get_by_label("Shoot a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Shoot it for 0.40 USD")
+        .is_some()));
+    assert_eq!(p.takes(R).unwrap().len(), before);
+    h.get_by_label("Shoot it for 0.40 USD").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("01-010#3 done · 0.40 USD")
+        .is_some()));
+    assert_eq!(p.takes(R).unwrap().len(), before + 1);
+    h.get_by_label("Play #3");
 }
 
 #[test]

@@ -36,6 +36,8 @@ the ... budget", stop and tell the user. Never raise a budget or retry around it
 6. Check: `prompt` shows exactly what a shot will send. Fix it with `shot_set`.
    A storyboard frame (`frame`) is optional: a cheap still of the shot's first frame that the
    video then starts on. Worth it for key shots, to agree on framing before paying for video.
+   A place or prop that isn't an element can still be shown to the model: `shot_image` adds a
+   picture to the shot (from a file, or made from a prompt), with a note of what it shows.
 7. Shoot: `quote`, ask, then `take` with `confirm: true`. A continue shot needs the shot before
    it to have a selected take first, so shoot in order.
 8. Pick: `takes` lists them with their files. Let the user watch and choose, then `select`.

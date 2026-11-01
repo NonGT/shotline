@@ -27,6 +27,8 @@ pub(crate) struct Form {
     pub recipe: Option<String>,
     /// Plugin and model instead of the film's.
     pub model: Option<(String, String)>,
+    /// What each of the shot's own images shows.
+    pub image_notes: Vec<String>,
     /// Instead of the film's.
     pub resolution: Option<String>,
     pub lines: Vec<LineForm>,
@@ -201,6 +203,10 @@ pub(crate) enum Action {
     /// An image file copied in as the element's next anchor.
     AddAnchor(Element, PathBuf),
     RemoveAnchor(Element, PathBuf),
+    /// An image file copied in as the shot's next picture.
+    AddShotImage(ShotRef, PathBuf),
+    RemoveShotImage(ShotRef, usize),
+    ShotImageNote(ShotRef, usize, String),
     Timeline(Timeline),
     /// Music for the cut; a file from outside the film is copied into music/ first.
     AddTrack(PathBuf),
@@ -213,7 +219,10 @@ impl Action {
             Action::Set(r, _)
             | Action::AddLine(r, _)
             | Action::SetLine(r, ..)
-            | Action::RemoveLine(r, _) => r.to_string(),
+            | Action::RemoveLine(r, _)
+            | Action::AddShotImage(r, _)
+            | Action::RemoveShotImage(r, _)
+            | Action::ShotImageNote(r, ..) => r.to_string(),
             Action::Select(t) => t.shot.to_string(),
             Action::Story(_) => "the story".into(),
             Action::Style(_) => "the style".into(),
@@ -235,7 +244,18 @@ impl Action {
             Action::Set(r, _)
             | Action::AddLine(r, _)
             | Action::SetLine(r, ..)
-            | Action::RemoveLine(r, _) => p.shot_path(*r).into_iter().collect(),
+            | Action::RemoveLine(r, _)
+            | Action::AddShotImage(r, _)
+            | Action::ShotImageNote(r, ..) => p.shot_path(*r).into_iter().collect(),
+            Action::RemoveShotImage(r, i) => {
+                let mut out: Vec<PathBuf> = p.shot_path(*r).into_iter().collect();
+                if let Ok(s) = p.shot(*r)
+                    && let Some(img) = s.images.get(*i)
+                {
+                    out.push(p.root.join(&img.file));
+                }
+                out
+            }
             Action::Select(t) => p.shot_path(t.shot).into_iter().collect(),
             Action::Story(_) => vec![p.root.join("story.md")],
             Action::Style(_) => vec![p.root.join("style.md")],
@@ -388,6 +408,7 @@ impl Form {
             recipe: s.recipe.clone(),
             model: video_model(s),
             resolution: s.model.as_ref().and_then(|m| m.resolution.clone()),
+            image_notes: s.images.iter().map(|i| i.note.clone()).collect(),
             lines: s.lines.iter().map(LineForm::of).collect(),
             new: LineForm::default(),
         }
@@ -425,6 +446,11 @@ impl Form {
             self.resolution != s.model.as_ref().and_then(|m| m.resolution.clone()),
             Field::Resolution(self.resolution.clone()),
         );
+        for (i, (n, img)) in self.image_notes.iter().zip(&s.images).enumerate() {
+            if n.trim() != img.note {
+                out.push(Action::ShotImageNote(r, i, n.clone()));
+            }
+        }
         for (i, (f, l)) in self.lines.iter().zip(&s.lines).enumerate() {
             if *f != LineForm::of(l) {
                 out.push(Action::SetLine(r, i, f.clone()));
@@ -678,6 +704,23 @@ impl App {
             Action::RemoveAnchor(el, file) => {
                 std::fs::remove_file(&file)?;
                 format!("{} taken off @{}", p.rel(&file), el.handle).into()
+            }
+            Action::AddShotImage(r, file) => {
+                let dir = p.shot_image_dir(r)?;
+                let new_dir = !dir.exists();
+                let dest = p.add_shot_image(r, &file, "")?;
+                Done {
+                    msg: format!("{r} has {}", p.rel(&dest)),
+                    made: vec![if new_dir { dir } else { dest }],
+                }
+            }
+            Action::RemoveShotImage(r, i) => {
+                let img = p.remove_shot_image(r, i)?;
+                format!("{} taken off {r}", img.file).into()
+            }
+            Action::ShotImageNote(r, i, note) => {
+                p.set_shot_image_note(r, i, &note)?;
+                format!("{r} saved").into()
             }
             Action::Timeline(t) => {
                 p.save_timeline(&t)?;
