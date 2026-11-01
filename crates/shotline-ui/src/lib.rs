@@ -23,7 +23,7 @@ use shotline_core::{
 };
 use shotline_media::Ffmpeg;
 
-use edit::{Action, Form, History, LineForm};
+use edit::{Action, Form, History, LineForm, Texts};
 use git::{Dialog, Repo};
 use player::{Audio, Deck, Player};
 pub use start::{MenuCommand, Shell};
@@ -87,6 +87,9 @@ pub struct App {
     place: Option<(Tab, Option<ShotRef>)>,
     themed: bool,
     form: Form,
+    texts: Texts,
+    /// The title typed for a new chapter.
+    new_chapter: String,
     history: History,
     git: Option<Git>,
     repo: Repo,
@@ -154,6 +157,8 @@ impl App {
             place: None,
             themed: false,
             form: Form::default(),
+            texts: Texts::default(),
+            new_chapter: String::new(),
             history: History::default(),
             git: Git::find(),
             repo: Repo::None,
@@ -271,7 +276,7 @@ impl App {
         }
         self.film = Film {
             story: read(&p.root.join("story.md")),
-            style: p.style()?,
+            style: read(&p.root.join("style.md")),
             elements,
             chapters,
             cut: p.cut(&p.timeline()?)?,
@@ -496,18 +501,27 @@ impl App {
     }
 
     fn story(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.label(&self.film.story);
-                ui.add_space(12.0);
-                ui.heading("Style");
-                if self.film.style.is_empty() {
-                    ui.weak("style.md is empty");
-                } else {
-                    ui.label(&self.film.style);
-                }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BAY)
+                    .inner_margin(egui::vec2(28.0, 20.0)),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_max_width(720.0);
+                    let t = &mut self.texts;
+                    text_field(ui, "Story", &mut t.story, "What the film is about");
+                    ui.add_space(14.0);
+                    text_field(
+                        ui,
+                        "Style",
+                        &mut t.style,
+                        "How every shot should look; added to every prompt",
+                    );
+                    hint(ui, "Text between <!-- and --> is left out of prompts.");
+                });
             });
-        });
     }
 
     fn elements(&mut self, ui: &mut egui::Ui) {
@@ -545,6 +559,7 @@ impl App {
 
     fn shots(&mut self, ui: &mut egui::Ui) {
         let mut open = None;
+        let mut acts = vec![];
         egui::Panel::left("shots")
             .resizable(true)
             .default_size(260.0)
@@ -555,9 +570,6 @@ impl App {
             )
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.film.chapters.is_empty() {
-                        ui.weak("No chapters yet. Add one with shotline chapter add");
-                    }
                     for (c, shots) in &self.film.chapters {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
@@ -574,10 +586,40 @@ impl App {
                                 open = Some(*r);
                             }
                         }
+                        ui.horizontal(|ui| {
+                            ui.add_space(4.0);
+                            if quiet_button(ui, "Add shot")
+                                .on_hover_text(format!("at the end of chapter {}", c.id()))
+                                .clicked()
+                            {
+                                acts.push(Action::AddShot(c.number, None));
+                            }
+                        });
                         ui.add_space(8.0);
+                    }
+                    ui.add_space(4.0);
+                    let label = caption(ui, "New chapter");
+                    let field = ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.new_chapter)
+                                .hint_text(RichText::new("Its title").color(theme::DUST))
+                                .desired_width(f32::INFINITY),
+                        )
+                        .labelled_by(label.id);
+                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let title = self.new_chapter.trim().to_string();
+                    let add = ui.add_enabled(!title.is_empty(), egui::Button::new("Add chapter"));
+                    if (add.clicked() || enter) && !title.is_empty() {
+                        acts.push(Action::AddChapter(title));
+                        self.new_chapter.clear();
                     }
                 });
             });
+        if !acts.is_empty() {
+            // Typing in the open shot is saved first, as its own step.
+            self.flush();
+            self.apply(acts);
+        }
         if let Some(r) = open {
             self.open_shot(r);
         }
@@ -594,8 +636,11 @@ impl App {
                         self.shot_detail(ui, r, &s)
                     });
                 }
+                None if self.film.chapters.is_empty() => {
+                    hint(ui, "Shots go in chapters. Add the first one on the left.");
+                }
                 None => {
-                    ui.weak("Pick a shot on the left.");
+                    hint(ui, "Pick a shot on the left.");
                 }
             });
     }
@@ -630,12 +675,19 @@ impl App {
             ui.vertical(|ui| {
                 ui.set_width(side);
                 self.facts(ui, r, s);
+                ui.add_space(12.0);
+                if quiet_button(ui, "Add a shot after this one").clicked() {
+                    acts.push(Action::AddShot(r.chapter, Some(r.shot)));
+                }
             });
         });
         ui.add_space(20.0);
         ui.separator();
         ui.add_space(8.0);
         self.take_list(ui, r, s, &mut acts);
+        if acts.iter().any(|a| matches!(a, Action::AddShot(..))) {
+            self.flush();
+        }
         self.apply(acts);
     }
 
@@ -739,9 +791,21 @@ impl App {
                     );
                 });
                 ui.end_row();
-                if let Some(rc) = &s.recipe {
+                let recipes: Vec<String> = self.project.config.recipes.keys().cloned().collect();
+                if !recipes.is_empty() || s.recipe.is_some() {
                     ui.weak("Recipe");
-                    ui.label(rc);
+                    egui::ComboBox::from_id_salt("recipe")
+                        .selected_text(f.recipe.as_deref().unwrap_or("video only"))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut f.recipe, None, "video only");
+                            for rc in recipes {
+                                ui.selectable_value(&mut f.recipe, Some(rc.clone()), rc);
+                            }
+                        })
+                        .response
+                        .widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Recipe")
+                        });
                     ui.end_row();
                 }
                 if let Some(m) = &s.model {

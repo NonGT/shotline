@@ -140,6 +140,91 @@ fn edit_a_shot() {
 }
 
 #[test]
+fn edit_the_story_and_add_shots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness(tmp.path());
+    h.run();
+    let p = Project::open(&tmp.path().join("film")).unwrap();
+    let story = std::fs::read_to_string(p.root.join("story.md")).unwrap();
+
+    h.get_by_label("Story").click();
+    h.run();
+    let style = h.get_by_role_and_label(Role::MultilineTextInput, "Style");
+    style.focus();
+    style.type_text("Rainy greens, handheld.");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert!(p.style().unwrap().ends_with("Rainy greens, handheld."));
+    assert_eq!(
+        std::fs::read_to_string(p.root.join("story.md")).unwrap(),
+        story
+    );
+    h.get_by_label("style saved");
+
+    h.get_by_label("Shots").click();
+    h.run();
+    let title = h.get_by_role_and_label(Role::TextInput, "New chapter");
+    title.focus();
+    title.type_text("The river");
+    h.run();
+    h.get_by_label("Add chapter").click();
+    h.run();
+    h.run();
+    assert_eq!(p.chapter("2").unwrap().title, "The river");
+    let adds = h.query_all_by_label("Add shot").count();
+    assert_eq!(adds, 2);
+
+    // A shot after 01-010, then one at the end of chapter 2.
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    h.get_by_label("Add a shot after this one").click();
+    h.run();
+    h.run();
+    let new = ShotRef {
+        chapter: 1,
+        shot: 20,
+    };
+    assert!(p.shot(new).is_ok());
+    h.get_by_label("added 01-020");
+    // And it's open, empty.
+    assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "");
+    h.query_all_by_label("Add shot").nth(1).unwrap().click();
+    h.run();
+    h.run();
+    let end = ShotRef {
+        chapter: 2,
+        shot: 10,
+    };
+    assert!(p.shot(end).is_ok());
+
+    // Undo takes them back one by one, chapter folder and all.
+    h.get_by_label("Undo").click();
+    h.run();
+    assert!(p.shot(end).is_err());
+    h.get_by_label("Undo").click();
+    h.run();
+    assert!(p.shot(new).is_err());
+    h.get_by_label("Undo").click();
+    h.run();
+    assert!(p.chapter("2").is_err());
+    assert_eq!(
+        std::fs::read_dir(p.root.join("chapters")).unwrap().count(),
+        1
+    );
+    h.get_by_label("Undo").click();
+    h.run();
+    assert_eq!(p.style().unwrap(), "");
+
+    h.get_by_label("Redo").click();
+    h.run();
+    h.get_by_label("Redo").click();
+    h.run();
+    assert_eq!(p.chapter("2").unwrap().title, "The river");
+}
+
+#[test]
 fn undo_and_redo() {
     let tmp = tempfile::tempdir().unwrap();
     let mut h = harness(tmp.path());
@@ -557,7 +642,7 @@ fn elements_story_and_cost() {
 
     h.get_by_label("Story").click();
     h.run();
-    h.get_by_label_contains("## Logline");
+    assert!(field(&h, Role::MultilineTextInput, "Story").contains("## Logline"));
 
     h.get_by_label("Cost").click();
     h.run();

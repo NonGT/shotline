@@ -4,7 +4,9 @@
 //! before and after so the change can be undone.
 
 use shotline_core::ledger::money;
-use shotline_core::{Shot, ShotRef, Take, Transition};
+use std::path::{Path, PathBuf};
+
+use shotline_core::{Project, Shot, ShotRef, Take, Transition};
 
 use crate::App;
 
@@ -18,6 +20,7 @@ pub(crate) struct Form {
     pub frame_prompt: String,
     pub duration: f64,
     pub transition: Transition,
+    pub recipe: Option<String>,
     pub lines: Vec<LineForm>,
     /// The line being added.
     pub new: LineForm,
@@ -58,6 +61,7 @@ pub(crate) enum Field {
     FramePrompt(String),
     Duration(f64),
     Transition(Transition),
+    Recipe(Option<String>),
 }
 
 pub(crate) enum Action {
@@ -66,29 +70,100 @@ pub(crate) enum Action {
     SetLine(ShotRef, usize, LineForm),
     RemoveLine(ShotRef, usize),
     Select(Take),
+    Story(String),
+    Style(String),
+    AddChapter(String),
+    /// A new shot at the end of the chapter, or after the given number.
+    AddShot(u32, Option<u32>),
 }
 
 impl Action {
-    fn shot(&self) -> ShotRef {
+    /// What it's about, as the undo button names it.
+    fn name(&self) -> String {
         match self {
             Action::Set(r, _)
             | Action::AddLine(r, _)
             | Action::SetLine(r, ..)
-            | Action::RemoveLine(r, _) => *r,
-            Action::Select(t) => t.shot,
+            | Action::RemoveLine(r, _) => r.to_string(),
+            Action::Select(t) => t.shot.to_string(),
+            Action::Story(_) => "the story".into(),
+            Action::Style(_) => "the style".into(),
+            Action::AddChapter(t) => format!("chapter {t}"),
+            Action::AddShot(..) => "a new shot".into(),
+        }
+    }
+
+    /// Files it rewrites. Files it makes are told by `write` afterwards.
+    fn files(&self, p: &Project) -> Vec<PathBuf> {
+        match self {
+            Action::Set(r, _)
+            | Action::AddLine(r, _)
+            | Action::SetLine(r, ..)
+            | Action::RemoveLine(r, _) => p.shot_path(*r).into_iter().collect(),
+            Action::Select(t) => p.shot_path(t.shot).into_iter().collect(),
+            Action::Story(_) => vec![p.root.join("story.md")],
+            Action::Style(_) => vec![p.root.join("style.md")],
+            Action::AddChapter(_) | Action::AddShot(..) => vec![],
+        }
+    }
+}
+
+/// A path as it was or will be.
+#[derive(Clone, PartialEq)]
+enum State {
+    Gone,
+    Dir,
+    File(Vec<u8>),
+}
+
+impl State {
+    fn of(path: &Path) -> State {
+        if path.is_dir() {
+            State::Dir
+        } else {
+            std::fs::read(path).map_or(State::Gone, State::File)
+        }
+    }
+
+    fn put(&self, path: &Path) -> std::io::Result<()> {
+        match self {
+            State::Gone if path.is_dir() => std::fs::remove_dir(path),
+            State::Gone => match std::fs::remove_file(path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                r => r,
+            },
+            State::Dir => std::fs::create_dir_all(path),
+            State::File(b) => {
+                if let Some(d) = path.parent() {
+                    std::fs::create_dir_all(d)?;
+                }
+                std::fs::write(path, b)
+            }
+        }
+    }
+}
+
+/// A path and everything under it, folders before what's in them.
+fn tree(path: &Path, out: &mut Vec<PathBuf>) {
+    out.push(path.to_path_buf());
+    if let Ok(rd) = std::fs::read_dir(path) {
+        let mut kids: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        kids.sort();
+        for k in kids {
+            tree(&k, out);
         }
     }
 }
 
 struct Change {
-    shot: ShotRef,
-    before: Shot,
-    after: Shot,
+    path: PathBuf,
+    before: State,
+    after: State,
 }
 
 impl Change {
-    /// The shot as it is now and as it will be once this change is undone, or redone.
-    fn ends(&self, back: bool) -> (&Shot, &Shot) {
+    /// The path as it is now and as it will be once this change is undone, or redone.
+    fn ends(&self, back: bool) -> (&State, &State) {
         if back {
             (&self.after, &self.before)
         } else {
@@ -97,15 +172,39 @@ impl Change {
     }
 }
 
-/// What one save did, as a whole: undo takes back every shot it touched.
+/// What one save did, as a whole: undo takes back every file it touched.
 struct Step {
+    names: Vec<String>,
     changes: Vec<Change>,
 }
 
 impl Step {
     fn what(&self) -> String {
-        let shots: Vec<String> = self.changes.iter().map(|c| c.shot.to_string()).collect();
-        format!("the change to {}", shots.join(" and "))
+        format!("the change to {}", self.names.join(" and "))
+    }
+
+    fn record(&mut self, path: PathBuf, before: State) {
+        let after = State::of(&path);
+        match self.changes.iter_mut().find(|c| c.path == path) {
+            Some(c) => c.after = after,
+            None => self.changes.push(Change {
+                path,
+                before,
+                after,
+            }),
+        }
+    }
+}
+
+/// What `write` did: the message for the status bar and any paths it made.
+struct Done {
+    msg: String,
+    made: Vec<PathBuf>,
+}
+
+impl From<String> for Done {
+    fn from(msg: String) -> Done {
+        Done { msg, made: vec![] }
     }
 }
 
@@ -125,6 +224,13 @@ impl History {
     }
 }
 
+/// What's typed into the story and style.
+#[derive(Default, Clone, PartialEq)]
+pub(crate) struct Texts {
+    pub story: String,
+    pub style: String,
+}
+
 impl Form {
     pub fn of(r: ShotRef, s: &Shot, default_duration: f64) -> Form {
         Form {
@@ -135,6 +241,7 @@ impl Form {
             frame_prompt: s.frame_prompt.clone().unwrap_or_default(),
             duration: s.duration.unwrap_or(default_duration),
             transition: s.transition,
+            recipe: s.recipe.clone(),
             lines: s.lines.iter().map(LineForm::of).collect(),
             new: LineForm::default(),
         }
@@ -163,6 +270,7 @@ impl Form {
             self.transition != s.transition,
             Field::Transition(self.transition),
         );
+        set(self.recipe != s.recipe, Field::Recipe(self.recipe.clone()));
         for (i, (f, l)) in self.lines.iter().zip(&s.lines).enumerate() {
             if *f != LineForm::of(l) {
                 out.push(Action::SetLine(r, i, f.clone()));
@@ -185,38 +293,62 @@ impl App {
             }
             None => Form::default(),
         };
+        self.texts = Texts {
+            story: self.film.story.clone(),
+            style: self.film.style.clone(),
+        };
     }
 
-    /// Writes whatever was typed into the open shot and not saved yet.
+    /// Writes whatever was typed and not saved yet.
     pub(crate) fn flush(&mut self) {
-        let Some((r, s)) = self.open() else { return };
-        if self.form.shot != Some(r) {
-            return;
+        let mut acts = vec![];
+        if let Some((r, s)) = self.open()
+            && self.form.shot == Some(r)
+        {
+            acts = self.form.changes(r, &s, self.project.config.duration);
         }
-        let acts = self.form.changes(r, &s, self.project.config.duration);
+        if self.texts.story != self.film.story {
+            acts.push(Action::Story(self.texts.story.clone()));
+        }
+        if self.texts.style != self.film.style {
+            acts.push(Action::Style(self.texts.style.clone()));
+        }
         self.apply(acts);
     }
 
     /// Writes the actions as one step of the undo history.
     pub(crate) fn apply(&mut self, acts: Vec<Action>) {
-        let mut step = Step { changes: vec![] };
+        let mut step = Step {
+            names: vec![],
+            changes: vec![],
+        };
         for a in acts {
-            let r = a.shot();
-            let before = self.project.shot(r);
+            let name = a.name();
+            let files: Vec<(PathBuf, State)> = a
+                .files(&self.project)
+                .into_iter()
+                .map(|f| {
+                    let s = State::of(&f);
+                    (f, s)
+                })
+                .collect();
             let added = matches!(a, Action::AddLine(..));
             match self.write(a) {
-                Ok(msg) => {
-                    if let (Ok(before), Ok(after)) = (before, self.project.shot(r)) {
-                        match step.changes.iter_mut().find(|c| c.shot == r) {
-                            Some(c) => c.after = after,
-                            None => step.changes.push(Change {
-                                shot: r,
-                                before,
-                                after,
-                            }),
-                        }
+                Ok(done) => {
+                    for (f, before) in files {
+                        step.record(f, before);
                     }
-                    self.info(msg);
+                    let mut made = vec![];
+                    for m in &done.made {
+                        tree(m, &mut made);
+                    }
+                    for m in made {
+                        step.record(m, State::Gone);
+                    }
+                    if !step.names.contains(&name) {
+                        step.names.push(name);
+                    }
+                    self.info(done.msg);
                     if added {
                         self.form.new.text.clear();
                         self.form.new.at.clear();
@@ -255,7 +387,7 @@ impl App {
             &mut self.history.redo
         };
         let Some(step) = from.pop() else { return };
-        match self.restore(&step, back) {
+        match restore(&step, back) {
             Ok(()) => {
                 let done = if back { "undid" } else { "redid" };
                 self.info(format!("{done} {}", step.what()));
@@ -269,24 +401,13 @@ impl App {
             // The step is dropped: the files moved on without it.
             Err(e) => self.error(e.to_string()),
         }
+        if self.shot.is_some_and(|r| self.project.shot(r).is_err()) {
+            self.shot = None;
+        }
         self.reload();
     }
 
-    fn restore(&self, step: &Step, back: bool) -> anyhow::Result<()> {
-        // Something else, like the co-director over MCP, may have changed the shot since; don't
-        // write over that.
-        for c in &step.changes {
-            if self.project.shot(c.shot)? != *c.ends(back).0 {
-                anyhow::bail!("{} was changed outside the app since", c.shot);
-            }
-        }
-        for c in &step.changes {
-            self.project.save_shot(c.shot, c.ends(back).1)?;
-        }
-        Ok(())
-    }
-
-    fn write(&mut self, a: Action) -> anyhow::Result<String> {
+    fn write(&mut self, a: Action) -> anyhow::Result<Done> {
         let p = &self.project;
         Ok(match a {
             Action::Set(r, f) => {
@@ -303,28 +424,82 @@ impl App {
                         s.duration = Some(d);
                     }
                     Field::Transition(t) => s.transition = t,
+                    Field::Recipe(rc) => s.recipe = rc,
                 }
                 p.save_shot(r, &s)?;
-                format!("{r} saved")
+                format!("{r} saved").into()
             }
             Action::AddLine(r, l) => {
                 let s = p.add_line(r, &l.who, &l.text, l.at()?)?;
-                format!("{r} has {} lines", s.lines.len())
+                format!("{r} has {} lines", s.lines.len()).into()
             }
             Action::SetLine(r, i, l) => {
                 p.set_line(r, i, &l.who, &l.text, l.at()?)?;
-                format!("{r} saved")
+                format!("{r} saved").into()
             }
             Action::RemoveLine(r, i) => {
                 p.remove_line(r, i)?;
-                format!("line {} of {r} removed", i + 1)
+                format!("line {} of {r} removed", i + 1).into()
             }
             Action::Select(t) => {
                 let t = p.select_take(t.shot, &t.number.to_string())?;
-                format!("{t} selected")
+                format!("{t} selected").into()
+            }
+            Action::Story(t) => {
+                std::fs::write(p.root.join("story.md"), t)?;
+                "story saved".to_string().into()
+            }
+            Action::Style(t) => {
+                std::fs::write(p.root.join("style.md"), t)?;
+                "style saved".to_string().into()
+            }
+            Action::AddChapter(t) => {
+                let c = p.add_chapter(t.trim())?;
+                Done {
+                    msg: format!("added chapter {}", c.id()),
+                    made: vec![c.dir],
+                }
+            }
+            Action::AddShot(chapter, after) => {
+                let r = p.add_shot(&chapter.to_string(), after, Shot::default())?;
+                let made = vec![p.shot_path(r)?];
+                self.shot = Some(r);
+                Done {
+                    msg: format!("added {r}"),
+                    made,
+                }
             }
         })
     }
+}
+
+fn restore(step: &Step, back: bool) -> anyhow::Result<()> {
+    // Something else, like the co-director over MCP, may have changed a file since; don't write
+    // over that.
+    for c in &step.changes {
+        let (now, then) = c.ends(back);
+        let moved = State::of(&c.path) != *now
+            // A folder only goes if nothing else was put in it.
+            || (*then == State::Gone
+                && *now == State::Dir
+                && std::fs::read_dir(&c.path)?
+                    .flatten()
+                    .any(|e| !step.changes.iter().any(|c| c.path == e.path())));
+        if moved {
+            anyhow::bail!(
+                "{} was changed outside the app since",
+                step.names.join(" and ")
+            );
+        }
+    }
+    let mut changes: Vec<&Change> = step.changes.iter().collect();
+    if back {
+        changes.reverse();
+    }
+    for c in changes {
+        c.ends(back).1.put(&c.path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
