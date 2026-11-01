@@ -14,3 +14,7 @@ shotline-core = { path = "crates/shotline-core" }
 [profile.release]
 lto = "thin"
 strip = true
+
+# Thai sara am fix, see vendor/epaint/PATCH.md
+[patch.crates-io]
+epaint = { path = "vendor/epaint" }

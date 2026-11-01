@@ -286,6 +286,28 @@ fn anchors(p: &Project) -> Vec<PathBuf> {
 }
 
 #[test]
+fn caret_after_thai_sara_am() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = App::new(film(tmp.path()), tmp.path().join("home")).silent();
+    let mut h = Harness::builder().build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    // ำ shapes into two glyphs; a row still needs one per char or every caret after it is off.
+    let text = "ทำให้มีป้ายทะเบียน";
+    let g = h.ctx.fonts_mut(|f| {
+        f.layout_no_wrap(
+            text.into(),
+            egui::FontId::proportional(14.0),
+            egui::Color32::WHITE,
+        )
+    });
+    let glyphs = &g.rows[0].glyphs;
+    assert_eq!(glyphs.len(), text.chars().count());
+    let ai = text.chars().position(|c| c == 'ใ').unwrap();
+    assert_eq!(glyphs[ai].chr, 'ใ');
+    assert!(glyphs[ai].pos.x > glyphs[ai - 1].pos.x);
+}
+
+#[test]
 fn edit_the_cut_and_render() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
