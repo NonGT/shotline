@@ -759,21 +759,12 @@ impl App {
     fn element_detail(&mut self, ui: &mut egui::Ui, el: &Element, anchors: &[PathBuf]) {
         let mut acts = vec![];
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(format!("@{}", el.handle))
-                    .font(theme::slate())
-                    .color(theme::PAPER),
-            );
-            ui.add_space(8.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut self.element_form.name)
-                    .font(egui::TextStyle::Heading)
-                    .text_color(theme::GRAPHITE)
-                    .frame(egui::Frame::NONE)
-                    .desired_width(ui.available_width() - 60.0),
-            )
-            .on_hover_text("its name; the @handle stays as prompts use it");
-            ui.weak(el.kind.to_string());
+            let key = format!("@{}", el.handle);
+            title_row(ui, &key, &mut self.element_form.name, "", 60.0)
+                .on_hover_text("its name; the @handle stays as prompts use it");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(el.kind.to_string());
+            });
         });
         ui.add_space(14.0);
         ui.vertical(|ui| {
@@ -1060,20 +1051,7 @@ impl App {
     fn shot_detail(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
         let mut acts = vec![];
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(r.to_string())
-                    .font(theme::slate())
-                    .color(theme::PAPER),
-            );
-            ui.add_space(8.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut self.form.title)
-                    .font(egui::TextStyle::Heading)
-                    .text_color(theme::GRAPHITE)
-                    .hint_text("Add a title")
-                    .frame(egui::Frame::NONE)
-                    .desired_width(ui.available_width()),
-            );
+            title_row(ui, &r.to_string(), &mut self.form.title, "Add a title", 0.0);
         });
         ui.add_space(14.0);
         let side = 240.0;
@@ -1539,6 +1517,37 @@ fn list_row(
     let t = p.layout_job(job);
     p.galley(egui::pos2(left, mid - t.size().y / 2.0), t, theme::GRAPHITE);
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A shot's number or an element's handle, big, with its title editable beside it on the same
+/// baseline. Centring them, as a row does, lifts the smaller title.
+fn title_row(
+    ui: &mut egui::Ui,
+    key: &str,
+    text: &mut String,
+    hint: &str,
+    right: f32,
+) -> egui::Response {
+    let big = theme::slate();
+    let key = ui.label(RichText::new(key).font(big.clone()).color(theme::PAPER));
+    let size = ui.style().text_styles[&egui::TextStyle::Heading].size;
+    let baseline = key.rect.top() + big.size * theme::ASCENT;
+    let x = key.rect.right() + 10.0;
+    let width = (ui.max_rect().right() - right - x).max(80.0);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(x, baseline - size * theme::ASCENT),
+        egui::vec2(width, size * theme::LINE_HEIGHT),
+    );
+    ui.put(
+        rect,
+        egui::TextEdit::singleline(text)
+            .font(egui::TextStyle::Heading)
+            .text_color(theme::GRAPHITE)
+            .hint_text(hint)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .desired_width(width),
+    )
 }
 
 /// The small label over a part of a shot.

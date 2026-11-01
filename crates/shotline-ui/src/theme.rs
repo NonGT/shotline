@@ -2,7 +2,8 @@
 //! amber kept for one meaning only, "in the cut" (selected takes, the open tab and shot).
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle,
+    self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak, Stroke,
+    TextStyle,
 };
 
 pub const BAY: Color32 = Color32::from_rgb(0x23, 0x24, 0x27);
@@ -18,6 +19,10 @@ pub const FLAG: Color32 = Color32::from_rgb(0xe0, 0x6a, 0x5a);
 pub const SEMIBOLD: &str = "semibold";
 
 /// The shot number at the top of a shot, like the one chalked on a slate.
+/// Noto Sans's ascent and line height, as fractions of the font size.
+pub const ASCENT: f32 = 1.069;
+pub const LINE_HEIGHT: f32 = 1.362;
+
 pub fn slate() -> FontId {
     FontId::new(28.0, FontFamily::Name(SEMIBOLD.into()))
 }
@@ -90,8 +95,16 @@ fn fonts(ctx: &egui::Context) {
             &include_bytes!("../../../assets/fonts/NotoSansThai-Regular.ttf")[..],
         ),
     ] {
-        defs.font_data
-            .insert(name.into(), FontData::from_static(bytes).into());
+        let mut data = FontData::from_static(bytes);
+        if name == "noto-thai" {
+            // egui centres a fallback font's taller line in Noto Sans's, which puts the Thai
+            // baseline 0.0825 em above the Latin one: (1069 - 1061 + (1511 - 1362) / 2) / 1000.
+            data = data.tweak(FontTweak {
+                y_offset_factor: 0.0825,
+                ..FontTweak::default()
+            });
+        }
+        defs.font_data.insert(name.into(), data.into());
     }
     let prop = defs.families.entry(FontFamily::Proportional).or_default();
     // egui's own fonts stay behind ours for symbols and emoji.
