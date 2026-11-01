@@ -227,6 +227,10 @@ pub struct MakeAnchor {
     aspect: Option<String>,
     /// e.g. 1K or 2K, for models that have a choice
     resolution: Option<String>,
+    /// Put a prompt that isn't English into English with the text model first (a small extra
+    /// spend, in the price)
+    #[serde(default)]
+    translate: bool,
     /// Spend the money. Only after the user agreed to the price.
     #[serde(default)]
     confirm: bool,
@@ -536,6 +540,9 @@ impl Server {
         }
         opt(&mut args, "--aspect", p.aspect);
         opt(&mut args, "--resolution", p.resolution);
+        if p.translate {
+            args.push("--translate".into());
+        }
         self.spend(args, p.confirm, &ctx).await
     }
 

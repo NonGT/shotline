@@ -419,7 +419,7 @@ shotline story | style [--set text]
 shotline doctor
 shotline plugin ls | doctor <name> | balance [name] | voices <name>
 shotline element add <kind> <name> [--handle h] [--desc ...]
-shotline element anchor <handle> (--file img | --generate [--prompt ..] [--ref file|url].. [--no-anchors] [--aspect a] [--resolution r] [--plugin p] [--model m] [--yes])
+shotline element anchor <handle> (--file img | --generate [--prompt ..] [--ref file|url].. [--no-anchors] [--aspect a] [--resolution r] [--translate] [--plugin p] [--model m] [--yes])
 shotline element draft <handle> [--write] [--plugin p] [--model m] [--yes]
 shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--sample f] [--set k=v]
 shotline element ls
@@ -534,6 +534,11 @@ shape (and the resolution, for models that offer a choice) when it shouldn't be 
 face square, a set wide. Every job.toml keeps the prompt exactly as the model got it, and for an
 anchor what was typed into the box (`brief`). Details under a zoomed picture shows them, finding
 the job by matching the picture to a job's output, so it works for anchors made from the CLI too.
+What's typed for an anchor can be put into English with the film's text model first
+(`element anchor --generate --translate`, or the tick box under the prompt in the app, shown only
+when the text isn't English and the text model's plugin and keys are there). It's a second small
+job, priced and agreed together with the image; the English goes into the prompt and is kept as
+`english` in the image's job.toml.
 
 It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window
 was. When working on the UI, keep it open with

@@ -520,7 +520,7 @@ pub fn spend_once(
     req: &Request,
     shot: Option<ShotRef>,
     what: &str,
-    brief: Option<&str>,
+    brief: Option<shotline_engine::Brief>,
     go: Go,
 ) -> Result<Option<Job>> {
     // rt bound first so it drops last, after the plugins.

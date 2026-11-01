@@ -4,10 +4,14 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use shotline_core::protocol::{MediaKind, Op, Reference, Request};
-use shotline_core::{BuiltImage, ImageFor, Job, Project, ShotRef, build_image};
+use shotline_core::{
+    BuiltImage, DraftFor, ImageFor, Job, Project, ShotRef, build_draft, build_image, finish_draft,
+    looks_english,
+};
+use shotline_engine::Brief;
 
 use crate::plugins;
-use crate::shoot::{Go, job_cost, quote_once, spend_once};
+use crate::shoot::{Go, confirm, job_cost, quote_once, spend_once};
 
 pub struct Make<'a> {
     pub prompt: &'a str,
@@ -21,6 +25,8 @@ pub struct Make<'a> {
     /// Anchors only: instead of [image] in shotline.toml.
     pub aspect: Option<&'a str>,
     pub resolution: Option<&'a str>,
+    /// Anchors only: put the prompt into English with the text model first, if it isn't.
+    pub translate: bool,
 }
 
 impl Make<'_> {
@@ -64,9 +70,15 @@ fn make(
     label: &str,
     shot: Option<ShotRef>,
     m: &Make,
+    english: Option<&str>,
+    go: Go,
 ) -> Result<Option<(Job, std::path::PathBuf)>> {
     let (plugin, req) = request(p, what, m)?;
-    let Some(job) = spend_once(p, &plugin, &req, shot, label, Some(m.prompt), m.go())? else {
+    let brief = Brief {
+        text: m.prompt,
+        english,
+    };
+    let Some(job) = spend_once(p, &plugin, &req, shot, label, Some(brief), go)? else {
         return Ok(None);
     };
     let file = job
@@ -77,11 +89,16 @@ fn make(
     Ok(Some((job, out)))
 }
 
-fn anchor_for(p: &Project, handle: &str, m: &Make) -> Result<(String, ImageFor)> {
+fn anchor_for(
+    p: &Project,
+    handle: &str,
+    m: &Make,
+    english: Option<&str>,
+) -> Result<(String, ImageFor)> {
     let el = p.element(handle)?;
     let what = ImageFor::Anchor {
         handle: el.handle.clone(),
-        prompt: m.prompt.to_string(),
+        prompt: english.unwrap_or(m.prompt).to_string(),
         refs: m.refs.clone(),
         aspect: m.aspect.map(Into::into),
         resolution: m.resolution.map(Into::into),
@@ -119,10 +136,31 @@ pub fn picked(
     Ok(Some(out))
 }
 
-/// What a new anchor image would cost.
+/// The text model's request to put the typed prompt into English, when that's wanted.
+fn translation(p: &Project, m: &Make) -> Result<Option<(String, Request)>> {
+    if !m.translate || m.prompt.trim().is_empty() || looks_english(m.prompt) {
+        return Ok(None);
+    }
+    let installed = plugins::load();
+    let catalog = plugins::catalog(p, &installed)?;
+    let b = build_draft(p, &catalog, &DraftFor::Text(m.prompt.into()), None, None)?;
+    let req = Request {
+        op: Op::TextGenerate,
+        model: b.model,
+        prompt: Some(b.text),
+        ..Request::default()
+    };
+    Ok(Some((b.plugin, req)))
+}
+
+/// What a new anchor image would cost, and its translation if there's one.
 pub fn anchor_quote(p: &Project, handle: &str, m: &Make) -> Result<String> {
-    let (plugin, req) = request(p, anchor_for(p, handle, m)?.1, m)?;
-    quote_once(p, &plugin, &req)
+    let (plugin, req) = request(p, anchor_for(p, handle, m, None)?.1, m)?;
+    let image = quote_once(p, &plugin, &req)?;
+    Ok(match translation(p, m)? {
+        Some((tp, treq)) => format!("{image} + {} to translate", quote_once(p, &tp, &treq)?),
+        None => image,
+    })
 }
 
 /// Makes an image for an element, left in its job's folder. None if nothing was spent.
@@ -131,8 +169,56 @@ pub fn anchor_image(
     handle: &str,
     m: &Make,
 ) -> Result<Option<(Job, std::path::PathBuf)>> {
-    let (handle, what) = anchor_for(p, handle, m)?;
-    make(p, what, &format!("anchor for @{handle}"), None, m)
+    let Some((tp, treq)) = translation(p, m)? else {
+        let (handle, what) = anchor_for(p, handle, m, None)?;
+        return make(
+            p,
+            what,
+            &format!("anchor for @{handle}"),
+            None,
+            m,
+            None,
+            m.go(),
+        );
+    };
+    // Two jobs, one price: agreed (or asked about) once for both.
+    let total = anchor_quote(p, handle, m)?;
+    match m.at {
+        Some(agreed) if agreed != total => {
+            bail!("the price changed from {agreed} to {total}; nothing spent")
+        }
+        Some(_) => {}
+        None if m.yes => {}
+        None => {
+            println!("anchor for @{handle}, translated first · {total}");
+            if !confirm(&format!("spend {total}?"))? {
+                println!("nothing spent");
+                return Ok(None);
+            }
+        }
+    }
+    let el = p.element(handle)?;
+    let label = format!("translation for @{}", el.handle);
+    let Some(job) = spend_once(p, &tp, &treq, None, &label, None, Go::Yes)? else {
+        return Ok(None);
+    };
+    let file = job
+        .outputs
+        .first()
+        .with_context(|| format!("job {} sent back no text", job.id))?;
+    let raw = std::fs::read_to_string(p.job_dir(job.id).join(file))?;
+    let english = finish_draft(p, &raw).with_context(|| format!("job {}", job.id))?;
+    println!("in English: {english}");
+    let (handle, what) = anchor_for(p, handle, m, Some(&english))?;
+    make(
+        p,
+        what,
+        &format!("anchor for @{handle}"),
+        None,
+        m,
+        Some(&english),
+        Go::Yes,
+    )
 }
 
 /// Makes a new anchor image for an element.
@@ -183,6 +269,8 @@ pub fn frame(p: &Project, r: ShotRef, how: Frame) -> Result<()> {
                 &format!("storyboard frame for {r}"),
                 Some(r),
                 &m,
+                None,
+                m.go(),
             )?
             else {
                 return Ok(());

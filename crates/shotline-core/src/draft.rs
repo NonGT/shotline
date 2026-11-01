@@ -60,6 +60,13 @@ pub enum DraftFor {
     Shot(ShotRef, Draft),
     /// An element's description, translated.
     Element(String),
+    /// Any text, translated, like what's typed for a new anchor.
+    Text(String),
+}
+
+/// False when there's a letter outside English, e.g. Thai, so it's worth offering a translation.
+pub fn looks_english(s: &str) -> bool {
+    !s.chars().any(|c| c.is_alphabetic() && !c.is_ascii())
 }
 
 /// A text request, worked out without spending anything.
@@ -153,6 +160,13 @@ pub fn build_draft(
             }
             let t = project.template("translate")?.unwrap_or_default();
             render(&t, &[("text", desc)])
+        }
+        DraftFor::Text(text) => {
+            if text.trim().is_empty() {
+                return invalid("nothing to translate");
+            }
+            let t = project.template("translate")?.unwrap_or_default();
+            render(&t, &[("text", text.trim())])
         }
     };
     Ok(BuiltDraft {

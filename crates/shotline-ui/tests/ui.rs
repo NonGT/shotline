@@ -463,6 +463,71 @@ fn make_an_anchor_image() {
 }
 
 #[test]
+fn translate_only_when_it_helps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let home = tmp.path().join("home");
+    let mut app = App::new(p, home.clone()).with_viewer(None).silent();
+    let model = |id: &str, op| ModelInfo {
+        id: id.into(),
+        op,
+        ..ModelInfo::default()
+    };
+    // A name nobody has set, so the file is what counts.
+    let var = "SHOTLINE_TEST_VENICE_TRANSLATE_KEY";
+    app.set_plugins(
+        vec![
+            Description {
+                name: "fal".into(),
+                version: "1".into(),
+                protocol: 1,
+                env: vec![],
+                models: vec![model("fal-ai/nano-banana", Op::ImageGenerate)],
+            },
+            Description {
+                name: "venice".into(),
+                version: "1".into(),
+                protocol: 1,
+                env: vec![var.into()],
+                models: vec![model("claude-haiku-5-5", Op::TextGenerate)],
+            },
+        ],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Elements").click();
+    h.run();
+    h.get_by_label_contains("@paka").click();
+    h.run();
+    h.get_by_label("Make image…").click();
+    h.run();
+    let typed = |h: &mut Harness<'static, App>, t: &str| {
+        let prompt = h.get_by_role_and_label(Role::TextInput, "Image prompt");
+        prompt.focus();
+        prompt.type_text(t);
+        h.run();
+    };
+    let offered =
+        |h: &Harness<'static, App>| h.query_by_label("Translate to English first").is_some();
+    let env = shotline_core::dotenv::path(&home);
+    shotline_core::dotenv::set(&env, var, Some("k")).unwrap();
+    // Not offered for English.
+    typed(&mut h, "side view");
+    assert!(!offered(&h));
+    typed(&mut h, " มุมข้าง");
+    assert!(offered(&h));
+    h.get_by_label("Translate to English first").click();
+    h.run();
+    // No key for the text model: nothing to translate with.
+    shotline_core::dotenv::set(&env, var, None).unwrap();
+    h.run();
+    assert!(!offered(&h));
+}
+
+#[test]
 fn keys_in_settings() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
@@ -1415,6 +1480,7 @@ fn details_of_a_made_picture() {
     image::RgbImage::new(8, 8).save(&out).unwrap();
     j.outputs = vec!["out.png".into()];
     j.brief = Some("ใส่ชุดสีแดง".into());
+    j.english = Some("in a red dress".into());
     j.prompt = Some("A reference image of Paka for a film: in a red dress".into());
     j.status = JobStatus::Done;
     p.save_job(&j).unwrap();
@@ -1448,6 +1514,8 @@ fn details_of_a_made_picture() {
     h.get_by_label_contains("venice · seedream-v4 · ");
     h.get_by_label("You wrote");
     h.get_by_label("ใส่ชุดสีแดง");
+    h.get_by_label("In English");
+    h.get_by_label("in a red dress");
     h.get_by_label("A reference image of Paka for a film: in a red dress");
     h.get_by_label("Hide details").click();
     h.run();

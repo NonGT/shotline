@@ -15,7 +15,7 @@ pub mod slug;
 mod template;
 mod timeline;
 
-pub use draft::{BuiltDraft, Draft, DraftFor, build_draft, finish_draft};
+pub use draft::{BuiltDraft, Draft, DraftFor, build_draft, finish_draft, looks_english};
 pub use element::{Element, Kind, Voice};
 pub use error::{Error, Result};
 pub use git::{Git, summary as change_summary};

@@ -203,3 +203,67 @@ fn storyboard_frame() {
     tmp.child("film/chapters/01-one/shots/010.jpg")
         .assert(predicate::path::missing());
 }
+
+#[test]
+fn translated_first() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    let toml = std::fs::read_to_string(tmp.path().join("film/shotline.toml")).unwrap();
+    std::fs::write(
+        tmp.path().join("film/shotline.toml"),
+        toml + "[text]\nplugin = \"fake\"\nmodel = \"fake/text\"\n",
+    )
+    .unwrap();
+    let make = |extra: &[&str]| {
+        let mut c = shotline(&tmp);
+        c.args([
+            "element",
+            "anchor",
+            "paka",
+            "--generate",
+            "--prompt",
+            "มุมข้าง",
+        ])
+        .args(extra);
+        c
+    };
+    // Both prices before anything is spent.
+    make(&["--translate"])
+        .write_stdin("n\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(
+            "anchor for @paka, translated first · 0.04 USD + 0.001 USD to translate\n",
+        ))
+        .stdout(predicate::str::ends_with("nothing spent\n"));
+    assert_eq!(ledger(&tmp), 0);
+
+    // fake/text answers with the last line it's sent: the text to translate.
+    make(&["--translate", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("in English: มุมข้าง\n"))
+        .stdout(predicate::str::contains("elements/cast/paka/01.png"));
+    let jobs = std::fs::read_dir(tmp.path().join("film/jobs")).unwrap();
+    let last = jobs.map(|e| e.unwrap().path()).max().unwrap();
+    let job: toml::Table =
+        toml::from_str(&std::fs::read_to_string(last.join("job.toml")).unwrap()).unwrap();
+    assert_eq!(job["op"].as_str(), Some("image.generate"));
+    assert_eq!(job["brief"].as_str(), Some("มุมข้าง"));
+    assert_eq!(job["english"].as_str(), Some("มุมข้าง"));
+
+    // English needs nothing done: one job, no translation.
+    shotline(&tmp)
+        .args([
+            "element",
+            "anchor",
+            "paka",
+            "--generate",
+            "--prompt",
+            "side view",
+        ])
+        .args(["--translate", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("translation").not());
+}

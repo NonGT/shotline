@@ -127,6 +127,9 @@ pub struct Job {
     /// What the person wrote, when the prompt was made from it (an anchor's "side view").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub brief: Option<String>,
+    /// The brief in English, when it was translated before going into the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub english: Option<String>,
     /// The prompt exactly as the model got it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
@@ -160,6 +163,7 @@ impl Job {
             inputs: vec![],
             params: toml::Table::new(),
             brief: None,
+            english: None,
             prompt: None,
             status: JobStatus::Pending,
             plugin_job: None,

@@ -114,6 +114,8 @@ pub struct AnchorAsk {
     /// None for [image] in shotline.toml.
     pub aspect: Option<String>,
     pub resolution: Option<String>,
+    /// Put the prompt into English with the film's text model first.
+    pub translate: bool,
 }
 
 #[derive(Clone)]
@@ -382,6 +384,21 @@ impl App {
                     })
             })
             .collect()
+    }
+
+    /// The film's text model as "plugin · model", when it's installed and its keys are set.
+    fn translator(&self) -> Option<String> {
+        let t = &self.project.config.text;
+        let d = self.plugins.iter().find(|d| d.name == t.plugin)?;
+        d.models
+            .iter()
+            .find(|m| m.op == Op::TextGenerate && m.id == t.model)?;
+        let saved = shotline_core::dotenv::read(&shotline_core::dotenv::path(&self.user_dir));
+        let set = |v: &String| std::env::var_os(v).is_some() || saved.iter().any(|(n, _)| n == v);
+        d.env
+            .iter()
+            .all(set)
+            .then(|| format!("{} · {}", t.plugin, t.model))
     }
 
     /// Every installed video model, as plugin, model and what it can do.
@@ -1063,6 +1080,7 @@ impl App {
             if making {
                 ui.add_space(6.0);
                 let pool = self.anchor_pool();
+                let translator = self.translator();
                 let wants = self.maker.as_mut().unwrap().show(
                     ui,
                     &models,
@@ -1070,6 +1088,7 @@ impl App {
                     &mut self.thumbs,
                     self.host.clone(),
                     &self.project.root,
+                    translator,
                 );
                 let host = self.host.clone();
                 match (wants, host) {
@@ -2394,6 +2413,11 @@ fn picture_details(ui: &mut egui::Ui, job: Option<&shotline_core::Job>, p: &Proj
                 ui.add_space(6.0);
                 caption(ui, "You wrote");
                 ui.add(egui::Label::new(b.as_str()).selectable(true).wrap());
+            }
+            if let Some(e) = &j.english {
+                ui.add_space(6.0);
+                caption(ui, "In English");
+                ui.add(egui::Label::new(e.as_str()).selectable(true).wrap());
             }
             ui.add_space(6.0);
             match &j.prompt {

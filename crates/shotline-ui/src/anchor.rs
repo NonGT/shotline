@@ -51,6 +51,8 @@ pub(crate) struct Maker {
     resolution: Option<String>,
     /// The film's: what None means.
     defaults: (String, Option<String>),
+    /// Ticked: the prompt goes into English first.
+    translate: bool,
     url: String,
     fetch: Arc<Mutex<Fetch>>,
     stage: Arc<Mutex<Stage>>,
@@ -85,6 +87,7 @@ impl Maker {
             aspect: None,
             resolution: None,
             defaults,
+            translate: false,
             url: String::new(),
             fetch: Arc::new(Mutex::new(Fetch::Idle)),
             stage: Arc::new(Mutex::new(Stage::Idle)),
@@ -178,6 +181,7 @@ impl Maker {
         thumbs: &mut Thumbs,
         host: Option<Arc<dyn Host>>,
         film: &Path,
+        translator: Option<String>,
     ) -> Wants {
         let mut wants = Wants::Nothing;
         let fetched = self.fetch.lock().unwrap().clone();
@@ -235,6 +239,18 @@ impl Maker {
                     .widget_info(|| {
                         egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Image prompt")
                     });
+                    // Only offered when it'd help and something can do it.
+                    let text = self.prompt.trim();
+                    if let Some(t) = &translator
+                        && !text.is_empty()
+                        && !shotline_core::looks_english(text)
+                    {
+                        ui.checkbox(&mut self.translate, "Translate to English first")
+                            .on_hover_text(format!(
+                                "with {t}; image models follow English best. A small extra spend, \
+                                 shown in the price."
+                            ));
+                    }
                     if let Some(m) = models.get(self.pick) {
                         ui.add_space(6.0);
                         if let Some(z) =
@@ -271,6 +287,9 @@ impl Maker {
                     },
                     aspect: self.aspect.clone(),
                     resolution: self.resolution.clone(),
+                    translate: self.translate
+                        && translator.is_some()
+                        && !shotline_core::looks_english(self.prompt.trim()),
                 };
                 ui.add_space(4.0);
                 ui.horizontal(|ui| match &stage {
