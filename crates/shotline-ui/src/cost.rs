@@ -223,6 +223,8 @@ pub(crate) struct View {
     pick: Option<usize>,
     all: bool,
     tool: Tool,
+    /// The ledger check needs doing again.
+    stale: bool,
     verified: Vec<(String, bool, Vec<String>)>,
     rates: Arc<Mutex<Ask<Vec<RateLine>>>>,
     checks: Arc<Mutex<Ask<Vec<Check>>>>,
@@ -234,7 +236,6 @@ pub(crate) struct View {
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum Tool {
     #[default]
-    None,
     Verify,
     Rates,
     Reconcile,
@@ -281,6 +282,7 @@ impl App {
                     let frame = ui.ctx().cumulative_frame_nr();
                     if frame > v.last_frame + 1 {
                         v.since = None;
+                        v.stale = true;
                     }
                     v.last_frame = frame;
 
@@ -695,20 +697,21 @@ impl App {
                     .on_hover_text(tip)
                     .clicked()
                 {
-                    open = if v.tool == t { Tool::None } else { t };
+                    open = t;
                 }
             }
         });
+        // The ledger is checked again each time it's shown; plugins are only asked when picked.
+        if open == Tool::Verify && (open != v.tool || v.stale || v.verified.is_empty()) {
+            v.verified = verify(&self.project, &self.user_dir);
+        }
+        v.stale = false;
         let fresh = open != v.tool;
         v.tool = open;
-        if open == Tool::None {
-            return;
-        }
         if fresh {
             let (host, ctx) = (self.host.clone(), ui.ctx().clone());
             let film = self.project.root.clone();
             match open {
-                Tool::Verify => v.verified = verify(&self.project, &self.user_dir),
                 Tool::Rates => ask(&v.rates, host, ctx, move |h| h.rates(&film)),
                 Tool::Reconcile => ask(&v.checks, host, ctx, move |h| h.reconcile(&film)),
                 Tool::Adjust if v.adjust.unit.is_empty() => v.adjust.unit = c.units[0].clone(),
@@ -734,7 +737,6 @@ impl App {
                     Tool::Adjust => book = adjust(ui, &mut v.adjust, &c.units),
                     Tool::Refund => book = refund(ui, &mut v.refund, &c.charges),
                     Tool::Release => book = release(ui, &mut v.release, &c.held),
-                    Tool::None => {}
                 }
             });
         if book {
@@ -774,8 +776,8 @@ impl App {
                 v.adjust = Form::default();
                 v.refund = Form::default();
                 v.release = Form::default();
-                v.tool = Tool::None;
                 v.since = None;
+                v.stale = true;
                 self.reload();
                 self.info(msg);
             }

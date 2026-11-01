@@ -1080,6 +1080,8 @@ fn elements_story_and_cost() {
     h.set_size(egui::vec2(1000.0, 1800.0));
     h.state_mut().set_plugins(vec![], Some(Arc::new(TestHost)));
     h.run();
+    // Checked without asking, and a tab stays picked.
+    h.get_by_label("This film: 2 lines, none changed by hand");
     h.get_by_label("Check the ledger").click();
     h.run();
     h.get_by_label("This film: 2 lines, none changed by hand");
