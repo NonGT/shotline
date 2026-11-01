@@ -1404,6 +1404,62 @@ fn a_shot_on_another_model() {
 }
 
 #[test]
+fn details_of_a_made_picture() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    // An anchor "Make image" made: a copy of its job's output.
+    let mut j = p
+        .create_job(Job::new(Op::ImageGenerate, "venice", "seedream-v4"))
+        .unwrap();
+    let out = p.job_dir(j.id).join("out.png");
+    image::RgbImage::new(8, 8).save(&out).unwrap();
+    j.outputs = vec!["out.png".into()];
+    j.brief = Some("ใส่ชุดสีแดง".into());
+    j.prompt = Some("A reference image of Paka for a film: in a red dress".into());
+    j.status = JobStatus::Done;
+    p.save_job(&j).unwrap();
+    p.add_anchor("paka", &out).unwrap();
+    // And one added from a file.
+    let other = tmp.path().join("mine.png");
+    image::RgbImage::new(9, 9).save(&other).unwrap();
+    p.add_anchor("paka", &other).unwrap();
+
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Elements").click();
+    h.run();
+    h.get_by_label("@paka  Paka").click();
+    h.run();
+    let open = |h: &mut Harness<'static, App>, name: &str| {
+        h.get_by_label(name).click();
+        assert!(wait_for(h, |h| h
+            .query_by_label(&format!("{name} big"))
+            .is_some()));
+        h.run();
+        h.get_by_label("Details").click();
+        h.run();
+    };
+    open(&mut h, "elements/cast/paka/01.png");
+    h.get_by_label_contains("venice · seedream-v4 · ");
+    h.get_by_label("You wrote");
+    h.get_by_label("ใส่ชุดสีแดง");
+    h.get_by_label("A reference image of Paka for a film: in a red dress");
+    h.get_by_label("Hide details").click();
+    h.run();
+    assert!(h.query_by_label("You wrote").is_none());
+    h.get_by_label("Close").click();
+    h.run();
+
+    open(&mut h, "elements/cast/paka/02.png");
+    h.get_by_label("Added from a file, so there's no prompt for it.");
+}
+
+#[test]
 fn opens_where_it_was_left() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());

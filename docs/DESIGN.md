@@ -531,7 +531,9 @@ Models that take reference images get the element's own anchors to start with; a
 out, and others added from any element, a file, or a web address (downloaded into
 `.shotline/cache/refs`). The prompt names them Image 1, Image 2… in that order. Size picks the
 shape (and the resolution, for models that offer a choice) when it shouldn't be the film's: a
-face square, a set wide.
+face square, a set wide. Every job.toml keeps the prompt exactly as the model got it, and for an
+anchor what was typed into the box (`brief`). Details under a zoomed picture shows them, finding
+the job by matching the picture to a job's output, so it works for anchors made from the CLI too.
 
 It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window
 was. When working on the UI, keep it open with

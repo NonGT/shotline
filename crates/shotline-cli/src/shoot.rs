@@ -436,7 +436,16 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
         let v = serde_json::from_str(v).unwrap_or(serde_json::Value::String(v.clone()));
         req.params.insert(k.clone(), v);
     }
-    let Some(job) = spend_once(p, &a.plugin, &req, None, &a.op.to_string(), a.yes.into())? else {
+    let Some(job) = spend_once(
+        p,
+        &a.plugin,
+        &req,
+        None,
+        &a.op.to_string(),
+        None,
+        a.yes.into(),
+    )?
+    else {
         return Ok(());
     };
     for f in &job.outputs {
@@ -511,6 +520,7 @@ pub fn spend_once(
     req: &Request,
     shot: Option<ShotRef>,
     what: &str,
+    brief: Option<&str>,
     go: Go,
 ) -> Result<Option<Job>> {
     // rt bound first so it drops last, after the plugins.
@@ -547,6 +557,7 @@ pub fn spend_once(
                 request: req,
                 quote: &quote,
                 shot,
+                brief,
             },
             &opts,
             printer(name.clone()),

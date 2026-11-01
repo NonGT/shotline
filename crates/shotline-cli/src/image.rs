@@ -66,7 +66,7 @@ fn make(
     m: &Make,
 ) -> Result<Option<(Job, std::path::PathBuf)>> {
     let (plugin, req) = request(p, what, m)?;
-    let Some(job) = spend_once(p, &plugin, &req, shot, label, m.go())? else {
+    let Some(job) = spend_once(p, &plugin, &req, shot, label, Some(m.prompt), m.go())? else {
         return Ok(None);
     };
     let file = job

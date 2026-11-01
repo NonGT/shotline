@@ -137,6 +137,8 @@ pub struct App {
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
+    /// The job that made the zoomed picture, once Details is asked for.
+    zoom_details: Option<(PathBuf, Option<shotline_core::Job>)>,
     /// Jobs found holding money with nothing running them when the film was opened.
     stuck: Vec<String>,
     thumbs: Thumbs,
@@ -303,6 +305,7 @@ impl App {
             shot: None,
             takes: vec![],
             status: None,
+            zoom_details: None,
             stuck: vec![],
             thumbs: Thumbs::default(),
             place: None,
@@ -752,7 +755,9 @@ impl App {
         let name = self.project.rel(&path);
         let room = ui.ctx().content_rect().size() * 0.88;
         let mut close = false;
-        let max = room - egui::vec2(0.0, 40.0);
+        // Room for the bottom row, and for the details under it when they're open.
+        let details = self.zoom_details.as_ref().is_some_and(|(p, _)| *p == path);
+        let max = room - egui::vec2(0.0, if details { 330.0 } else { 40.0 });
         let modal = egui::Modal::new(egui::Id::unique("zoom")).show(ui.ctx(), |ui| {
             match self.thumbs.texture_later(ui, &path, BIG, &name) {
                 Big::Ready(t) => {
@@ -794,12 +799,38 @@ impl App {
                     ui.label(RichText::new(&name).color(theme::DUST));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         close |= ui.button("Close").clicked();
+                        let open = self.zoom_details.as_ref().is_some_and(|(p, _)| *p == path);
+                        let label = if open { "Hide details" } else { "Details" };
+                        if ui
+                            .button(label)
+                            .on_hover_text("what made it, and the prompt")
+                            .clicked()
+                        {
+                            self.zoom_details = if open {
+                                None
+                            } else {
+                                Some((
+                                    path.clone(),
+                                    self.project.job_that_made(&path).ok().flatten(),
+                                ))
+                            };
+                        }
                     });
                 },
             );
+            if let Some((p, job)) = &self.zoom_details
+                && *p == path
+            {
+                ui.add_space(6.0);
+                ui.allocate_ui(egui::vec2(width, 0.0), |ui| {
+                    ui.set_width(width);
+                    picture_details(ui, job.as_ref(), &self.project);
+                });
+            }
         });
         if close || modal.should_close() {
             self.zoom = None;
+            self.zoom_details = None;
         }
     }
 
@@ -2331,4 +2362,46 @@ fn shot_model(
         ));
     }
     flags
+}
+
+/// Under a zoomed picture: the job that made it and what it was asked for.
+fn picture_details(ui: &mut egui::Ui, job: Option<&shotline_core::Job>, p: &Project) {
+    let Some(j) = job else {
+        hint(ui, "Added from a file, so there's no prompt for it.");
+        return;
+    };
+    let when = j
+        .created
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%b %-d %H:%M");
+    let cost = j
+        .cost
+        .as_ref()
+        .map(|c| format!(" · {} {}", money(c.amount), c.unit))
+        .unwrap_or_default();
+    ui.label(
+        RichText::new(format!("{} · {} · {when}{cost}", j.plugin, j.model)).color(theme::GRAPHITE),
+    );
+    if !j.inputs.is_empty() {
+        let refs: Vec<String> = j.inputs.iter().map(|i| p.rel(&p.root.join(i))).collect();
+        hint(ui, &format!("With {}", refs.join(", ")));
+    }
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            if let Some(b) = &j.brief {
+                ui.add_space(6.0);
+                caption(ui, "You wrote");
+                ui.add(egui::Label::new(b.as_str()).selectable(true).wrap());
+            }
+            ui.add_space(6.0);
+            match &j.prompt {
+                Some(t) => {
+                    caption(ui, "Prompt the model got");
+                    ui.add(egui::Label::new(t.as_str()).selectable(true).wrap());
+                }
+                None => hint(ui, "Made before shotline kept prompts."),
+            }
+        });
 }

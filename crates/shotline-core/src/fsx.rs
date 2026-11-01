@@ -17,6 +17,10 @@ pub fn read(path: &Path) -> Result<String> {
     fs::read_to_string(path).map_err(io(path))
 }
 
+pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).map_err(io(path))
+}
+
 pub fn write(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         mkdir(parent)?;

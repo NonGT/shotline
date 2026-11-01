@@ -739,6 +739,7 @@ pub async fn take(
         job.shot = Some(r);
         job.take = Some(take_id);
         job.step = i as u32;
+        job.prompt = sp.request.prompt.clone();
         jobs.push(Some(job));
     }
 
@@ -908,6 +909,8 @@ pub struct Once<'a> {
     pub quote: &'a Quote,
     /// The shot it's for, like a storyboard frame; none for one-off runs.
     pub shot: Option<ShotRef>,
+    /// What the person wrote, when the prompt was made from it.
+    pub brief: Option<&'a str>,
 }
 
 pub async fn run_once(
@@ -923,10 +926,16 @@ pub async fn run_once(
         request,
         quote,
         shot,
+        brief,
     } = once;
     let mut job = Job::new(request.op.clone(), name, &request.model);
     job.id = project.clock.ulid();
     job.shot = shot;
+    job.brief = brief
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(Into::into);
+    job.prompt = request.prompt.clone();
     job.inputs = request
         .inputs
         .values()

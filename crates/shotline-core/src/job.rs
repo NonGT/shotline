@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -124,6 +124,12 @@ pub struct Job {
     pub inputs: Vec<String>,
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub params: toml::Table,
+    /// What the person wrote, when the prompt was made from it (an anchor's "side view").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief: Option<String>,
+    /// The prompt exactly as the model got it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     pub status: JobStatus,
     /// The plugin's own id for the job, for polling and cancelling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,6 +159,8 @@ impl Job {
             step: 0,
             inputs: vec![],
             params: toml::Table::new(),
+            brief: None,
+            prompt: None,
             status: JobStatus::Pending,
             plugin_job: None,
             outputs: vec![],
@@ -252,6 +260,33 @@ impl Project {
         let mut job: Job = fsx::read_toml(&path)?;
         job.id = id;
         Ok(job)
+    }
+
+    /// The job whose output `file` is a copy of, like an anchor made by "Make image". Newest
+    /// first, so a picture made twice is put down to the last time.
+    pub fn job_that_made(&self, file: &Path) -> Result<Option<Job>> {
+        let Ok(len) = std::fs::metadata(file).map(|m| m.len()) else {
+            return Ok(None);
+        };
+        let mut bytes = None;
+        let mut jobs = self.jobs()?;
+        jobs.sort_by_key(|j| std::cmp::Reverse(j.id));
+        for j in jobs {
+            for o in &j.outputs {
+                let out = self.job_dir(j.id).join(o);
+                if out == file || std::fs::metadata(&out).map(|m| m.len()).ok() != Some(len) {
+                    continue;
+                }
+                let mine = match &bytes {
+                    Some(b) => b,
+                    None => bytes.insert(fsx::read_bytes(file)?),
+                };
+                if fsx::read_bytes(&out)? == *mine {
+                    return Ok(Some(j));
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn jobs(&self) -> Result<Vec<Job>> {

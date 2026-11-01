@@ -81,6 +81,19 @@ fn generated_anchor() {
         .assert()
         .success()
         .stdout(predicate::str::contains("elements/cast/paka/02.png"));
+    // What was written and what the model got are kept with the job.
+    let jobs = std::fs::read_dir(tmp.path().join("film/jobs")).unwrap();
+    let last = jobs.map(|e| e.unwrap().path()).max().unwrap();
+    let job = std::fs::read_to_string(last.join("job.toml")).unwrap();
+    assert!(job.contains("brief = \"side view\""), "{job}");
+    let job: toml::Table = toml::from_str(&job).unwrap();
+    assert!(
+        job["prompt"]
+            .as_str()
+            .unwrap()
+            .starts_with("A reference image of Paka"),
+        "{job}"
+    );
     shotline(&tmp)
         .args(["element", "ls"])
         .assert()
