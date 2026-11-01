@@ -519,12 +519,12 @@ fn plays_compares_and_plays_the_cut() {
     h.get_by_label("Pause");
 
     h.get_by_label("Compare #3").click();
-    wait(&mut h, 0.3);
-    h.get_by_label("01-010#1 vs 01-010#3");
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("01-010#1 vs 01-010#3")
+        .is_some()));
     assert!(h.state().is_playing());
     h.get_by_label("Pause").click();
-    wait(&mut h, 0.1);
-    assert!(!h.state().is_playing());
+    assert!(wait_for(&mut h, |h| !h.state().is_playing()));
 
     h.get_by_label("Cut").click();
     wait(&mut h, 0.1);
@@ -539,8 +539,10 @@ fn plays_compares_and_plays_the_cut() {
     wait(&mut h, 1.0);
     assert!(wait_for(&mut h, |h| !h.state().is_playing()));
     h.get_by_label("Close player").click();
-    wait(&mut h, 0.1);
-    assert_eq!(h.query_all_by_label("the cut").count(), 0);
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("the cut")
+        .count()
+        == 0));
 }
 
 #[test]
