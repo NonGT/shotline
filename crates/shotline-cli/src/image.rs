@@ -94,6 +94,8 @@ fn make(
 pub enum Target<'a> {
     Anchor(&'a str),
     Shot(ShotRef),
+    /// The shot's storyboard frame, made from its frame prompt or prompt.
+    Frame(ShotRef),
 }
 
 /// What the image is for and how the ledger names it.
@@ -127,6 +129,17 @@ fn image_for(
             };
             (format!("picture for {r}"), what, Some(r))
         }
+        Target::Frame(r) => (
+            format!("storyboard frame for {r}"),
+            ImageFor::Frame {
+                shot: r,
+                prompt: english.map(Into::into),
+                refs: m.refs.clone(),
+                aspect: m.aspect.map(Into::into),
+                resolution: m.resolution.map(Into::into),
+            },
+            Some(r),
+        ),
     })
 }
 
@@ -269,25 +282,8 @@ pub fn given(p: &Project, refs: &[String]) -> Result<Option<Vec<std::path::PathB
     Ok(Some(out))
 }
 
-/// Next to the shot's file: chapters/01-x/shots/010.png.
-fn frame_path(p: &Project, r: ShotRef, from: &Path) -> Result<std::path::PathBuf> {
-    let ext = from
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png")
-        .to_ascii_lowercase();
-    Ok(p.shot_path(r)?.with_extension(ext))
-}
-
 fn set_frame(p: &Project, r: ShotRef, from: &Path) -> Result<String> {
-    let mut shot = p.shot(r)?;
-    if let Some(old) = &shot.frame {
-        let _ = std::fs::remove_file(p.root.join(old));
-    }
-    let dest = frame_path(p, r, from)?;
-    std::fs::copy(from, &dest).with_context(|| format!("copying {}", from.display()))?;
-    shot.frame = Some(p.rel(&dest));
-    p.save_shot(r, &shot)?;
+    let dest = p.set_frame(r, Some(from))?.expect("a frame was given");
     Ok(p.rel(&dest))
 }
 
@@ -301,16 +297,7 @@ pub enum Frame<'a> {
 pub fn frame(p: &Project, r: ShotRef, how: Frame) -> Result<()> {
     match how {
         Frame::Make(m) => {
-            let Some((job, out)) = make(
-                p,
-                ImageFor::Frame(r),
-                &format!("storyboard frame for {r}"),
-                Some(r),
-                &m,
-                None,
-                m.go(),
-            )?
-            else {
+            let Some((job, out)) = image(p, Target::Frame(r), &m)? else {
                 return Ok(());
             };
             let rel = set_frame(p, r, &out)?;
@@ -324,14 +311,11 @@ pub fn frame(p: &Project, r: ShotRef, how: Frame) -> Result<()> {
             println!("{}", set_frame(p, r, &full)?);
         }
         Frame::Clear => {
-            let mut shot = p.shot(r)?;
-            match shot.frame.take() {
-                Some(old) => {
-                    let _ = std::fs::remove_file(p.root.join(&old));
-                    p.save_shot(r, &shot)?;
-                    println!("{r} has no storyboard frame now");
-                }
-                None => println!("{r} has no storyboard frame"),
+            if p.shot(r)?.frame.is_none() {
+                println!("{r} has no storyboard frame");
+            } else {
+                p.set_frame(r, None)?;
+                println!("{r} has no storyboard frame now");
             }
         }
     }

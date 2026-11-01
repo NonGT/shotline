@@ -90,6 +90,21 @@ enum Cmd {
         file: Option<PathBuf>,
         #[arg(long)]
         clear: bool,
+        /// An image to go along instead of the shot's references, a file or an http(s) URL
+        #[arg(long = "ref", conflicts_with_all = ["file", "clear", "no_refs"])]
+        refs: Vec<String>,
+        /// Send no reference images at all
+        #[arg(long, conflicts_with_all = ["file", "clear"])]
+        no_refs: bool,
+        /// e.g. 1:1 or 9:16, instead of the shot's
+        #[arg(long, conflicts_with_all = ["file", "clear"])]
+        aspect: Option<String>,
+        /// e.g. 1K or 2K, for models that have a choice
+        #[arg(long, conflicts_with_all = ["file", "clear"])]
+        resolution: Option<String>,
+        /// Put the frame prompt into English with the text model first, if it isn't
+        #[arg(long, conflicts_with_all = ["file", "clear"])]
+        translate: bool,
         #[command(flatten)]
         image: ImageArgs,
     },
@@ -107,6 +122,10 @@ enum Cmd {
         /// Which take to reuse from (default: the latest)
         #[arg(long, requires = "from_step")]
         of: Option<String>,
+        /// Put the prompt into English with the text model first, if it isn't; kept with the
+        /// shot for the takes after
+        #[arg(long)]
+        translate: bool,
     },
     /// Run one operation outside any shot, e.g. `run video.upscale --plugin p --model m --input video=a.mp4`
     Run {
@@ -424,6 +443,13 @@ enum ShotCmd {
         /// Instead of the film's; "" goes back to the film's
         #[arg(long)]
         resolution: Option<String>,
+        /// Don't send this anchor of a named element with this shot, e.g.
+        /// elements/cast/paka/02.png
+        #[arg(long)]
+        leave_out: Vec<String>,
+        /// Send a left out anchor again
+        #[arg(long)]
+        put_back: Vec<String>,
     },
     /// Add a line of dialogue: `shot line 01-010 paka "..."`
     Line {
@@ -554,8 +580,8 @@ impl shotline_ui::Host for Plugins {
         fetch::image(&Project::open(film)?, url)
     }
 
-    fn take_quote(&self, film: &Path, shot: ShotRef) -> Result<String> {
-        shoot::take_quote(&Project::open(film)?, shot)
+    fn take_quote(&self, film: &Path, shot: ShotRef, translate: bool) -> Result<String> {
+        shoot::take_quote(&Project::open(film)?, shot, translate)
     }
 
     fn take(
@@ -563,9 +589,10 @@ impl shotline_ui::Host for Plugins {
         film: &Path,
         shot: ShotRef,
         at: &str,
+        translate: bool,
         on: &mut dyn FnMut(String),
     ) -> Result<String> {
-        shoot::take_at(&Project::open(film)?, shot, at, on)
+        shoot::take_at(&Project::open(film)?, shot, at, translate, on)
     }
 
     fn make_anchor(&self, film: &Path, ask: &shotline_ui::AnchorAsk, at: &str) -> Result<PathBuf> {
@@ -580,6 +607,7 @@ impl shotline_ui::Host for Plugins {
 #[cfg(feature = "ui")]
 fn target(ask: &shotline_ui::AnchorAsk) -> image::Target<'_> {
     match ask.shot {
+        Some(r) if ask.frame => image::Target::Frame(r),
         Some(r) => image::Target::Shot(r),
         None => image::Target::Anchor(&ask.handle),
     }
@@ -806,9 +834,23 @@ fn run(cli: Cli) -> Result<()> {
             ref model,
             ref plugin,
             ref resolution,
+            ref leave_out,
+            ref put_back,
         }) => {
             let p = open()?;
             let mut s = p.shot(shot)?;
+            for a in leave_out {
+                let a = a.trim_start_matches("./").to_string();
+                if !p.root.join(&a).is_file() {
+                    bail!("{a} doesn't exist");
+                }
+                if !s.leave_out.contains(&a) {
+                    s.leave_out.push(a);
+                }
+            }
+            for a in put_back {
+                s.leave_out.retain(|x| x != a.trim_start_matches("./"));
+            }
             if let Some(m) = model {
                 let m = (!m.is_empty()).then(|| {
                     let plugin = plugin.clone().unwrap_or_else(|| p.config.plugin.clone());
@@ -953,14 +995,34 @@ fn run(cli: Cli) -> Result<()> {
             shot,
             ref file,
             clear,
+            ref refs,
+            no_refs,
+            ref aspect,
+            ref resolution,
+            translate,
             ref image,
         } => {
+            let p = open()?;
+            let s = p.shot(shot)?;
+            // Only read when it's to be translated; otherwise the shot's own is used.
+            let said = s.frame_prompt.unwrap_or(s.prompt);
             let how = match (file, clear) {
                 (Some(f), _) => image::Frame::File(f),
                 (None, true) => image::Frame::Clear,
-                (None, false) => image::Frame::Make(image.make("")),
+                (None, false) => {
+                    let mut m = image.make(&said);
+                    m.translate = translate;
+                    m.refs = if no_refs {
+                        Some(vec![])
+                    } else {
+                        image::given(&p, refs)?
+                    };
+                    m.aspect = aspect.as_deref();
+                    m.resolution = resolution.as_deref();
+                    image::Frame::Make(m)
+                }
             };
-            image::frame(&open()?, shot, how)?;
+            image::frame(&p, shot, how)?;
         }
         Cmd::Quote { ref target } => shoot::quote(&open()?, target)?,
         Cmd::Take {
@@ -968,7 +1030,8 @@ fn run(cli: Cli) -> Result<()> {
             yes,
             from_step,
             ref of,
-        } => shoot::take(&open()?, shot, yes, from_step, of.as_deref())?,
+            translate,
+        } => shoot::take(&open()?, shot, yes, from_step, of.as_deref(), translate)?,
         Cmd::Run {
             ref op,
             ref plugin,

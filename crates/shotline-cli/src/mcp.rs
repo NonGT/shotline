@@ -276,6 +276,19 @@ pub struct Frame {
     /// Remove the shot's frame
     #[serde(default)]
     clear: bool,
+    /// Images to go along instead of the shot's references: files or http(s) URLs
+    #[serde(default)]
+    refs: Vec<String>,
+    /// Send no reference images at all
+    #[serde(default)]
+    no_refs: bool,
+    /// e.g. 1:1 or 9:16, instead of the shot's
+    aspect: Option<String>,
+    /// e.g. 1K or 2K, for models that have a choice
+    resolution: Option<String>,
+    /// Put the frame prompt into English with the text model first, if it isn't
+    #[serde(default)]
+    translate: bool,
     plugin: Option<String>,
     model: Option<String>,
     /// Spend the money. Only after the user agreed to the price.
@@ -341,6 +354,12 @@ pub struct ShotSet {
     model: Option<String>,
     /// The model's plugin (default: the film's)
     plugin: Option<String>,
+    /// Anchors of named elements not to send with this shot, e.g. elements/cast/paka/02.png
+    #[serde(default)]
+    leave_out: Vec<String>,
+    /// Left out anchors to send again
+    #[serde(default)]
+    put_back: Vec<String>,
     /// Instead of the film's; "" goes back to the film's
     resolution: Option<String>,
 }
@@ -380,6 +399,9 @@ pub struct Take {
     from_step: Option<usize>,
     /// Which take to reuse from (default: the latest)
     of: Option<String>,
+    /// Put the prompt into English with the text model first, if it isn't; kept with the shot
+    #[serde(default)]
+    translate: bool,
     /// Spend the money. Only after the user agreed to the price.
     #[serde(default)]
     confirm: bool,
@@ -636,6 +658,17 @@ impl Server {
         }
         opt(&mut args, "--plugin", p.plugin);
         opt(&mut args, "--model", p.model);
+        for r in p.refs {
+            args.extend(["--ref".into(), r]);
+        }
+        if p.no_refs {
+            args.push("--no-refs".into());
+        }
+        opt(&mut args, "--aspect", p.aspect);
+        opt(&mut args, "--resolution", p.resolution);
+        if p.translate {
+            args.push("--translate".into());
+        }
         self.spend(args, p.confirm, &ctx).await
     }
 
@@ -714,6 +747,12 @@ impl Server {
         opt(&mut args, "--model", p.model);
         opt(&mut args, "--plugin", p.plugin);
         opt(&mut args, "--resolution", p.resolution);
+        for a in p.leave_out {
+            args.extend(["--leave-out".into(), a]);
+        }
+        for a in p.put_back {
+            args.extend(["--put-back".into(), a]);
+        }
         self.cli(args, None, &ctx).await
     }
 
@@ -781,6 +820,9 @@ impl Server {
         let mut args = a(["take", &p.shot]);
         opt(&mut args, "--from-step", p.from_step);
         opt(&mut args, "--of", p.of);
+        if p.translate {
+            args.push("--translate".into());
+        }
         self.spend(args, p.confirm, &ctx).await
     }
 

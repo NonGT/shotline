@@ -71,6 +71,12 @@ frame = "chapters/01-forest/shots/010.png"   # optional storyboard frame, cut sh
 who = "kan"
 text = "เราต้องไปต่อก่อนมืด"
 
+leave_out = ["elements/cast/paka/02.png"]   # optional, anchors this shot doesn't send
+
+[english]   # written by take --translate; sent instead while prompt is still `from`
+from = "@paka เดินเข้าป่า"
+text = "@paka walks into the forest"
+
 [[image]]   # optional, the shot's own pictures, kept in shots/010/
 file = "chapters/01-forest/shots/010/01.png"
 note = "the rest stop by the stream"
@@ -440,6 +446,7 @@ shotline shot add <chapter> [--after id] --plot ... [--prompt ...] [--duration n
 shotline shot add ... [--plugin p] [--model m] [--recipe r]
 shotline shot set <shot> [--title] [--plot] [--prompt] [--frame-prompt] [--duration] [--transition] [--recipe]
                   [--model m [--plugin p]] [--resolution r]   "" goes back to the film's
+                  [--leave-out anchor].. [--put-back anchor]..
 shotline shot draft <shot> [--as video|image|translate] [--write] [--plugin p] [--model m] [--yes]
 shotline shot line <shot> <who> <text> [--at s]
 shotline shot image <shot> [--file img | --generate --prompt .. [--ref f|url].. [--aspect a]
@@ -448,8 +455,9 @@ shotline shot ls [chapter]
 shotline shot show <id>
 shotline prompt <shot>
 shotline frame <shot> [--file img | --clear] [--plugin p] [--model m] [--yes]
+               [--ref file|url].. [--no-refs] [--aspect a] [--resolution r] [--translate]
 shotline quote <shot|chapter>
-shotline take <shot> [--from-step n [--of take]] [--yes]
+shotline take <shot> [--from-step n [--of take]] [--translate] [--yes]
 shotline takes <shot>
 shotline select <shot> <take>
 shotline run <op> --plugin p --model m [--prompt ..] [--duration s] [--input name=file]
@@ -555,8 +563,14 @@ job, priced and agreed together with the image; the English goes into the prompt
 
 A shot's page lists what goes to the video model under References: the anchors of the elements
 it names, then its own pictures (Add image… or Make image…, the same panel as for anchors), each
-with a note. Under Takes it says what might go wrong, shows the prompt as the model gets it, and
-Shoot a take… asks the price first and spends only on a second click, like `take`.
+with a note. Add an anchor sends one anchor of any element (the element goes into the shot's
+`elements` with its other anchors left out); Remove under an element's anchor leaves it out of
+this shot only. Starts sits under the plot; on a cut, the storyboard frame comes before the
+prompt with Add image…, Make frame… and Remove. Every box typed for a model (Prompt, Frame
+prompt, Make image) offers "Translate to English first" when what's in it isn't English and the
+film's text model has its key; the price then includes the translation. Make frame… opens the image panel with the frame
+prompt, the size and the references, starting from what the video gets. Under Takes it says what
+might go wrong, shows the prompt as the model gets it, and Shoot a take… asks the price first and spends only on a second click, like `take`.
 
 It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window
 was. When working on the UI, keep it open with

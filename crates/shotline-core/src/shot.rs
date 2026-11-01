@@ -82,9 +82,21 @@ pub struct Shot {
     /// What the storyboard frame is made from, if not `prompt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_prompt: Option<String>,
+    /// Anchors of the elements it names that it doesn't send, relative to the project root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leave_out: Vec<String>,
     /// Pictures of its own that go along after the elements' anchors.
     #[serde(default, rename = "image", skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ShotImage>,
+    /// The prompt put into English, sent instead while the prompt is still what it was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub english: Option<Translated>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Translated {
+    pub from: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -97,6 +109,19 @@ pub struct ShotImage {
 }
 
 impl Shot {
+    /// What the video model is sent: the English, if it's of the prompt as it is now.
+    pub fn sent_prompt(&self) -> &str {
+        self.translated().unwrap_or(&self.prompt)
+    }
+
+    /// The prompt in English, if it was translated as it is now.
+    pub fn translated(&self) -> Option<&str> {
+        self.english
+            .as_ref()
+            .filter(|t| t.from == self.prompt)
+            .map(|t| t.text.as_str())
+    }
+
     /// The video model (plugin, id) to use instead of the film's; None for the film's.
     pub fn set_video_model(&mut self, m: Option<(String, String)>) {
         let o = self.model.get_or_insert_default();
@@ -347,6 +372,36 @@ impl Project {
         }
         self.save_shot(r, &shot)?;
         Ok(shot)
+    }
+
+    /// Gives the shot a storyboard frame copied from `from`, next to its file
+    /// (chapters/01-x/shots/010.png), or with None takes it away. Returns the new one.
+    pub fn set_frame(&self, r: ShotRef, from: Option<&Path>) -> Result<Option<PathBuf>> {
+        let mut shot = self.shot(r)?;
+        if let Some(f) = from
+            && !crate::element::is_image(f)
+        {
+            return invalid(format!("{} isn't an image", f.display()));
+        }
+        if let Some(old) = shot.frame.take() {
+            let _ = std::fs::remove_file(self.root.join(old));
+        }
+        let dest = match from {
+            Some(f) => {
+                let ext = f
+                    .extension()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
+                let dest = self.shot_path(r)?.with_extension(ext);
+                fsx::copy(f, &dest)?;
+                shot.frame = Some(self.rel(&dest));
+                Some(dest)
+            }
+            None => None,
+        };
+        self.save_shot(r, &shot)?;
+        Ok(dest)
     }
 
     /// Where a shot's own images are kept: chapters/01-x/shots/010/.

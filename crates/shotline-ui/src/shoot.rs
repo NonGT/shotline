@@ -36,7 +36,7 @@ impl Shoot {
 
 impl App {
     /// The shot as it would be sent, worked out once per reload.
-    fn built(&mut self, r: ShotRef) -> Result<Built, String> {
+    pub(crate) fn built(&mut self, r: ShotRef) -> Result<Built, String> {
         if let Some((at, b)) = &self.built
             && *at == r
         {
@@ -109,11 +109,13 @@ impl App {
             hint(
                 ui,
                 "Pictures the video model is shown. Elements named in the prompt bring their \
-                 anchors; add the shot's own here, e.g. a place or a prop that isn't an element.",
+                 anchors; add others from Elements, or the shot's own, e.g. a place or a prop \
+                 that isn't an element.",
             );
         }
         let mut zoom = None;
         let mut remove = None;
+        let mut leave = None;
         ui.horizontal_wrapped(|ui| {
             for a in &anchors {
                 ui.vertical(|ui| {
@@ -127,6 +129,18 @@ impl App {
                             .color(theme::GRAPHITE),
                     )
                     .on_hover_text(format!("from @{}; change it in Elements", a.handle));
+                    let rm = remove_button(ui)
+                        .on_hover_text(format!("don't send it with {r}; @{} keeps it", a.handle));
+                    rm.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::Role::Button,
+                            true,
+                            format!("Leave out {}", a.label),
+                        )
+                    });
+                    if rm.clicked() {
+                        leave = Some(a.path.clone());
+                    }
                 });
             }
             for (i, img) in s.images.iter().enumerate() {
@@ -153,10 +167,15 @@ impl App {
                             )
                         });
                     }
-                    if remove_button(ui)
-                        .on_hover_text(format!("take {} off {r}", img.file))
-                        .clicked()
-                    {
+                    let rm = remove_button(ui).on_hover_text(format!("take {} off {r}", img.file));
+                    rm.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::Role::Button,
+                            true,
+                            format!("Remove {name}"),
+                        )
+                    });
+                    if rm.clicked() {
                         remove = Some(i);
                     }
                 });
@@ -168,10 +187,62 @@ impl App {
         if let Some(i) = remove {
             acts.push(Action::RemoveShotImage(r, i));
         }
+        if let Some(a) = leave {
+            acts.push(Action::LeaveOut(r, a, true));
+        }
+        if !s.leave_out.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak("Left out:");
+                for a in &s.leave_out {
+                    ui.label(RichText::new(a).small().color(theme::GRAPHITE));
+                    if ui
+                        .small_button("Put back")
+                        .on_hover_text(format!("send it with {r} again"))
+                        .clicked()
+                    {
+                        acts.push(Action::LeaveOut(r, a.clone(), false));
+                    }
+                }
+            });
+        }
         let models = self.image_models();
         let me = anchor::For::Shot(r);
         let making = self.maker.as_ref().is_some_and(|m| m.target == me);
+        let sent: Vec<&str> = anchors.iter().map(|a| a.path.as_str()).collect();
+        let left: Vec<(String, String, String)> = self
+            .film
+            .elements
+            .iter()
+            .flat_map(|(el, all)| {
+                all.iter().enumerate().map(|(i, a)| {
+                    (
+                        format!("@{} {}", el.handle, i + 1),
+                        el.handle.clone(),
+                        self.project.rel(a),
+                    )
+                })
+            })
+            .filter(|(_, _, a)| !sent.contains(&a.as_str()))
+            .collect();
         ui.horizontal(|ui| {
+            ui.add_enabled_ui(!left.is_empty(), |ui| {
+                egui::ComboBox::from_id_salt(("send anchor", r.to_string()))
+                    .selected_text("Add an anchor")
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        for (name, handle, a) in &left {
+                            if ui.selectable_label(false, name).clicked() {
+                                acts.push(Action::SendAnchor(r, handle.clone(), a.clone()));
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("an element's anchor image, sent with this shot only")
+                    .on_disabled_hover_text("every anchor is sent already")
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Add an anchor")
+                    });
+            });
             if ui.button("Add image…").clicked()
                 && let Some(file) = rfd::FileDialog::new()
                     .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
@@ -335,9 +406,10 @@ impl App {
             None => Shoot::Pricing(r),
         };
         let (state, ctx, film) = (self.shoot.clone(), ctx.clone(), self.project.root.clone());
+        let translate = self.translate_prompt;
         std::thread::spawn(move || {
             let done = match at {
-                None => match host.take_quote(&film, r) {
+                None => match host.take_quote(&film, r, translate) {
                     Ok(cost) => Shoot::Priced(r, cost),
                     Err(e) => Shoot::Failed(r, format!("{e:#}")),
                 },
@@ -347,7 +419,7 @@ impl App {
                         *step.lock().unwrap() = Shoot::Running(r, s);
                         c.request_repaint();
                     };
-                    let out = host.take(&film, r, &at, &mut on);
+                    let out = host.take(&film, r, &at, translate, &mut on);
                     Shoot::Done(r, out.map_err(|e| format!("{e:#}")))
                 }
             };

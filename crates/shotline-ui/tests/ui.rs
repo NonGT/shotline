@@ -249,9 +249,13 @@ impl Host for TestHost {
         Ok("3.5 USD left".into())
     }
 
-    fn take_quote(&self, _film: &Path, shot: ShotRef) -> anyhow::Result<String> {
+    fn take_quote(&self, _film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String> {
         assert_eq!(shot, R);
-        Ok("0.40 USD".into())
+        Ok(if translate {
+            "0.40 USD + 0.01 USD to translate".into()
+        } else {
+            "0.40 USD".into()
+        })
     }
 
     /// A take as the engine leaves one: a done job of the shot with a video.
@@ -260,9 +264,11 @@ impl Host for TestHost {
         film: &Path,
         shot: ShotRef,
         at: &str,
+        translate: bool,
         on: &mut dyn FnMut(String),
     ) -> anyhow::Result<String> {
         assert_eq!((shot, at), (R, "0.40 USD"));
+        assert!(!translate);
         on("running (40%)".into());
         let p = Project::open(film)?;
         let mut j = Job::new(
@@ -324,6 +330,20 @@ impl Host for TestHost {
     }
 
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf> {
+        if ask.frame {
+            assert_eq!((ask.shot, ask.prompt.as_str()), (Some(R), "at the edge"));
+            let saved = Project::open(film)?.shot(R)?.frame_prompt;
+            assert_eq!(saved.as_deref(), Some("at the edge"));
+            // What the video gets, to start with.
+            assert!(
+                ask.refs[0].ends_with("elements/cast/paka/01.png"),
+                "{:?}",
+                ask.refs
+            );
+            let out = film.join(".shotline").join("frame.png");
+            image::RgbImage::new(8, 8).save(&out)?;
+            return Ok(out);
+        }
         if ask.shot.is_some() {
             assert_eq!((ask.handle.as_str(), ask.prompt.as_str()), ("", "the café"));
             assert!(ask.refs.is_empty());
@@ -448,7 +468,7 @@ fn make_an_anchor_image() {
         Some(Arc::new(TestHost)),
     );
     let mut h = Harness::builder()
-        .with_size(egui::vec2(1100.0, 1000.0))
+        .with_size(egui::vec2(1100.0, 1800.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Elements").click();
@@ -510,6 +530,10 @@ fn a_shot_s_pictures_and_a_take() {
     let png = tmp.path().join("in.png");
     image::RgbImage::new(8, 8).save(&png).unwrap();
     p.add_anchor("paka", &png).unwrap();
+    p.add_element(Kind::Prop, "Jeep", None, "an old green jeep")
+        .unwrap();
+    p.add_anchor("jeep", &png).unwrap();
+    p.add_anchor("jeep", &png).unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
         .silent();
@@ -538,7 +562,7 @@ fn a_shot_s_pictures_and_a_take() {
         Some(Arc::new(TestHost)),
     );
     let mut h = Harness::builder()
-        .with_size(egui::vec2(1200.0, 1400.0))
+        .with_size(egui::vec2(1200.0, 1800.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -578,7 +602,7 @@ fn a_shot_s_pictures_and_a_take() {
     h.run();
     h.get_by_label_contains("Image 2: the café at night.");
 
-    h.get_by_label("Remove").click();
+    h.get_by_label("Remove Image 2").click();
     h.run();
     assert!(p.shot(R).unwrap().images.is_empty());
     assert!(!p.root.join(&img.file).exists());
@@ -600,6 +624,72 @@ fn a_shot_s_pictures_and_a_take() {
         .is_some()));
     assert_eq!(p.takes(R).unwrap().len(), before + 1);
     h.get_by_label("Play #3");
+
+    // An element's anchor left out of this shot only, then put back.
+    let anchor = p.shot(R).unwrap();
+    assert!(anchor.leave_out.is_empty());
+    h.get_by_label("Image 1 · @paka");
+    h.get_by_label("Leave out Image 1").click();
+    h.run();
+    h.run();
+    let left = p.shot(R).unwrap().leave_out;
+    assert_eq!(left, ["elements/cast/paka/01.png"]);
+    assert!(h.query_by_label("Image 1 · @paka").is_none());
+    h.get_by_label("Put back").click();
+    h.run();
+    h.run();
+    assert!(p.shot(R).unwrap().leave_out.is_empty());
+    h.get_by_label("Image 1 · @paka");
+
+    // One of the jeep's pictures picked from Elements: the jeep comes along with only that one.
+    // The shot's own, before the image panel's further down.
+    h.get_all_by_role_and_label(Role::ComboBox, "Add an anchor")
+        .next()
+        .unwrap()
+        .click();
+    h.run();
+    h.get_by_label("@jeep 2").click();
+    h.run();
+    h.run();
+    let s = p.shot(R).unwrap();
+    assert_eq!(s.elements, ["paka", "jeep"]);
+    assert_eq!(s.leave_out, ["elements/props/jeep/01.png"]);
+    h.get_by_label("Image 2 · @jeep");
+    h.get_by_label("Leave out Image 2").click();
+    h.run();
+    h.run();
+    let s = p.shot(R).unwrap();
+    assert_eq!(s.elements, ["paka"]);
+    assert!(s.leave_out.is_empty());
+
+    // A storyboard frame made from the shot, then taken away and back with undo.
+    h.get_by_label("Make frame…").click();
+    h.run();
+    assert!(
+        h.query_by_role_and_label(Role::TextInput, "Image prompt")
+            .is_none()
+    );
+    let fp = h.get_by_role_and_label(Role::MultilineTextInput, "Frame prompt");
+    fp.focus();
+    fp.type_text("at the edge");
+    h.run();
+    h.get_by_label("Get price").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make it for $0.04")
+        .is_some()));
+    h.get_by_label("Make it for $0.04").click();
+    assert!(wait_for(&mut h, |_| p.shot(R).unwrap().frame.is_some()));
+    h.run();
+    let frame = p.shot(R).unwrap().frame.unwrap();
+    assert_eq!(frame, "chapters/01-into-the-forest/shots/010.png");
+    h.get_by_label("Remove storyboard frame").click();
+    h.run();
+    assert!(p.shot(R).unwrap().frame.is_none());
+    assert!(!p.root.join(&frame).exists());
+    h.get_by_label("Undo").click();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().frame.as_deref(), Some(frame.as_str()));
+    assert!(p.root.join(&frame).exists());
 }
 
 #[test]
@@ -661,6 +751,23 @@ fn translate_only_when_it_helps() {
     assert!(offered(&h));
     h.get_by_label("Translate to English first").click();
     h.run();
+
+    // A shot's prompt too, and the take's price takes the translation in.
+    h.get_by_label("Shots").click();
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Prompt");
+    prompt.focus();
+    prompt.type_text(" ในป่า");
+    h.run();
+    h.get_by_label("Translate to English first").click();
+    h.run();
+    h.get_by_label("Shoot a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("0.40 USD + 0.01 USD to translate")
+        .is_some()));
+
     // No key for the text model: nothing to translate with.
     shotline_core::dotenv::set(&env, var, None).unwrap();
     h.run();
@@ -1234,7 +1341,7 @@ fn plays_compares_and_plays_the_cut() {
         .silent();
     // Tall enough that the takes stay in view under the player.
     let mut h = Harness::builder()
-        .with_size([1000.0, 1400.0])
+        .with_size([1000.0, 1800.0])
         .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();

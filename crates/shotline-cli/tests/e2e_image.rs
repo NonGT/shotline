@@ -187,6 +187,26 @@ fn storyboard_frame() {
         .success()
         .stdout(predicate::str::contains("+ start frame"));
 
+    // Its own size and no pictures along.
+    shotline(&tmp)
+        .args([
+            "frame",
+            "01-010",
+            "--no-refs",
+            "--aspect",
+            "1:1",
+            "--resolution",
+            "2K",
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("chapters/01-one/shots/010.png"));
+    shotline(&tmp)
+        .args(["frame", "01-010", "--no-refs", "--clear"])
+        .assert()
+        .failure();
+
     tmp.child("own.jpg").write_binary(b"jpg").unwrap();
     shotline(&tmp)
         .args(["frame", "01-010", "--file", "../own.jpg"])
@@ -266,6 +286,50 @@ fn translated_first() {
         .assert()
         .success()
         .stdout(predicate::str::contains("translation").not());
+}
+
+#[test]
+fn a_shot_s_prompt_translated_once() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    let toml = std::fs::read_to_string(tmp.path().join("film/shotline.toml")).unwrap();
+    std::fs::write(
+        tmp.path().join("film/shotline.toml"),
+        toml + "[text]\nplugin = \"fake\"\nmodel = \"fake/text\"\n",
+    )
+    .unwrap();
+    shotline(&tmp)
+        .args(["shot", "set", "01-010", "--prompt", "@paka เดินเข้าป่า"])
+        .assert()
+        .success();
+    shotline(&tmp)
+        .args(["take", "01-010", "--translate"])
+        .write_stdin("n\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("to translate on 01-010"))
+        .stdout(predicate::str::ends_with("nothing spent\n"));
+    // fake/text answers with the last line it's sent: the text to translate.
+    shotline(&tmp)
+        .args(["take", "01-010", "--translate", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("in English: @paka เดินเข้าป่า\n"))
+        .stdout(predicate::str::contains("01-010#1 done"));
+    tmp.child("film/chapters/01-one/shots/010.toml")
+        .assert(predicate::str::contains("[english]"));
+    // Kept: the next take doesn't translate again.
+    shotline(&tmp)
+        .args(["take", "01-010", "--translate", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("translation").not());
+
+    shotline(&tmp)
+        .args(["frame", "01-010", "--translate", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("translation for 01-010"));
 }
 
 #[test]
@@ -352,6 +416,34 @@ fn pictures_of_a_shot() {
         .assert()
         .success()
         .stdout("1  chapters/01-one/shots/010/01.png  the café\n");
+    // Paka's anchor left out of this shot: her name instead, the shot's picture is Ref 1.
+    shotline(&tmp)
+        .args([
+            "shot",
+            "set",
+            "01-010",
+            "--leave-out",
+            "elements/cast/paka/01.png",
+        ])
+        .assert()
+        .success();
+    shotline(&tmp)
+        .args(["prompt", "01-010"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Paka walks\n\nRef 1: the café."));
+    shotline(&tmp)
+        .args([
+            "shot",
+            "set",
+            "01-010",
+            "--put-back",
+            "elements/cast/paka/01.png",
+        ])
+        .assert()
+        .success();
+    tmp.child("film/chapters/01-one/shots/010.toml")
+        .assert(predicate::str::contains("leave_out").not());
     // A shot folder doesn't count as a shot.
     shotline(&tmp)
         .args(["shot", "ls"])

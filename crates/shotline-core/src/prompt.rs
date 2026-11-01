@@ -63,8 +63,17 @@ pub enum ImageFor {
         aspect: Option<String>,
         resolution: Option<String>,
     },
-    /// A shot's storyboard frame: the first frame of the video.
-    Frame(ShotRef),
+    /// A shot's storyboard frame: the first frame of the video, from its frame prompt.
+    Frame {
+        shot: ShotRef,
+        /// Instead of its frame prompt, e.g. that put into English.
+        prompt: Option<String>,
+        /// None sends what the video would get: the elements' anchors and the shot's own.
+        refs: Option<Vec<std::path::PathBuf>>,
+        /// Instead of the shot's shape.
+        aspect: Option<String>,
+        resolution: Option<String>,
+    },
     /// A picture for a shot to send along, e.g. a place or a prop that isn't an element.
     ShotImage {
         shot: ShotRef,
@@ -111,8 +120,14 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
             "{r} has no prompt yet, `shotline shot draft {r}` can write one from the plot"
         ));
     }
-    let (mut text, mut references) =
-        resolve(project, spec, &shot.prompt, &shot.elements, &mut warnings)?;
+    let (mut text, mut references) = resolve(
+        project,
+        spec,
+        shot.sent_prompt(),
+        &shot.elements,
+        &shot.leave_out,
+        &mut warnings,
+    )?;
     own_images(
         project,
         spec,
@@ -285,6 +300,7 @@ pub fn build_image(
                     spec,
                     prompt,
                     std::slice::from_ref(&el.handle),
+                    &[],
                     &mut warnings,
                 )?,
                 Some(files) => chosen(project, spec, Some(&el), prompt, files, &mut warnings)?,
@@ -308,20 +324,41 @@ pub fn build_image(
                 .unwrap_or_else(|| cfg.aspect.clone());
             (vec![text.trim().to_string()], references, aspect)
         }
-        ImageFor::Frame(r) => {
+        ImageFor::Frame {
+            shot: r,
+            prompt,
+            refs,
+            aspect: picked_aspect,
+            ..
+        } => {
             let shot = project.shot(*r)?;
-            let prompt = shot.frame_prompt.as_deref().unwrap_or(&shot.prompt);
-            let (mut text, mut references) =
-                resolve(project, spec, prompt, &shot.elements, &mut warnings)?;
-            own_images(
-                project,
-                spec,
-                *r,
-                &shot,
-                &mut text,
-                &mut references,
-                &mut warnings,
-            )?;
+            let prompt = prompt
+                .as_deref()
+                .or(shot.frame_prompt.as_deref())
+                .unwrap_or(shot.sent_prompt());
+            let (text, references) = match refs {
+                None => {
+                    let (mut text, mut references) = resolve(
+                        project,
+                        spec,
+                        prompt,
+                        &shot.elements,
+                        &shot.leave_out,
+                        &mut warnings,
+                    )?;
+                    own_images(
+                        project,
+                        spec,
+                        *r,
+                        &shot,
+                        &mut text,
+                        &mut references,
+                        &mut warnings,
+                    )?;
+                    (text, references)
+                }
+                Some(files) => chosen(project, spec, None, prompt, files, &mut warnings)?,
+            };
             let mut parts = vec![];
             if let Some(t) = project.template("storyboard")? {
                 parts.push(render(&t, &[]));
@@ -332,9 +369,9 @@ pub fn build_image(
                     "{r} continues from the shot before, so a storyboard frame won't be used"
                 ));
             }
-            let aspect = shot
-                .model
-                .and_then(|m| m.aspect)
+            let aspect = picked_aspect
+                .clone()
+                .or_else(|| shot.model.and_then(|m| m.aspect))
                 .unwrap_or_else(|| cfg.aspect.clone());
             (parts, references, aspect)
         }
@@ -347,7 +384,7 @@ pub fn build_image(
         } => {
             let shot = project.shot(*r)?;
             let (text, references) = match refs {
-                None => resolve(project, spec, prompt, &[], &mut warnings)?,
+                None => resolve(project, spec, prompt, &[], &[], &mut warnings)?,
                 Some(files) => chosen(project, spec, None, prompt, files, &mut warnings)?,
             };
             let aspect = aspect
@@ -364,6 +401,10 @@ pub fn build_image(
             ..
         }
         | ImageFor::ShotImage {
+            resolution: Some(r),
+            ..
+        }
+        | ImageFor::Frame {
             resolution: Some(r),
             ..
         } => Some(r.clone()),
@@ -383,12 +424,13 @@ pub fn build_image(
 
 /// The prompt with @handles swapped for reference labels (or names when the model takes no
 /// references), and the anchor images to send, in order. `extra` are handles to attach that the
-/// prompt doesn't mention.
+/// prompt doesn't mention; anchors in `skip` stay home.
 fn resolve(
     project: &Project,
     spec: &ModelInfo,
     prompt: &str,
     extra: &[String],
+    skip: &[String],
     warnings: &mut Vec<String>,
 ) -> Result<(String, Vec<Reference>)> {
     // Mentioned handles first, in prompt order, then the extra ones.
@@ -403,7 +445,17 @@ fn resolve(
     let mut replacements = vec![];
     for h in &handles {
         let el = project.element(h)?;
-        let anchors = project.anchors(&el)?;
+        let all = project.anchors(&el)?;
+        let anchors: Vec<_> = all
+            .iter()
+            .filter(|a| !skip.contains(&project.rel(a)))
+            .cloned()
+            .collect();
+        if anchors.is_empty() && !all.is_empty() {
+            // Every one left out on purpose.
+            replacements.push((h.clone(), el.name.clone()));
+            continue;
+        }
         if anchors.is_empty() {
             warnings.push(format!(
                 "@{h} has no anchor images, the prompt uses its name"
@@ -463,8 +515,9 @@ fn resolve(
     Ok((text.trim().to_string(), references))
 }
 
-/// An anchor prompt with the images picked for it. Handles in the prompt become names, since only
-/// the picked images go along.
+/// A prompt with the images picked for it, in order. An element the prompt names, or `el` (the
+/// one an anchor is made for), is pointed at whichever of its anchors were picked; with none of
+/// them picked it's named in words.
 fn chosen(
     project: &Project,
     spec: &ModelInfo,
@@ -473,52 +526,65 @@ fn chosen(
     files: &[std::path::PathBuf],
     warnings: &mut Vec<String>,
 ) -> Result<(String, Vec<Reference>)> {
+    let mut references: Vec<Reference> = match &spec.ref_image {
+        Some(ref_image) => files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| Reference {
+                label: render(ref_image, &[("n", &(i + 1).to_string())]),
+                handle: String::new(),
+                path: project.rel(f),
+            })
+            .collect(),
+        None => {
+            if !files.is_empty() {
+                warnings.push(format!(
+                    "{} doesn't take reference images, so they're left out",
+                    spec.id
+                ));
+            }
+            vec![]
+        }
+    };
+    let mut whose: Vec<crate::Element> = el.into_iter().cloned().collect();
+    for h in handle::unique(prompt) {
+        if let Ok(e) = project.element(&h)
+            && !whose.iter().any(|w| w.handle == e.handle)
+        {
+            whose.push(e);
+        }
+    }
+    // Each element as the prompt should say it.
+    let mut says = vec![];
+    for e in &whose {
+        let anchors: Vec<_> = project.anchors(e)?.iter().map(|a| project.rel(a)).collect();
+        let mut labels = vec![];
+        for r in references.iter_mut().filter(|r| anchors.contains(&r.path)) {
+            r.handle = e.handle.clone();
+            labels.push(r.label.clone());
+        }
+        says.push((e.handle.clone(), e.name.clone(), labels));
+    }
+    let say = |handle: &str| {
+        says.iter()
+            .find(|(h, ..)| h == handle)
+            .map(|(_, name, labels)| match labels.as_slice() {
+                [] => name.clone(),
+                [one] => one.clone(),
+                many => format!("{name} (shown in {})", many.join(" and ")),
+            })
+    };
     let mut text = String::new();
     let mut last = 0;
     for m in handle::find(prompt) {
         text.push_str(&prompt[last..m.span.start]);
-        match project.element(&m.handle) {
-            Ok(e) => text.push_str(&e.name),
-            Err(_) => text.push_str(&prompt[m.span.clone()]),
+        match say(&m.handle) {
+            Some(t) => text.push_str(&t),
+            None => text.push_str(&prompt[m.span.clone()]),
         }
         last = m.span.end;
     }
     text.push_str(&prompt[last..]);
-    let Some(ref_image) = &spec.ref_image else {
-        if !files.is_empty() {
-            warnings.push(format!(
-                "{} doesn't take reference images, so they're left out",
-                spec.id
-            ));
-        }
-        return Ok((text.trim().to_string(), vec![]));
-    };
-    let own: Vec<_> = match el {
-        Some(el) => project
-            .anchors(el)?
-            .iter()
-            .map(|a| project.rel(a))
-            .collect(),
-        None => vec![],
-    };
-    let mut references = vec![];
-    let mut shown = vec![];
-    for f in files {
-        let path = project.rel(f);
-        let label = render(ref_image, &[("n", &(references.len() + 1).to_string())]);
-        let mine = own.contains(&path);
-        if mine {
-            shown.push(label.clone());
-        }
-        references.push(Reference {
-            label,
-            handle: match el {
-                Some(el) if mine => el.handle.clone(),
-                _ => String::new(),
-            },
-            path,
-        });
-    }
     if let Some(max) = spec.max_images
         && references.len() > max
     {
@@ -528,7 +594,10 @@ fn chosen(
             spec.id,
         ));
     }
+    // The element an anchor is made for is seldom named in what's typed.
     if let Some(el) = el
+        && !handle::unique(prompt).contains(&el.handle)
+        && let Some((_, _, shown)) = says.iter().find(|(h, ..)| *h == el.handle)
         && !shown.is_empty()
     {
         text = format!(

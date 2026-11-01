@@ -301,7 +301,17 @@ fn anchor_with_picked_images() {
 fn storyboard_frame_is_the_start_frame() {
     let (dir, p) = film();
     let r = add(&p, "@paka walks into the trees", |_| {});
-    let b = image(&p, ImageFor::Frame(r)).unwrap();
+    let b = image(
+        &p,
+        ImageFor::Frame {
+            shot: r,
+            prompt: None,
+            refs: None,
+            aspect: None,
+            resolution: None,
+        },
+    )
+    .unwrap();
     assert!(b.text.starts_with("A single still frame"), "{}", b.text);
     assert!(
         b.text.contains("Paka (shown in image 1 and image 2) walks"),
@@ -313,8 +323,39 @@ fn storyboard_frame_is_the_start_frame() {
     let mut shot = p.shot(r).unwrap();
     shot.frame_prompt = Some("@paka stands at the edge of the trees".into());
     p.save_shot(r, &shot).unwrap();
-    let b = image(&p, ImageFor::Frame(r)).unwrap();
+    let b = image(
+        &p,
+        ImageFor::Frame {
+            shot: r,
+            prompt: None,
+            refs: None,
+            aspect: None,
+            resolution: None,
+        },
+    )
+    .unwrap();
     assert!(b.text.contains("image 2) stands at the edge"), "{}", b.text);
+
+    // Picked: one of Paka's anchors names her, in a shape of its own.
+    let anchor = p.anchors(&p.element("paka").unwrap()).unwrap()[1].clone();
+    let b = image(
+        &p,
+        ImageFor::Frame {
+            shot: r,
+            prompt: None,
+            refs: Some(vec![anchor]),
+            aspect: Some("1:1".into()),
+            resolution: Some("2K".into()),
+        },
+    )
+    .unwrap();
+    assert!(b.text.contains("image 1 stands at the edge"), "{}", b.text);
+    assert_eq!(b.references.len(), 1);
+    assert_eq!(b.references[0].handle, "paka");
+    assert_eq!(
+        (b.aspect.as_str(), b.resolution.as_deref()),
+        ("1:1", Some("2K"))
+    );
 
     let mut shot = p.shot(r).unwrap();
     shot.frame = Some("chapters/01-into-the-forest/shots/010.png".into());

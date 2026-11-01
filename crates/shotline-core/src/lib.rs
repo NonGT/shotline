@@ -27,7 +27,7 @@ pub use project::{
     Step, TextConfig, user_dir,
 };
 pub use prompt::{Built, BuiltImage, ImageFor, Reference, StartFrame, build, build_image};
-pub use shot::{Chapter, Line, ModelOverride, Shot, ShotImage, ShotRef, Transition};
+pub use shot::{Chapter, Line, ModelOverride, Shot, ShotImage, ShotRef, Transition, Translated};
 pub use shotline_ledger as ledger;
 pub use shotline_protocol as protocol;
 pub use timeline::{ColourMatch, CutShot, MatchAt, TIMELINE_FILE, Timeline, Track};

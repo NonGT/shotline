@@ -101,7 +101,8 @@ pub trait Host: Send + Sync {
     /// Spends, if the price is still `at`, and returns the image, not yet an anchor.
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf>;
     /// What a take of the shot would cost, e.g. "0.40 USD". Free.
-    fn take_quote(&self, film: &Path, shot: ShotRef) -> anyhow::Result<String>;
+    /// `translate` puts the prompt into English first, if it isn't and that isn't done yet.
+    fn take_quote(&self, film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String>;
     /// Shoots a take, if the price is still `at`, telling `on` how it goes. Returns a line
     /// about it.
     fn take(
@@ -109,6 +110,7 @@ pub trait Host: Send + Sync {
         film: &Path,
         shot: ShotRef,
         at: &str,
+        translate: bool,
         on: &mut dyn FnMut(String),
     ) -> anyhow::Result<String>;
 }
@@ -119,6 +121,8 @@ pub struct AnchorAsk {
     pub handle: String,
     /// Set for a shot's picture; `handle` is empty then.
     pub shot: Option<ShotRef>,
+    /// The shot's storyboard frame, made from its frame prompt rather than `prompt`.
+    pub frame: bool,
     /// Added to the element's description.
     pub prompt: String,
     pub plugin: String,
@@ -178,6 +182,8 @@ pub struct App {
     maker: Option<anchor::Maker>,
     /// The open shot as it would be sent; None once anything is read again.
     built: Option<(ShotRef, Result<shotline_core::Built, String>)>,
+    /// Ticked: a shot's prompt goes into English before its next take.
+    translate_prompt: bool,
     shoot: Arc<Mutex<shoot::Shoot>>,
     /// timeline.toml as edited, saved once nothing has focus.
     timeline_form: Timeline,
@@ -341,6 +347,7 @@ impl App {
             wants_keys: false,
             maker: None,
             built: None,
+            translate_prompt: false,
             shoot: Arc::default(),
             timeline_form: Timeline::default(),
             render: Arc::default(),
@@ -386,6 +393,10 @@ impl App {
                 .project
                 .shot(*r)
                 .map(|_| Action::AddShotImage(*r, out.clone())),
+            anchor::For::Frame(r) => self
+                .project
+                .shot(*r)
+                .map(|_| Action::SetFrame(*r, Some(out.clone()))),
         };
         match act {
             Ok(a) => {
@@ -429,6 +440,13 @@ impl App {
             translator,
         );
         let host = self.host.clone();
+        // A frame is made from the shot's frame prompt, so what's typed is saved first.
+        if let anchor::Wants::Price(ask) | anchor::Wants::Make(ask, _) = &wants
+            && ask.frame
+            && ask.shot == self.form.shot
+        {
+            self.form.frame_prompt = ask.prompt.clone();
+        }
         match (wants, host) {
             (anchor::Wants::Price(ask), Some(host)) => {
                 self.flush();
@@ -450,7 +468,7 @@ impl App {
         let m = self.maker.as_ref().filter(|m| m.busy())?;
         Some(match &m.target {
             anchor::For::Element(h) => format!("@{h}"),
-            anchor::For::Shot(r) => r.to_string(),
+            anchor::For::Shot(r) | anchor::For::Frame(r) => r.to_string(),
         })
     }
 
@@ -1396,7 +1414,7 @@ impl App {
             title_row(ui, &r.to_string(), &mut self.form.title, "Add a title", 0.0);
         });
         ui.add_space(14.0);
-        let side = 240.0;
+        let side = 300.0;
         ui.horizontal_top(|ui| {
             let w = (ui.available_width() - side - 32.0).clamp(280.0, 620.0);
             ui.vertical(|ui| {
@@ -1406,7 +1424,7 @@ impl App {
             ui.add_space(32.0);
             ui.vertical(|ui| {
                 ui.set_width(side);
-                self.facts(ui, r, s);
+                self.facts(ui, s);
                 ui.add_space(12.0);
                 if ui.button("Add a shot after this one").clicked() {
                     acts.push(Action::AddShot(r.chapter, Some(r.shot)));
@@ -1419,7 +1437,13 @@ impl App {
         ui.separator();
         ui.add_space(8.0);
         self.take_list(ui, r, s, &mut acts);
-        if acts.iter().any(|a| matches!(a, Action::AddShot(..))) {
+        // These read the shot from disk, so what's typed goes first.
+        if acts.iter().any(|a| {
+            matches!(
+                a,
+                Action::AddShot(..) | Action::LeaveOut(..) | Action::SendAnchor(..)
+            )
+        }) {
             self.flush();
         }
         self.apply(acts);
@@ -1428,32 +1452,57 @@ impl App {
     /// Plot, prompt and lines: what the shot says.
     fn script(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, acts: &mut Vec<Action>) {
         let f = &mut self.form;
-        text_field(
+        explained_field(
             ui,
             "Plot",
+            Some(
+                "Your note of what happens, in any language. Not sent to the video model; drafts \
+                 write the prompt from it.",
+            ),
             &mut f.plot,
             "What happens in the shot, in any language",
         );
         ui.add_space(14.0);
-        text_field(
+        self.start(ui, r, s);
+        ui.add_space(14.0);
+        let f = &mut self.form;
+        explained_field(
             ui,
             "Prompt",
+            Some(
+                "What the video model is sent. The references, style and other notes are added \
+                 to it; see What the model gets under Takes.",
+            ),
             &mut f.prompt,
-            "What the video model is sent, in English, naming elements as @handles",
+            "What the video model is sent, naming elements as @handles",
         );
+        let f = &self.form;
+        match &s.english {
+            // Translated before and not changed since.
+            Some(t) if t.from == f.prompt && !t.from.is_empty() => {
+                hint(ui, &format!("Sent in English: {}", t.text));
+            }
+            _ => {
+                let translator = self.translator();
+                let prompt = self.form.prompt.clone();
+                if anchor::translate_box(
+                    ui,
+                    &mut self.translate_prompt,
+                    &prompt,
+                    translator.as_deref(),
+                ) {
+                    // The price said doesn't hold any more.
+                    *self.shoot.lock().unwrap() = shoot::Shoot::Idle;
+                }
+            }
+        }
+        let f = &mut self.form;
         if f.prompt.is_empty() && !f.plot.is_empty() {
             hint(
                 ui,
                 &format!("or draft one from the plot with shotline shot draft {r}"),
             );
         }
-        ui.add_space(14.0);
-        text_field(
-            ui,
-            "Frame prompt",
-            &mut f.frame_prompt,
-            "Same as the prompt",
-        );
         ui.add_space(14.0);
         let lines = caption(ui, "Lines").id;
         let cast: Vec<String> = self
@@ -1491,21 +1540,8 @@ impl App {
         });
     }
 
-    /// The storyboard frame and the shot's settings.
-    fn facts(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
-        match &s.frame {
-            Some(f) => {
-                let path = self.project.root.join(f);
-                if self.thumbs.show(ui, &path, 150.0, f) {
-                    self.zoom = Some(path);
-                }
-            }
-            None => hint(
-                ui,
-                &format!("No storyboard frame. Make one with shotline frame {r}"),
-            ),
-        }
-        ui.add_space(12.0);
+    /// The shot's settings.
+    fn facts(&mut self, ui: &mut egui::Ui, s: &Shot) {
         let models = self.video_models();
         let film = self.project.format();
         let mut flags = vec![];
@@ -1522,16 +1558,6 @@ impl App {
                         .max_decimals(2)
                         .suffix(" s"),
                 );
-                ui.end_row();
-                top_label(ui, "Starts");
-                ui.vertical(|ui| {
-                    ui.radio_value(&mut f.transition, Transition::Cut, "on a cut");
-                    ui.radio_value(
-                        &mut f.transition,
-                        Transition::Continue,
-                        "from the shot before",
-                    );
-                });
                 ui.end_row();
                 let l = ui.weak("Lines spoken");
                 // The film's own recipes too, unless they stand in for these.
@@ -1575,6 +1601,132 @@ impl App {
             });
         for flag in flags {
             ui.label(RichText::new(flag).color(theme::FLAG));
+        }
+    }
+
+    /// How the shot starts: on a cut, with its storyboard frame if it has one, or carried on
+    /// from the shot before.
+    fn start(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
+        let l = caption(ui, "Starts").id;
+        ui.horizontal(|ui| {
+            let f = &mut self.form;
+            ui.radio_value(&mut f.transition, Transition::Cut, "on a cut")
+                .labelled_by(l);
+            ui.add_space(12.0);
+            ui.radio_value(
+                &mut f.transition,
+                Transition::Continue,
+                "from the shot before",
+            );
+        });
+        if self.form.transition == Transition::Continue {
+            let why = match self.project.previous_shot(r) {
+                Ok(Some(prev)) => format!(
+                    "On the last frame of {prev}'s selected take, colour matched in the cut."
+                ),
+                _ => "It's the first shot, so there's nothing before it to carry on from.".into(),
+            };
+            hint(ui, &why);
+            return;
+        }
+        ui.add_space(8.0);
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(4.0)
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.frame(ui, r, s);
+            });
+    }
+
+    /// The storyboard frame: a still the video starts on, and what it's made from.
+    fn frame(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
+        ui.label(
+            RichText::new("Storyboard frame")
+                .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
+                .color(theme::PAPER),
+        )
+        .on_hover_text(
+            "The first frame of the video, to settle the framing on a cheap still before paying \
+             for video. Optional.",
+        );
+        ui.add_space(8.0);
+        let mut acts = vec![];
+        if let Some(f) = &s.frame {
+            let path = self.project.root.join(f);
+            if self.thumbs.show(ui, &path, 150.0, f) {
+                self.zoom = Some(path);
+            }
+        }
+        let models = self.image_models();
+        let me = anchor::For::Frame(r);
+        let making = self.maker.as_ref().is_some_and(|m| m.target == me);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add image…").clicked()
+                && let Some(file) = rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                    .pick_file()
+            {
+                acts.push(Action::SetFrame(r, Some(file)));
+            }
+            let busy = self.making_for();
+            if !models.is_empty()
+                && !making
+                && ui
+                    .add_enabled(busy.is_none(), egui::Button::new("Make frame…"))
+                    .on_disabled_hover_text(format!(
+                        "still making one for {}",
+                        busy.unwrap_or_default()
+                    ))
+                    .clicked()
+            {
+                // What the video gets, to start with.
+                let refs = self
+                    .built(r)
+                    .map(|b| {
+                        b.references
+                            .iter()
+                            .map(|x| self.project.root.join(&x.path))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let cfg = &self.project.config.image;
+                let aspect = s
+                    .model
+                    .as_ref()
+                    .and_then(|m| m.aspect.clone())
+                    .unwrap_or_else(|| self.project.config.aspect.clone());
+                self.maker = Some(
+                    anchor::Maker::new(
+                        me.clone(),
+                        refs,
+                        &models,
+                        (&cfg.plugin, &cfg.model),
+                        (aspect, cfg.resolution.clone()),
+                    )
+                    .with_prompt(&self.form.frame_prompt),
+                );
+            }
+            if s.frame.is_some() {
+                let rm = remove_button(ui);
+                rm.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, true, "Remove storyboard frame")
+                });
+                if rm.clicked() {
+                    acts.push(Action::SetFrame(r, None));
+                }
+            } else {
+                ui.weak("none yet");
+            }
+        });
+        if making {
+            ui.add_space(6.0);
+            self.show_maker(ui, &models);
+        }
+        if !acts.is_empty() {
+            self.flush();
+            self.apply(acts);
         }
     }
 
@@ -1835,7 +1987,22 @@ fn caption(ui: &mut egui::Ui, text: &str) -> egui::Response {
 
 /// A labelled text box that grows with its text.
 fn text_field(ui: &mut egui::Ui, label: &str, text: &mut String, hint: &str) -> egui::Response {
-    let cap = caption(ui, label).id;
+    explained_field(ui, label, None, text, hint)
+}
+
+/// A text field whose label says more on hover.
+fn explained_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    about: Option<&str>,
+    text: &mut String,
+    hint: &str,
+) -> egui::Response {
+    let mut cap = caption(ui, label);
+    if let Some(a) = about {
+        cap = cap.on_hover_text(a);
+    }
+    let cap = cap.id;
     ui.add(
         egui::TextEdit::multiline(text)
             .hint_text(RichText::new(hint).color(theme::DUST))
@@ -1856,10 +2023,13 @@ fn line_fields(
 ) -> egui::Response {
     ui.add(
         egui::TextEdit::singleline(&mut l.at)
-            .hint_text(RichText::new("next").color(theme::DUST))
-            .desired_width(64.0),
+            .hint_text(RichText::new("starts (s)").color(theme::DUST))
+            .desired_width(84.0),
     )
-    .on_hover_text("seconds into the shot; empty follows the line before");
+    .on_hover_text(
+        "When it starts, in seconds into the shot, e.g. 2.5. Left empty, it follows the line \
+         before.",
+    );
     egui::ComboBox::from_id_salt(("who", i))
         .selected_text(format!("@{}", l.who))
         .width(96.0)

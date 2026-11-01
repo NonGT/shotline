@@ -22,6 +22,28 @@ enum Stage {
     Failed(String),
 }
 
+/// "Translate to English first", under anything typed for a model: only offered when the text
+/// isn't English and a text model can do it. True when it was clicked.
+pub(crate) fn translate_box(
+    ui: &mut egui::Ui,
+    on: &mut bool,
+    text: &str,
+    translator: Option<&str>,
+) -> bool {
+    let text = text.trim();
+    let Some(t) = translator else {
+        return false;
+    };
+    if text.is_empty() || shotline_core::looks_english(text) {
+        return false;
+    }
+    ui.checkbox(on, "Translate to English first")
+        .on_hover_text(format!(
+            "with {t}; models follow English best. A small extra spend, shown in the price."
+        ))
+        .changed()
+}
+
 /// An image model as the panel needs it.
 pub(crate) struct ImageModel {
     pub plugin: String,
@@ -47,6 +69,8 @@ enum Fetch {
 pub(crate) enum For {
     Element(String),
     Shot(ShotRef),
+    /// Made from the shot's frame prompt, which is what's typed.
+    Frame(ShotRef),
 }
 
 pub(crate) struct Maker {
@@ -113,6 +137,12 @@ impl Maker {
         drop(s);
         self.prompt.clear();
         Some(out)
+    }
+
+    /// Starts with this in the prompt box, e.g. a shot's frame prompt.
+    pub fn with_prompt(mut self, prompt: &str) -> Maker {
+        self.prompt = prompt.to_string();
+        self
     }
 
     pub fn busy(&self) -> bool {
@@ -201,6 +231,7 @@ impl Maker {
         }
         let stage = self.stage.lock().unwrap().clone();
         let busy = matches!(stage, Stage::Pricing | Stage::Making);
+        let frame = matches!(self.target, For::Frame(_));
         // The page's own colour: on RAISED, buttons (RAISED too) would lose their edges.
         egui::Frame::new()
             .fill(theme::BAY)
@@ -237,30 +268,39 @@ impl Maker {
                             }
                         });
                     ui.add_space(6.0);
-                    let example = match self.target {
-                        For::Element(_) => "anything to add, e.g. side view, full body",
-                        For::Shot(_) => "what it shows, e.g. the café at night, from the door",
-                    };
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.prompt)
-                            .hint_text(RichText::new(example).color(theme::DUST))
-                            .desired_width(f32::INFINITY),
-                    )
-                    .widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Image prompt")
-                    });
-                    // Only offered when it'd help and something can do it.
-                    let text = self.prompt.trim();
-                    if let Some(t) = &translator
-                        && !text.is_empty()
-                        && !shotline_core::looks_english(text)
-                    {
-                        ui.checkbox(&mut self.translate, "Translate to English first")
-                            .on_hover_text(format!(
-                                "with {t}; image models follow English best. A small extra spend, \
-                                 shown in the price."
-                            ));
+                    if frame {
+                        // Saved as the shot's frame prompt before it's priced.
+                        let l = ui.weak("Frame prompt").id;
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.prompt)
+                                .hint_text(
+                                    RichText::new(
+                                        "what the first frame shows, e.g. @paka at the edge of the \
+                                         forest, looking back; left empty, the shot's prompt",
+                                    )
+                                    .color(theme::DUST),
+                                )
+                                .desired_rows(2)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .labelled_by(l);
+                    } else {
+                        let example = match self.target {
+                            For::Element(_) => "anything to add, e.g. side view, full body",
+                            For::Shot(_) | For::Frame(_) => {
+                                "what it shows, e.g. the café at night, from the door"
+                            }
+                        };
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.prompt)
+                                .hint_text(RichText::new(example).color(theme::DUST))
+                                .desired_width(f32::INFINITY),
+                        )
+                        .widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Image prompt")
+                        });
                     }
+                    translate_box(ui, &mut self.translate, &self.prompt, translator.as_deref());
                     if let Some(m) = models.get(self.pick) {
                         ui.add_space(6.0);
                         if let Some(z) =
@@ -286,11 +326,12 @@ impl Maker {
                 }
                 let (handle, shot) = match &self.target {
                     For::Element(h) => (h.clone(), None),
-                    For::Shot(r) => (String::new(), Some(*r)),
+                    For::Shot(r) | For::Frame(r) => (String::new(), Some(*r)),
                 };
                 let ask = AnchorAsk {
                     handle,
                     shot,
+                    frame,
                     prompt: self.prompt.trim().to_string(),
                     plugin: m.plugin.clone(),
                     model: m.model.clone(),
@@ -515,6 +556,9 @@ impl Maker {
                          for you."
                     ),
                     For::Shot(_) => "Name them in the prompt by the label under each.".into(),
+                    For::Frame(_) => "Elements the prompt names are pointed at their pictures \
+                                      here; name any others by the label under each."
+                        .into(),
                 },
             );
         }

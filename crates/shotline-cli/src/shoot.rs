@@ -7,7 +7,10 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use shotline_core::ledger::{Books, money, pricing};
 use shotline_core::protocol::{MediaKind, Op, Quote, Rate, Reference, Request, State};
-use shotline_core::{Job, Project, ShotRef, UserConfig, user_dir};
+use shotline_core::{
+    DraftFor, Job, Project, ShotRef, Translated, UserConfig, build_draft, finish_draft,
+    looks_english, user_dir,
+};
 use shotline_engine::{Event, Options, Plan, Plugins, price};
 use shotline_plugin::Plugin;
 use tokio::runtime::Runtime;
@@ -325,19 +328,85 @@ fn plan_take(p: &Project, r: ShotRef, from: Option<usize>, of: Option<&str>) -> 
     })
 }
 
-/// What a take of the shot would cost, e.g. "0.40 USD". Free.
-pub fn take_quote(p: &Project, r: ShotRef) -> Result<String> {
-    Ok(plan_take(p, r, None, None)?.cost)
+/// The text model's request to put the shot's prompt into English, when that's wanted and it
+/// isn't done already.
+fn translation(p: &Project, r: ShotRef, translate: bool) -> Result<Option<(String, Request)>> {
+    let shot = p.shot(r)?;
+    if !translate
+        || shot.prompt.trim().is_empty()
+        || looks_english(&shot.prompt)
+        || shot.translated().is_some()
+    {
+        return Ok(None);
+    }
+    let installed = plugins::load();
+    let catalog = plugins::catalog(p, &installed)?;
+    let b = build_draft(p, &catalog, &DraftFor::Text(shot.prompt), None, None)?;
+    let req = Request {
+        op: Op::TextGenerate,
+        model: b.model,
+        prompt: Some(b.text),
+        ..Request::default()
+    };
+    Ok(Some((b.plugin, req)))
+}
+
+/// Puts the prompt into English and keeps it with the shot, so every take after sends it too.
+fn translate_prompt(p: &Project, r: ShotRef, plugin: &str, req: &Request) -> Result<String> {
+    let from = p.shot(r)?.prompt;
+    let what = format!("translation for {r}");
+    let job = spend_once(p, plugin, req, Some(r), &what, None, Go::Yes)?
+        .context("the translation wasn't made")?;
+    let file = job
+        .outputs
+        .first()
+        .with_context(|| format!("job {} sent back no text", job.id))?;
+    let raw = std::fs::read_to_string(p.job_dir(job.id).join(file))?;
+    let text = finish_draft(p, &raw).with_context(|| format!("job {}", job.id))?;
+    let mut shot = p.shot(r)?;
+    shot.english = Some(Translated {
+        from,
+        text: text.clone(),
+    });
+    p.save_shot(r, &shot)?;
+    Ok(text)
+}
+
+/// What a take of the shot would cost, e.g. "0.40 USD", and its translation if there's one.
+/// Free.
+pub fn take_quote(p: &Project, r: ShotRef, translate: bool) -> Result<String> {
+    let cost = plan_take(p, r, None, None)?.cost;
+    Ok(match translation(p, r, translate)? {
+        Some((tp, treq)) => format!("{cost} + {} to translate", quote_once(p, &tp, &treq)?),
+        None => cost,
+    })
 }
 
 /// Runs a take if it still costs `at`, telling `say` how it goes. Returns a line about it.
-pub fn take_at(p: &Project, r: ShotRef, at: &str, say: impl FnMut(String)) -> Result<String> {
+pub fn take_at(
+    p: &Project,
+    r: ShotRef,
+    at: &str,
+    translate: bool,
+    mut say: impl FnMut(String),
+) -> Result<String> {
+    if let Some((tp, treq)) = translation(p, r, translate)? {
+        let total = take_quote(p, r, translate)?;
+        if total != at {
+            bail!("the price changed from {at} to {total}; nothing spent");
+        }
+        say("translating the prompt".into());
+        translate_prompt(p, r, &tp, &treq)?;
+        let cost = plan_take(p, r, None, None)?.cost;
+        return take_at(p, r, &cost, false, say);
+    }
+    // rt bound first so it drops last, after the plugins.
     let Planned {
+        rt,
         opened,
         b,
         plan,
         cost,
-        rt,
     } = plan_take(p, r, None, None)?;
     if cost != at {
         bail!("the price changed from {at} to {cost}; nothing spent");
@@ -381,13 +450,28 @@ pub fn take(
     yes: bool,
     from: Option<usize>,
     of: Option<&str>,
+    translate: bool,
 ) -> Result<()> {
+    if let Some((tp, treq)) = translation(p, r, translate)? {
+        let total = take_quote(p, r, translate)?;
+        if !yes
+            && !confirm(&format!(
+                "spend {total} on {r}, the prompt translated first?"
+            ))?
+        {
+            println!("nothing spent");
+            return Ok(());
+        }
+        println!("in English: {}", translate_prompt(p, r, &tp, &treq)?);
+        return take(p, r, true, from, of, false);
+    }
+    // rt bound first so it drops last, after the plugins.
     let Planned {
+        rt,
         opened,
         b,
         plan,
         cost,
-        rt,
     } = plan_take(p, r, from, of)?;
     for w in &plan.built.warnings {
         eprintln!("warning: {w}");

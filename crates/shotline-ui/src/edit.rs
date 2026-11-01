@@ -207,6 +207,13 @@ pub(crate) enum Action {
     AddShotImage(ShotRef, PathBuf),
     RemoveShotImage(ShotRef, usize),
     ShotImageNote(ShotRef, usize, String),
+    /// A storyboard frame copied in, or None to take it away.
+    SetFrame(ShotRef, Option<PathBuf>),
+    /// An element's anchor left out of the shot (true) or put back.
+    LeaveOut(ShotRef, String, bool),
+    /// One anchor of an element sent with the shot: put back if it was left out, or the element
+    /// attached with only this anchor.
+    SendAnchor(ShotRef, String, String),
     Timeline(Timeline),
     /// Music for the cut; a file from outside the film is copied into music/ first.
     AddTrack(PathBuf),
@@ -222,7 +229,10 @@ impl Action {
             | Action::RemoveLine(r, _)
             | Action::AddShotImage(r, _)
             | Action::RemoveShotImage(r, _)
-            | Action::ShotImageNote(r, ..) => r.to_string(),
+            | Action::ShotImageNote(r, ..)
+            | Action::SetFrame(r, _)
+            | Action::LeaveOut(r, ..)
+            | Action::SendAnchor(r, ..) => r.to_string(),
             Action::Select(t) => t.shot.to_string(),
             Action::Story(_) => "the story".into(),
             Action::Style(_) => "the style".into(),
@@ -246,7 +256,18 @@ impl Action {
             | Action::SetLine(r, ..)
             | Action::RemoveLine(r, _)
             | Action::AddShotImage(r, _)
-            | Action::ShotImageNote(r, ..) => p.shot_path(*r).into_iter().collect(),
+            | Action::ShotImageNote(r, ..)
+            | Action::LeaveOut(r, ..)
+            | Action::SendAnchor(r, ..) => p.shot_path(*r).into_iter().collect(),
+            Action::SetFrame(r, _) => {
+                let mut out: Vec<PathBuf> = p.shot_path(*r).into_iter().collect();
+                if let Ok(s) = p.shot(*r)
+                    && let Some(f) = s.frame
+                {
+                    out.push(p.root.join(f));
+                }
+                out
+            }
             Action::RemoveShotImage(r, i) => {
                 let mut out: Vec<PathBuf> = p.shot_path(*r).into_iter().collect();
                 if let Ok(s) = p.shot(*r)
@@ -721,6 +742,56 @@ impl App {
             Action::ShotImageNote(r, i, note) => {
                 p.set_shot_image_note(r, i, &note)?;
                 format!("{r} saved").into()
+            }
+            Action::SetFrame(r, file) => match p.set_frame(r, file.as_deref())? {
+                Some(dest) => Done {
+                    msg: format!("{r} starts on {}", p.rel(&dest)),
+                    made: vec![dest],
+                },
+                None => format!("{r} has no storyboard frame now").into(),
+            },
+            Action::LeaveOut(r, anchor, out) => {
+                let mut s = p.shot(r)?;
+                s.leave_out.retain(|a| *a != anchor);
+                if out {
+                    s.leave_out.push(anchor.clone());
+                }
+                // An element only attached for its pictures goes once none are left.
+                let named = shotline_core::handle::unique(&s.prompt);
+                for h in s.elements.clone() {
+                    if named.contains(&h) {
+                        continue;
+                    }
+                    let all: Vec<_> = p
+                        .anchors(&p.element(&h)?)?
+                        .iter()
+                        .map(|a| p.rel(a))
+                        .collect();
+                    if all.iter().all(|a| s.leave_out.contains(a)) {
+                        s.elements.retain(|e| *e != h);
+                        s.leave_out.retain(|a| !all.contains(a));
+                    }
+                }
+                p.save_shot(r, &s)?;
+                let what = if out { "left out of" } else { "put back in" };
+                format!("{anchor} {what} {r}").into()
+            }
+            Action::SendAnchor(r, handle, anchor) => {
+                let mut s = p.shot(r)?;
+                let named = shotline_core::handle::unique(&s.prompt).contains(&handle)
+                    || s.elements.contains(&handle);
+                if !named {
+                    s.elements.push(handle.clone());
+                    for a in p.anchors(&p.element(&handle)?)? {
+                        let a = p.rel(&a);
+                        if a != anchor && !s.leave_out.contains(&a) {
+                            s.leave_out.push(a);
+                        }
+                    }
+                }
+                s.leave_out.retain(|a| *a != anchor);
+                p.save_shot(r, &s)?;
+                format!("{anchor} sent with {r}").into()
             }
             Action::Timeline(t) => {
                 p.save_timeline(&t)?;
