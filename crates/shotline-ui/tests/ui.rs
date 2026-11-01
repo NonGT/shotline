@@ -263,6 +263,17 @@ fn start_a_film() {
     h.run();
     let dir = tmp.path().join("rain");
     h.get_by_label(&format!("Makes {}", dir.display()));
+
+    // Not into a folder that already has something in it.
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("notes.txt"), "").unwrap();
+    h.run();
+    h.get_by_label_contains("already has files in it");
+    h.get_by_label("Create film").click();
+    h.run();
+    assert!(!dir.join("shotline.toml").exists());
+    std::fs::remove_file(dir.join("notes.txt")).unwrap();
+    h.run();
     h.get_by_label("Create film").click();
     h.run();
     h.run();

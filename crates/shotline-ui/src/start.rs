@@ -382,6 +382,12 @@ impl Shell {
         name: &str,
         git: bool,
     ) -> shotline_core::Result<(Project, Option<Note>)> {
+        if has_files(dir) {
+            return Err(shotline_core::Error::Invalid(format!(
+                "{} already has files in it",
+                dir.display()
+            )));
+        }
         let p = Project::init(dir, Some(name))?;
         let note = match &self.git {
             Some(g) if git && !g.is_repo(dir) => {
@@ -536,8 +542,19 @@ impl Form {
             }
         });
         let dir = self.dir();
-        if let Some(d) = &dir {
-            hint(ui, &format!("Makes {}", d.display()));
+        let taken = dir.as_deref().is_some_and(has_files);
+        match &dir {
+            Some(d) if taken => {
+                ui.label(
+                    RichText::new(format!(
+                        "{} already has files in it. Pick another name or folder.",
+                        d.display()
+                    ))
+                    .color(theme::FLAG),
+                );
+            }
+            Some(d) => hint(ui, &format!("Makes {}", d.display())),
+            None => {}
         }
         ui.add_space(6.0);
         if has_git {
@@ -546,7 +563,8 @@ impl Form {
         ui.add_space(10.0);
         let create = ui
             .horizontal(|ui| {
-                let create = ui.add_enabled(dir.is_some(), egui::Button::new("Create film"));
+                let create =
+                    ui.add_enabled(dir.is_some() && !taken, egui::Button::new("Create film"));
                 buttons(ui);
                 create
             })
@@ -557,7 +575,7 @@ impl Form {
             ui.label(RichText::new(e).color(theme::FLAG));
         }
         match dir {
-            Some(dir) if create.clicked() || enter => Some(Opened::New {
+            Some(dir) if !taken && (create.clicked() || enter) => Some(Opened::New {
                 dir,
                 name: self.name.trim().into(),
                 git: has_git && self.git,
@@ -576,6 +594,11 @@ impl Form {
         let slug = Some(slugify(name)).filter(|s| !s.is_empty());
         Some(expand(&self.folder).join(slug.as_deref().unwrap_or("film")))
     }
+}
+
+/// A new film only goes in a folder of its own.
+fn has_files(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|mut r| r.next().is_some())
 }
 
 fn expand(folder: &str) -> PathBuf {
