@@ -1192,6 +1192,72 @@ fn release_what_a_dead_job_held() {
 }
 
 #[test]
+fn warn_about_stuck_jobs_on_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let home = tmp.path().join("home");
+    let books = p
+        .books(&home, &UserConfig::load(&home).unwrap(), &[])
+        .unwrap();
+    // One left unsent ten minutes ago, one that may well be on its way right now.
+    let now = jiff::Timestamp::now();
+    let mut ids = vec![];
+    for (model, ago) in [("fake/image", 10), ("fake/video", 0)] {
+        let j = p
+            .create_job(Job::new(
+                shotline_core::protocol::Op::ImageGenerate,
+                "fake",
+                model,
+            ))
+            .unwrap();
+        let ctx = Context {
+            job: j.id.to_string(),
+            take: None,
+            shot: None,
+            chapter: None,
+            op: "image.generate".into(),
+            plugin: "fake".into(),
+            model: model.into(),
+        };
+        let quote = Quote {
+            amount: 0.05,
+            unit: "USD".into(),
+            units: None,
+            unit_name: None,
+        };
+        let at = now - jiff::SignedDuration::from_mins(ago);
+        books.reserve(at, &ctx, &quote).unwrap();
+        ids.push(j.id);
+    }
+
+    let open = || {
+        let app = App::new(p.clone(), home.clone()).with_viewer(None).silent();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 1800.0))
+            .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+        h.run();
+        h
+    };
+    let mut h = open();
+    h.get_by_label_contains("A fake/image job from ");
+    h.get_by_label_contains("never finished and still holds 0.05 USD.");
+    h.get_by_label("Dismiss").click();
+    h.run();
+    assert!(h.query_by_label_contains("never finished").is_none());
+
+    let mut h = open();
+    h.get_by_label("Review…").click();
+    h.run();
+    assert!(h.query_by_label_contains("never finished").is_none());
+    h.get_by_label_contains("still pending as far as its job.toml says");
+    h.get_by_label("Nothing is running it any more").click();
+    h.run();
+    h.get_by_label("Release").click();
+    h.run_steps(8);
+    h.get_by_label(&format!("released {}, nothing spent", ids[0]));
+}
+
+#[test]
 fn opens_where_it_was_left() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Color32, RichText};
+use jiff::Timestamp;
 use jiff::civil::Date;
 use shotline_core::ledger::reconcile::Check;
 use shotline_core::ledger::report::{self, By, Row, Summary};
@@ -48,6 +49,11 @@ struct Held {
     /// As job.toml says; None without one.
     status: Option<String>,
     finished: bool,
+    /// The provider took it.
+    sent: bool,
+    time: Timestamp,
+    model: String,
+    held: String,
 }
 
 #[derive(Clone)]
@@ -176,15 +182,30 @@ impl Cost {
                         money(e.amount),
                         e.unit
                     ),
-                    job: e.job.unwrap_or_default(),
+                    job: e.job.clone().unwrap_or_default(),
                     status: j.as_ref().map(|j| j.status.to_string()),
-                    finished: j.is_none_or(|j| j.status.is_finished()),
+                    finished: j.as_ref().is_none_or(|j| j.status.is_finished()),
+                    sent: j.as_ref().is_some_and(|j| j.plugin_job.is_some()),
+                    time: e.time,
+                    model: e.model.clone().unwrap_or_else(|| "job".into()),
+                    held: format!("{} {}", money(e.amount), e.unit),
                 })
                 .collect(),
         })
     }
 
     /// The days to chart, oldest first, with nothing-spent days in between.
+    /// Jobs that look dead but still hold money: never sent after a few minutes, not done
+    /// after an hour, or done by job.toml and yet never closed in the ledger.
+    pub fn stuck(&self, now: Timestamp) -> Vec<String> {
+        let mins = |h: &Held| now.duration_since(h.time).as_secs() / 60;
+        self.held
+            .iter()
+            .filter(|h| h.finished || mins(h) >= if h.sent { 60 } else { 5 })
+            .map(|h| h.job.clone())
+            .collect()
+    }
+
     fn span(&self, span: Span) -> Vec<Date> {
         let first = match span {
             Span::Week => self.today.saturating_sub(jiff::Span::new().days(6)),
@@ -265,6 +286,60 @@ struct Form {
 }
 
 impl App {
+    /// A strip under the tabs, from opening the film until it's dealt with, about jobs that
+    /// still hold money but look like nothing is running them.
+    pub(crate) fn stuck_jobs(&mut self, ui: &mut egui::Ui) {
+        let Some(c) = &self.film.cost else { return };
+        let stuck: Vec<(usize, &Held)> = c
+            .held
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| self.stuck.contains(&h.job))
+            .collect();
+        let Some(&(first, h)) = stuck.first() else {
+            return;
+        };
+        let text = if stuck.len() == 1 {
+            format!(
+                "A {} job from {} never finished and still holds {}.",
+                h.model,
+                h.label.split(" · ").next().unwrap_or_default(),
+                h.held
+            )
+        } else {
+            format!("{} jobs never finished and still hold money.", stuck.len())
+        };
+        let (mut review, mut dismiss) = (false, false);
+        egui::Panel::top("stuck")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::RAISED)
+                    .inner_margin(egui::vec2(16.0, 6.0)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(text).color(theme::TUNGSTEN));
+                    ui.weak("If nothing is running it any more, release it.");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        dismiss = ui.button("Dismiss").clicked();
+                        review = ui.button("Review…").clicked();
+                    });
+                });
+            });
+        if review {
+            self.tab = crate::Tab::Cost;
+            let v = &mut self.cost_view;
+            v.tool = Tool::Release;
+            v.release = Form {
+                job: Some(first),
+                ..Form::default()
+            };
+        }
+        if review || dismiss {
+            self.stuck.clear();
+        }
+    }
+
     pub(crate) fn costs(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BAY))

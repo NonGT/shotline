@@ -132,6 +132,8 @@ pub struct App {
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
+    /// Jobs found holding money with nothing running them when the film was opened.
+    stuck: Vec<String>,
     thumbs: Thumbs,
     /// The tab and shot last written to the place file, when the app keeps one.
     place: Option<(Tab, Option<ShotRef>, Option<String>)>,
@@ -296,6 +298,7 @@ impl App {
             shot: None,
             takes: vec![],
             status: None,
+            stuck: vec![],
             thumbs: Thumbs::default(),
             place: None,
             themed: false,
@@ -321,6 +324,8 @@ impl App {
             dialog: None,
         };
         app.reload();
+        let now = app.project.clock.now();
+        app.stuck = app.film.cost.as_ref().map_or(vec![], |c| c.stuck(now));
         app
     }
 
@@ -641,6 +646,7 @@ impl App {
                     });
                 });
             });
+        self.stuck_jobs(ui);
         let (msg, err) = self.status.clone().unwrap_or_default();
         egui::Panel::bottom("status")
             .frame(

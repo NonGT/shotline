@@ -506,7 +506,9 @@ that, the Ledger row does what `cost verify`, `cost rates`, `cost reconcile`, `c
 A reservation stays open when the process running its job dies (the app was closed mid-take, say).
 `cost release` closes it with nothing spent and marks the job cancelled. It refuses a job whose
 job.toml still says pending or running unless `--sure`, since a job that really is running would
-then find no reservation to charge against.
+then find no reservation to charge against. When a film opens, the app shows a strip under the tabs for jobs
+that look like that: still not sent after five minutes, not done after an hour, or done by their
+job.toml yet never closed in the ledger. Review opens the release form on the first one.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first: an element's "Make image…" shows
