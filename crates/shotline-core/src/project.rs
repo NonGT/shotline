@@ -165,6 +165,9 @@ const STORY: &str = "\
 ## Synopsis
 ";
 
+/// Characters of story.md a draft gets.
+const STORY_BRIEF: usize = 1500;
+
 const STYLE: &str = "\
 <!-- Look of the film: palette, lighting, camera, lenses. Anything outside comments goes into every prompt. -->
 ";
@@ -270,6 +273,45 @@ impl Project {
             return Ok(String::new());
         }
         Ok(strip_comments(&fsx::read(&path)?).trim().to_string())
+    }
+
+    /// story.md cut down for a text model: no comments, no title, no empty sections, and
+    /// "Logline: ..." for each `## Logline` section. Empty if nothing's been written.
+    pub fn story_brief(&self) -> Result<String> {
+        let path = self.root.join("story.md");
+        if !path.exists() {
+            return Ok(String::new());
+        }
+        let text = strip_comments(&fsx::read(&path)?);
+        let mut out: Vec<String> = vec![];
+        let mut head: Option<&str> = None;
+        let mut body: Vec<&str> = vec![];
+        let mut flush = |head: Option<&str>, body: &mut Vec<&str>| {
+            let b = body.join("\n").trim().to_string();
+            body.clear();
+            if !b.is_empty() {
+                out.push(match head {
+                    Some(h) => format!("{h}: {b}"),
+                    None => b,
+                });
+            }
+        };
+        for line in text.lines() {
+            if let Some(h) = line.strip_prefix("## ") {
+                flush(head, &mut body);
+                head = Some(h.trim());
+            } else if !line.starts_with("# ") {
+                body.push(line);
+            }
+        }
+        flush(head, &mut body);
+        let mut brief = out.join("\n\n");
+        // A long story would crowd out the shot itself.
+        if let Some((i, _)) = brief.char_indices().nth(STORY_BRIEF) {
+            brief.truncate(i);
+            brief = format!("{}…", brief.trim_end());
+        }
+        Ok(brief)
     }
 
     /// Path relative to the project root with `/` separators on every OS.

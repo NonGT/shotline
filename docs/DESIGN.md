@@ -129,10 +129,11 @@ aspect = "9:16"                # defaults to the project's
 With references attached, fal goes to the model's `/edit` endpoint and Venice to `multi-edit`.
 
 Plot can be written in Thai and the prompt drafted from it by a text model (`text.generate`).
-`shot draft` fills its template with the plot, the elements and their @handles, who speaks and the
-current prompt: `draft-video.md` asks for a video prompt, `draft-image.md` for a still (saved as
-the shot's `frame_prompt`, which storyboard frames use instead of the prompt) and `translate.md`
-for a plain translation. `element draft` translates a description. Lines are never sent, they
+`shot draft` fills its template with the plot, the elements and their @handles, who speaks, the
+current prompt and story.md cut down (no title or empty sections, at most 1500 characters).
+`draft-video.md` asks for a video prompt, `draft-image.md` for a still (saved as the shot's
+`frame_prompt`, which storyboard frames use instead of the prompt) and `translate.md` for a plain
+translation, which gets the plot alone. `element draft` translates a description. Lines are never sent, they
 stay Thai for TTS and lip sync. A draft that uses a @handle that isn't an element is refused. It
 shows the draft and asks before saving, unless `--write`.
 

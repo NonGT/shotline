@@ -11,5 +11,8 @@ Elements:
 
 The prompt so far, to improve on: {prompt}
 
+The film's story, so the shot fits it. Use it for mood and who people are; don't retell it:
+{story}
+
 The shot:
 {plot}

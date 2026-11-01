@@ -126,6 +126,12 @@ pub fn build_draft(
                     p => p,
                 };
                 let duration = shot.duration.unwrap_or(cfg.duration).to_string();
+                let story = project.story_brief()?;
+                let story = if story.is_empty() {
+                    "not written yet"
+                } else {
+                    &story
+                };
                 render(
                     &t,
                     &[
@@ -133,6 +139,7 @@ pub fn build_draft(
                         ("speakers", &speakers),
                         ("prompt", prompt),
                         ("duration", &duration),
+                        ("story", story),
                         ("plot", plot),
                     ],
                 )

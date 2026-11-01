@@ -119,3 +119,37 @@ fn finishing() {
     assert!(e.to_string().contains("@pakaa"), "{e}");
     assert!(finish_draft(&p, "  \n").is_err());
 }
+
+#[test]
+fn drafts_know_the_story() {
+    let (dir, p, r) = film();
+    // A new film's story.md is only headings.
+    let b = draft(&p, DraftFor::Shot(r, Draft::Video)).unwrap();
+    assert!(
+        b.text.contains("don't retell it:\nnot written yet\n"),
+        "{}",
+        b.text
+    );
+
+    fs::write(
+        dir.path().join("story.md"),
+        "# Forest\n\n## Logline\nผกาพาทีมหลงป่า\n\n## World\n\n## Synopsis\n<!-- todo -->\nทีมเดินเข้าป่า\nแล้วหลงทาง\n",
+    )
+    .unwrap();
+    assert_eq!(
+        p.story_brief().unwrap(),
+        "Logline: ผกาพาทีมหลงป่า\n\nSynopsis: ทีมเดินเข้าป่า\nแล้วหลงทาง"
+    );
+    for how in [Draft::Video, Draft::Image] {
+        let t = draft(&p, DraftFor::Shot(r, how)).unwrap().text;
+        assert!(t.contains("Logline: ผกาพาทีมหลงป่า"), "{t}");
+        assert!(t.ends_with("ผกาเดินเข้าป่าตอนเย็น"), "{t}");
+    }
+    let t = draft(&p, DraftFor::Shot(r, Draft::Translate)).unwrap().text;
+    assert!(!t.contains("หลงป่า"), "{t}");
+
+    fs::write(dir.path().join("story.md"), "ก".repeat(3000)).unwrap();
+    let brief = p.story_brief().unwrap();
+    assert_eq!(brief.chars().count(), 1501);
+    assert!(brief.ends_with("ก…"));
+}

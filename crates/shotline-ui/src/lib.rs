@@ -789,7 +789,12 @@ impl App {
                 page(ui, PAGE, |ui| {
                     ui.set_max_width(720.0);
                     let t = &mut self.texts;
-                    text_field(ui, "Story", &mut t.story, "What the film is about");
+                    text_field(
+                        ui,
+                        "Story",
+                        &mut t.story,
+                        "What the film is about; shot drafts read it",
+                    );
                     ui.add_space(14.0);
                     text_field(
                         ui,
