@@ -43,6 +43,10 @@ pub fn apply(ctx: &egui::Context) {
         style.spacing.button_padding = egui::vec2(10.0, 4.0);
 
         let v = &mut style.visuals;
+        // A row centres what's in it on a band this tall, but a taller widget hangs down from
+        // the band's top instead, so a label beside it sits high. Fields and buttons are a 14px
+        // line plus padding, about 27px; the band has to fit them.
+        style.spacing.interact_size.y = 28.0;
         *v = egui::Visuals::dark();
         v.panel_fill = BAY;
         v.window_fill = BAY;

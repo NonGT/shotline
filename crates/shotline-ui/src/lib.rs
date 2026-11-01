@@ -1191,7 +1191,7 @@ impl App {
                         .suffix(" s"),
                 );
                 ui.end_row();
-                ui.weak("Starts");
+                top_label(ui, "Starts");
                 ui.vertical(|ui| {
                     ui.radio_value(&mut f.transition, Transition::Cut, "on a cut");
                     ui.radio_value(
@@ -1694,7 +1694,7 @@ fn settings_rows(ui: &mut egui::Ui, schema: Option<&serde_json::Value>, text: &m
         .and_then(|p| p.as_object())
         .filter(|p| !p.is_empty());
     let Some(props) = props else {
-        let l = ui.weak("Settings");
+        let l = top_label(ui, "Settings");
         ui.add(
             egui::TextEdit::multiline(text)
                 .hint_text(RichText::new("key = value, one a line").color(theme::DUST))
@@ -1793,7 +1793,33 @@ fn setting(ui: &mut egui::Ui, key: &str, p: &serde_json::Value, table: &mut toml
                 .unwrap_or(lo.unwrap_or(0.0));
             let step = if whole { 1.0 } else { 0.01 };
             let r = match (lo, hi) {
-                (Some(lo), Some(hi)) => ui.add(egui::Slider::new(&mut x, lo..=hi).step_by(step)),
+                (Some(lo), Some(hi)) => {
+                    // The handle grows with the row height, so it gets a row of its own size
+                    // and egui's usual handle.
+                    let size = egui::vec2(ui.spacing().slider_width, ui.spacing().interact_size.y);
+                    let center = egui::Layout::left_to_right(egui::Align::Center);
+                    let rail = ui
+                        .allocate_ui_with_layout(size, center, |ui| {
+                            ui.spacing_mut().interact_size.y = 18.0;
+                            ui.add(
+                                egui::Slider::new(&mut x, lo..=hi)
+                                    .step_by(step)
+                                    .show_value(false),
+                            )
+                        })
+                        .inner;
+                    let digits = if whole { 0 } else { 2 };
+                    let value = ui.add(
+                        egui::DragValue::new(&mut x)
+                            .range(lo..=hi)
+                            .speed(step)
+                            .fixed_decimals(digits),
+                    );
+                    value.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &label)
+                    });
+                    rail | value
+                }
                 _ => ui.add(egui::DragValue::new(&mut x).speed(step)),
             };
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, &label));
@@ -1888,3 +1914,15 @@ pub fn run(
     )
     .map_err(|e| anyhow::anyhow!("can't open the window: {e}"))
 }
+/// A grid label for a cell several rows tall, beside the first row rather than the middle.
+fn top_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.vertical(|ui| {
+        let row = egui::vec2(0.0, ui.spacing().interact_size.y);
+        let center = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(row, center, |ui| ui.weak(text))
+            .inner
+    })
+    .inner
+}
+
+// No fill of its own, so it lights up on hover like every other button.
