@@ -225,6 +225,17 @@ impl Books {
         self.write(e, |entries| still_open(entries, job), false)
     }
 
+    /// Closes a reservation by hand, for a job that will never say how it ended (the process
+    /// running it was killed, say). Nothing is spent.
+    pub fn let_go(&self, now: Timestamp, job: &str, note: &str) -> Result<Entry> {
+        let reserve = self.reservation(job)?;
+        let mut e = line(now, Kind::Release, &reserve);
+        e.amount = 0.0;
+        e.base = 0.0;
+        e.note = Some(note.trim()).filter(|n| !n.is_empty()).map(Into::into);
+        self.write(e, |entries| still_open(entries, job), false)
+    }
+
     /// Money back for a charged job.
     pub fn refund(&self, now: Timestamp, job: &str, q: &Quote, note: &str) -> Result<Entry> {
         let entries = self.ledger.entries()?;

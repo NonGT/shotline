@@ -371,3 +371,28 @@ fn reconciling() {
     }));
     // p3 was charged and refunded, nets to zero, so not reported missing
 }
+
+#[test]
+fn let_go_of_a_dead_job() {
+    let dir = TempDir::new().unwrap();
+    let b = books(&dir, Budgets::default());
+    let now = at(T);
+    b.reserve(now, &job("j1", "t1", "01-010", 1), &usd(0.4))
+        .unwrap();
+    b.reserve(now, &job("j2", "t1", "01-010", 1), &usd(0.2))
+        .unwrap();
+    b.charge(now, "j1", None, None, None).unwrap();
+    let open = shotline_ledger::open_reservations(&b.ledger.entries().unwrap())
+        .into_iter()
+        .map(|e| e.job.clone().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(open, ["j2"]);
+
+    let e = b.let_go(now, "j2", "app was closed mid-run").unwrap();
+    assert_eq!((e.kind, e.base), (Kind::Release, 0.0));
+    assert_eq!(e.note.as_deref(), Some("app was closed mid-run"));
+    assert!(shotline_ledger::open_reservations(&b.ledger.entries().unwrap()).is_empty());
+    // Once only, and never for a charged job.
+    assert!(b.let_go(now, "j2", "").is_err());
+    assert!(b.let_go(now, "j1", "").is_err());
+}

@@ -38,6 +38,16 @@ pub(crate) struct Cost {
     units: Vec<String>,
     /// Charges that can be refunded, newest first.
     charges: Vec<Charged>,
+    /// Money held for jobs nothing has closed, oldest first.
+    held: Vec<Held>,
+}
+
+struct Held {
+    job: String,
+    label: String,
+    /// As job.toml says; None without one.
+    status: Option<String>,
+    finished: bool,
 }
 
 #[derive(Clone)]
@@ -60,6 +70,7 @@ struct Model {
 
 impl Cost {
     pub fn new(
+        held: Vec<(Entry, Option<shotline_core::Job>)>,
         entries: &[Entry],
         summary: Summary,
         by_shot: Vec<Row>,
@@ -155,6 +166,21 @@ impl Cost {
             today: now.to_zoned(tz.clone()).date(),
             units,
             charges,
+            held: held
+                .into_iter()
+                .map(|(e, j)| Held {
+                    label: format!(
+                        "{} · {} · {} {}",
+                        e.time.to_zoned(tz.clone()).strftime("%b %-d %H:%M"),
+                        e.model.as_deref().unwrap_or("job"),
+                        money(e.amount),
+                        e.unit
+                    ),
+                    job: e.job.unwrap_or_default(),
+                    status: j.as_ref().map(|j| j.status.to_string()),
+                    finished: j.is_none_or(|j| j.status.is_finished()),
+                })
+                .collect(),
         })
     }
 
@@ -202,6 +228,7 @@ pub(crate) struct View {
     checks: Arc<Mutex<Ask<Vec<Check>>>>,
     adjust: Form,
     refund: Form,
+    release: Form,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -213,6 +240,7 @@ enum Tool {
     Reconcile,
     Adjust,
     Refund,
+    Release,
 }
 
 /// Something asked of a plugin on another thread.
@@ -229,8 +257,10 @@ struct Form {
     amount: String,
     unit: String,
     note: String,
-    /// Index into `Cost::charges`, for a refund.
+    /// Index into `Cost::charges` for a refund, `Cost::held` for a release.
     job: Option<usize>,
+    /// Nothing is running the job any more, whatever job.toml says.
+    sure: bool,
 }
 
 impl App {
@@ -607,7 +637,9 @@ pub(crate) fn load(
     }
     let s = report::summary(&entries, &b.currency, &b.rates, &p.selected_take_ids()?)?;
     let rows = report::group(&entries, By::Shot, &b.currency, &b.rates, &b.tz)?;
+    let held = p.held(&b)?;
     Ok(Some(Cost::new(
+        held,
         &entries,
         s,
         rows,
@@ -652,6 +684,11 @@ impl App {
                     "record a fee, or a promo credit as a negative",
                 ),
                 (Tool::Refund, "Refund…", "record money back for a job"),
+                (
+                    Tool::Release,
+                    "Release…",
+                    "let go of money held for a job that will never finish",
+                ),
             ] {
                 if ui
                     .selectable_label(v.tool == t, name)
@@ -696,6 +733,7 @@ impl App {
                     Tool::Reconcile => checks(ui, &v.checks),
                     Tool::Adjust => book = adjust(ui, &mut v.adjust, &c.units),
                     Tool::Refund => book = refund(ui, &mut v.refund, &c.charges),
+                    Tool::Release => book = release(ui, &mut v.release, &c.held),
                     Tool::None => {}
                 }
             });
@@ -717,6 +755,11 @@ impl App {
                 let q = quote(f.amount.trim().parse()?, &f.unit);
                 let e = b.adjust(now, &q, f.note.trim())?;
                 format!("adjusted {} {}", money(e.base), e.base_currency)
+            } else if t == Tool::Release {
+                let f = &v.release;
+                let h = &c.held[f.job.unwrap_or_default()];
+                self.project.release_held(&b, &h.job, &f.note, f.sure)?;
+                format!("released {}, nothing spent", h.job)
             } else {
                 let f = &v.refund;
                 let ch = &c.charges[f.job.unwrap_or_default()];
@@ -730,6 +773,7 @@ impl App {
                 let v = &mut self.cost_view;
                 v.adjust = Form::default();
                 v.refund = Form::default();
+                v.release = Form::default();
                 v.tool = Tool::None;
                 v.since = None;
                 self.reload();
@@ -991,6 +1035,83 @@ fn refund(ui: &mut egui::Ui, f: &mut Form, charges: &[Charged]) -> bool {
             go = ui
                 .add_enabled(ok, egui::Button::new("Record refund"))
                 .on_disabled_hover_text("a job, and an amount above 0")
+                .clicked();
+            ui.end_row();
+        });
+    go
+}
+
+/// The release form. True once it's to be booked.
+fn release(ui: &mut egui::Ui, f: &mut Form, held: &[Held]) -> bool {
+    if held.is_empty() {
+        hint(ui, "Nothing is held.");
+        return false;
+    }
+    hint(
+        ui,
+        "Money held for a job that will never say how it ended, e.g. the app was closed while it \
+         ran. Releasing spends nothing. If the provider charged anyway, Compare with providers \
+         shows it.",
+    );
+    ui.add_space(6.0);
+    let mut go = false;
+    egui::Grid::new("release")
+        .num_columns(2)
+        .spacing(egui::vec2(12.0, 8.0))
+        .show(ui, |ui| {
+            let l = ui.weak("Job");
+            egui::ComboBox::from_id_salt("release job")
+                .selected_text(f.job.map_or("pick the job", |i| held[i].label.as_str()))
+                .width(360.0)
+                .show_ui(ui, |ui| {
+                    for (i, h) in held.iter().enumerate() {
+                        ui.selectable_value(&mut f.job, Some(i), &h.label)
+                            .on_hover_text(&h.job);
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+            ui.end_row();
+            let pick = f.job.map(|i| &held[i]);
+            if let Some(h) = pick {
+                ui.weak("Status");
+                match &h.status {
+                    Some(s) if !h.finished => {
+                        ui.label(
+                            RichText::new(format!(
+                                "still {s} as far as its job.toml says; if it is running \
+                                 somewhere, its charge would have nothing to close"
+                            ))
+                            .color(theme::FLAG),
+                        );
+                    }
+                    Some(s) => {
+                        ui.label(s.as_str());
+                    }
+                    None => {
+                        ui.weak("no job.toml for it");
+                    }
+                }
+                ui.end_row();
+                if !h.finished {
+                    ui.label("");
+                    ui.checkbox(&mut f.sure, "Nothing is running it any more");
+                    ui.end_row();
+                }
+            }
+            let l = ui.weak("Note");
+            ui.add(
+                egui::TextEdit::singleline(&mut f.note)
+                    .desired_width(360.0)
+                    .hint_text("released by hand"),
+            )
+            .labelled_by(l.id);
+            ui.end_row();
+            ui.label("");
+            let ok = pick.is_some_and(|h| h.finished || f.sure);
+            go = ui
+                .add_enabled(ok, egui::Button::new("Release"))
+                .on_disabled_hover_text("a job, and for one that hasn't ended, that you're sure")
                 .clicked();
             ui.end_row();
         });

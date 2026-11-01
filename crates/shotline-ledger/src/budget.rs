@@ -37,6 +37,21 @@ pub fn exposure(entries: &[Entry], f: impl Fn(&Entry) -> bool) -> f64 {
         .sum()
 }
 
+/// Reservations nothing has closed yet: jobs still running, or ones that died before they could
+/// say how they ended. Oldest first.
+pub fn open_reservations(entries: &[Entry]) -> Vec<&Entry> {
+    let closed: HashSet<_> = entries
+        .iter()
+        .filter(|e| matches!(e.kind, Kind::Charge | Kind::Release))
+        .filter_map(Entry::job_key)
+        .collect();
+    entries
+        .iter()
+        .filter(|e| e.kind == Kind::Reserve)
+        .filter(|e| e.job_key().is_some_and(|k| !closed.contains(&k)))
+        .collect()
+}
+
 pub(crate) struct Scope<'a> {
     pub name: &'a str,
     pub limit: Option<f64>,

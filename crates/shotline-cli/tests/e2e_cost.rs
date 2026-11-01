@@ -237,3 +237,48 @@ fn reconcile_against_the_fake_plugin() {
                 )),
         );
 }
+
+#[test]
+fn release_what_a_dead_job_held() {
+    let tmp = TempDir::new().unwrap();
+    let (p, jobs) = film(&tmp);
+    let held = &jobs[2];
+    shotline(&tmp)
+        .args(["cost", "release"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(format!("{held}  "))
+                .and(predicate::str::contains("0.5 USD  fake/video  pending")),
+        );
+    // It still says pending, so it might be running somewhere.
+    shotline(&tmp)
+        .args(["cost", "release", &held[..10]])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("still pending"));
+    shotline(&tmp)
+        .args([
+            "cost",
+            "release",
+            &held[..10],
+            "--sure",
+            "--note",
+            "app was killed",
+        ])
+        .assert()
+        .success()
+        .stdout(format!("released {held}, nothing spent\n"));
+    assert_eq!(p.job(held).unwrap().status, JobStatus::Cancelled);
+    shotline(&tmp)
+        .arg("cost")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("held").not());
+    shotline(&tmp)
+        .args(["cost", "release"])
+        .assert()
+        .success()
+        .stdout("nothing held\n");
+    shotline(&tmp).args(["cost", "verify"]).assert().success();
+}

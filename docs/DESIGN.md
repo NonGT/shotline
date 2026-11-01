@@ -443,6 +443,7 @@ shotline cost [--by chapter|shot|op|plugin|day] [--csv]
 shotline cost verify | rates | reconcile [--plugin p]
 shotline cost adjust <amount> <unit> --note ...
 shotline cost refund <job> <amount> <unit> [--note ...]
+shotline cost release [<job> [--note ...] [--sure]]       money held for jobs that never ended
 shotline mcp [-C dir]
 shotline ui [dir]
 ```
@@ -450,7 +451,8 @@ shotline ui [dir]
 The MCP tools mirror these (`shot_add`, `take`, `timeline_render`, ...), over stdio with rmcp. Each
 call runs the shotline binary itself as a child process in the project folder and returns what it
 printed, so tools and commands can't drift apart and nothing reads the MCP stream from stdin. Lines
-go out as progress notifications while a take runs. `cost adjust` and `cost refund` aren't tools:
+go out as progress notifications while a take runs. `cost adjust`, `cost refund` and
+`cost release` aren't tools:
 corrections to the ledger are for people.
 
 `take` and `run` without `confirm: true` answer no at the prompt, so the agent gets the price and
@@ -498,8 +500,13 @@ colour matching, music tracks with start and volume; a track from outside the fi
 
 The Cost tab charts spending per day as stacked bars, one colour per model (last 7 or 30 days,
 or all of it), with a table of models under it (usage, jobs, money) and the spend per shot. Under
-that, the Ledger row does what `cost verify`, `cost rates`, `cost reconcile`, `cost adjust` and
-`cost refund` do; rates and reconcile ask the plugins on another thread.
+that, the Ledger row does what `cost verify`, `cost rates`, `cost reconcile`, `cost adjust`,
+`cost refund` and `cost release` do; rates and reconcile ask the plugins on another thread.
+
+A reservation stays open when the process running its job dies (the app was closed mid-take, say).
+`cost release` closes it with nothing spent and marks the job cancelled. It refuses a job whose
+job.toml still says pending or running unless `--sure`, since a job that really is running would
+then find no reservation to charge against.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first: an element's "Make image…" shows

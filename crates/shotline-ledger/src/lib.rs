@@ -10,7 +10,7 @@ pub mod reconcile;
 pub mod report;
 
 pub use books::{Books, Context, GlobalLimit};
-pub use budget::Budgets;
+pub use budget::{Budgets, open_reservations};
 pub use entry::{Entry, Kind, is_currency, pricing};
 pub use ledger::{Ledger, Problem};
 pub use rates::{Converted, RateLine, Rates, parse_rate};

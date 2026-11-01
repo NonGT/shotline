@@ -353,6 +353,34 @@ pub fn adjust(p: &Project, amount: f64, unit: &str, note: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn release(p: &Project, job: Option<&str>, note: &str, sure: bool) -> Result<()> {
+    let b = books(p)?;
+    let Some(job) = job else {
+        let held = p.held(&b)?;
+        if held.is_empty() {
+            println!("nothing held");
+        }
+        for (e, j) in held {
+            let status = j.map_or("no job.toml".to_string(), |j| j.status.to_string());
+            println!(
+                "{}  {}  {} {}  {}  {status}",
+                e.job.as_deref().unwrap_or("-"),
+                e.time.strftime("%Y-%m-%d %H:%M"),
+                money(e.amount),
+                e.unit,
+                e.model.as_deref().unwrap_or("-"),
+            );
+        }
+        return Ok(());
+    };
+    let e = p.release_held(&b, job, note, sure)?;
+    println!(
+        "released {}, nothing spent",
+        e.job.as_deref().unwrap_or(job)
+    );
+    Ok(())
+}
+
 pub fn refund(p: &Project, job: &str, amount: f64, unit: &str, note: &str) -> Result<()> {
     let id = p.job(job)?.id.to_string();
     let e = books(p)?.refund(p.clock.now(), &id, &quote(amount, unit), note)?;

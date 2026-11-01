@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use shotline_ledger::{Books, GlobalLimit, Ledger, Rates};
+use shotline_ledger::{Books, Entry, GlobalLimit, Ledger, Rates, open_reservations};
 use shotline_protocol::Rate;
 
-use crate::{Error, Money, Project, Result, fsx};
+use crate::error::invalid;
+use crate::{Error, Job, JobStatus, Money, Project, Result, fsx};
 
 /// `~/.config/shotline/config.toml`: what applies across all films.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -166,6 +167,66 @@ impl Project {
                 per_day: user.budget.per_day,
             }),
         })
+    }
+
+    /// Money still held for jobs, oldest first, each with its job as job.toml has it (None if
+    /// there's no job.toml for it).
+    pub fn held(&self, books: &Books) -> Result<Vec<(Entry, Option<Job>)>> {
+        let entries = books.ledger.entries().map_err(ledger_err)?;
+        Ok(open_reservations(&entries)
+            .into_iter()
+            .map(|e| {
+                let job = e.job.as_deref().and_then(|j| self.job(j).ok());
+                (e.clone(), job)
+            })
+            .collect())
+    }
+
+    /// Lets go of the money held for `job` (an id or the start of one). Unless `sure`, only for
+    /// a job that has finished: one still running would find nothing to charge against. A job
+    /// that never finished is marked cancelled.
+    pub fn release_held(&self, books: &Books, job: &str, note: &str, sure: bool) -> Result<Entry> {
+        let want = job.to_ascii_uppercase();
+        let held = self.held(books)?;
+        let mut hits = held
+            .iter()
+            .filter(|(e, _)| e.job.as_deref().is_some_and(|j| j.starts_with(&want)));
+        let Some((e, j)) = hits.next() else {
+            return invalid(format!("nothing is held for job {job}"));
+        };
+        if hits.next().is_some() {
+            return invalid(format!(
+                "{job} starts more than one held job id; give more of it"
+            ));
+        }
+        if let Some(j) = j
+            && !j.status.is_finished()
+            && !sure
+        {
+            return invalid(format!(
+                "job {} is still {} as far as its job.toml says; if nothing is running it any \
+                 more, say you're sure",
+                j.id, j.status
+            ));
+        }
+        let id = e.job.clone().unwrap_or_default();
+        let note = if note.trim().is_empty() {
+            "released by hand"
+        } else {
+            note
+        };
+        let out = books
+            .let_go(self.clock.now(), &id, note)
+            .map_err(ledger_err)?;
+        if let Some(j) = j
+            && !j.status.is_finished()
+        {
+            let mut j = j.clone();
+            j.status = JobStatus::Cancelled;
+            j.error = Some(note.into());
+            self.save_job(&j)?;
+        }
+        Ok(out)
     }
 
     /// Ids of every selected take, i.e. what's in the cut.

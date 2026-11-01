@@ -214,6 +214,16 @@ enum CostCmd {
         #[arg(long)]
         note: String,
     },
+    /// Money held for jobs that haven't ended; with a job, let go of it
+    Release {
+        /// The job, or the start of its id; leave out to list what's held
+        job: Option<String>,
+        #[arg(long, default_value = "")]
+        note: String,
+        /// The job isn't running any more, whatever its job.toml says
+        #[arg(long)]
+        sure: bool,
+    },
     /// Record money back for a job
     Refund {
         job: String,
@@ -825,6 +835,9 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 Some(CostCmd::Adjust { amount, unit, note }) => {
                     cost::adjust(&p, *amount, unit, note)?
+                }
+                Some(CostCmd::Release { job, note, sure }) => {
+                    cost::release(&p, job.as_deref(), note, *sure)?
                 }
                 Some(CostCmd::Refund {
                     job,

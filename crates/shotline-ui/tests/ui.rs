@@ -1123,6 +1123,73 @@ fn elements_story_and_cost() {
 }
 
 #[test]
+fn release_what_a_dead_job_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let home = tmp.path().join("home");
+    // A job the app was closed on: held, never sent.
+    let j = p
+        .create_job(Job::new(
+            shotline_core::protocol::Op::ImageGenerate,
+            "fake",
+            "fake/image",
+        ))
+        .unwrap();
+    let books = p
+        .books(&home, &UserConfig::load(&home).unwrap(), &[])
+        .unwrap();
+    let ctx = Context {
+        job: j.id.to_string(),
+        take: None,
+        shot: None,
+        chapter: None,
+        op: "image.generate".into(),
+        plugin: "fake".into(),
+        model: "fake/image".into(),
+    };
+    let quote = Quote {
+        amount: 0.05,
+        unit: "USD".into(),
+        units: None,
+        unit_name: None,
+    };
+    books.reserve(jiff::Timestamp::now(), &ctx, &quote).unwrap();
+
+    let app = App::new(p.clone(), home).with_viewer(None).silent();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 1800.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cost").click();
+    h.run();
+    h.get_by_label("0.05 USD held for jobs still running");
+    h.get_by_label("Release…").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Job").click();
+    h.run();
+    h.get_by_label_contains("fake/image · 0.05 USD").click();
+    h.run();
+    h.get_by_label_contains("still pending as far as its job.toml says");
+    // Not until you say nothing is running it.
+    h.get_by_label("Release").click();
+    h.run();
+    assert!(p.job(&j.id.to_string()).unwrap().status == JobStatus::Pending);
+    h.get_by_label("Nothing is running it any more").click();
+    h.run();
+    h.get_by_label("Release").click();
+    h.run_steps(8);
+    h.get_by_label(&format!("released {}, nothing spent", j.id));
+    assert!(
+        h.query_by_label("0.05 USD held for jobs still running")
+            .is_none()
+    );
+    assert_eq!(
+        p.job(&j.id.to_string()).unwrap().status,
+        JobStatus::Cancelled
+    );
+}
+
+#[test]
 fn opens_where_it_was_left() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
