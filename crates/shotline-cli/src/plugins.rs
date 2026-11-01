@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use shotline_builtin::fal::{self, Fal};
-use shotline_core::protocol::Description;
+use shotline_core::protocol::{Description, VoiceInfo};
 use shotline_core::{Catalog, Project, user_dir};
 use shotline_plugin::conformance::{self, Options};
 use shotline_plugin::discovery::{self, Entry, Source};
@@ -182,6 +182,26 @@ pub fn balance(installed: &Installed, only: Option<&str>) -> Result<()> {
                 println!("{}  can't tell", p.name)
             }
             Err(e) => println!("{}  {e}", p.name),
+        }
+    }
+    Ok(())
+}
+
+/// The voices a plugin's audio.tts can use.
+pub fn voices(installed: &Installed, name: &str) -> Result<Vec<VoiceInfo>> {
+    let plugin = open(installed, name)?;
+    match runtime().block_on(plugin.voices()) {
+        Ok(v) => Ok(v.voices),
+        Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't list its voices"),
+        Err(e) => bail!("{name}: {e}"),
+    }
+}
+
+pub fn print_voices(installed: &Installed, name: &str) -> Result<()> {
+    for v in voices(installed, name)? {
+        match &v.description {
+            Some(d) => println!("{}  {}  {d}", v.id, v.name),
+            None => println!("{}  {}", v.id, v.name),
         }
     }
     Ok(())

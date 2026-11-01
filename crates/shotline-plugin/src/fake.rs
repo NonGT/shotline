@@ -23,7 +23,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use shotline_protocol::{
     Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
-    PROTOCOL_VERSION, PluginError, Quote, Rate, Rates, Request, State, Status, Usage,
+    PROTOCOL_VERSION, PluginError, Quote, Rate, Rates, Request, State, Status, Usage, VoiceInfo,
+    Voices,
 };
 
 use crate::{Plugin, Result};
@@ -87,6 +88,14 @@ fn models() -> Vec<ModelInfo> {
         ModelInfo {
             id: "fake/tts".into(),
             op: Op::AudioTts,
+            voice_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "warmth": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5},
+                    "whisper": {"type": "boolean", "default": false},
+                    "mood": {"type": "string", "enum": ["calm", "angry"]}
+                }
+            })),
             ..ModelInfo::default()
         },
         ModelInfo {
@@ -416,6 +425,17 @@ impl Plugin for FakePlugin {
                 amount: *self.balance.lock().unwrap(),
                 unit: "USD".into(),
             }],
+        })
+    }
+
+    async fn voices(&self) -> Result<Voices> {
+        let v = |id: &str, name: &str| VoiceInfo {
+            id: id.into(),
+            name: name.into(),
+            ..VoiceInfo::default()
+        };
+        Ok(Voices {
+            voices: vec![v("fake-warm", "Warm"), v("fake-bright", "Bright")],
         })
     }
 

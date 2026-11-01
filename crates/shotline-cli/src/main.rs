@@ -248,6 +248,10 @@ enum PluginCmd {
     Balance {
         name: Option<String>,
     },
+    /// The voices a text to speech plugin can use, for `element voice --voice-id`
+    Voices {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -744,6 +748,9 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Plugin(PluginCmd::Doctor { ref name }) => plugins::doctor(&plugins::load(), name)?,
         Cmd::Plugin(PluginCmd::Balance { ref name }) => {
             plugins::balance(&plugins::load(), name.as_deref())?
+        }
+        Cmd::Plugin(PluginCmd::Voices { ref name }) => {
+            plugins::print_voices(&plugins::load(), name)?
         }
         Cmd::Timeline { ref cmd } => {
             let p = open()?;

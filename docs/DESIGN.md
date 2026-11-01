@@ -413,7 +413,7 @@ says.
 shotline init <dir> [--no-git]
 shotline story | style [--set text]
 shotline doctor
-shotline plugin ls | doctor <name> | balance [name]
+shotline plugin ls | doctor <name> | balance [name] | voices <name>
 shotline element add <kind> <name> [--handle h] [--desc ...]
 shotline element anchor <handle> (--file img | --generate [--prompt ..] [--plugin p] [--model m] [--yes])
 shotline element draft <handle> [--write] [--plugin p] [--model m] [--yes]

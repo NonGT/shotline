@@ -4,7 +4,8 @@
 //! the audio straight away, so `run` does the work and `poll` just says it's done. ElevenLabs bills
 //! in credits per character; quotes count one credit per character (`elevenlabs-credit`).
 //! `GET /v1/user/subscription` (needs a key with `user_read`) gives what a credit costs, the next
-//! invoice over the month's credits, and how many credits are left.
+//! invoice over the month's credits, and how many credits are left. `GET /v1/voices` lists the
+//! account's voices.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,7 +15,7 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use shotline_plugin::protocol::{
     Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
-    PROTOCOL_VERSION, PluginError, Quote, Rate, Rates, Request, State, Status,
+    PROTOCOL_VERSION, PluginError, Quote, Rate, Rates, Request, State, Status, VoiceInfo, Voices,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
@@ -37,9 +38,82 @@ pub fn models() -> Vec<ModelInfo> {
         .map(|id| ModelInfo {
             id: (*id).into(),
             op: Op::AudioTts,
+            voice_schema: Some(voice_schema(id)),
             ..ModelInfo::default()
         })
         .collect()
+}
+
+/// ElevenLabs' `voice_settings`, as documented for text-to-speech.
+fn voice_schema(model: &str) -> Value {
+    let unit = |default: f64, about: &str| {
+        json!({
+            "type": "number", "minimum": 0, "maximum": 1,
+            "default": default, "description": about
+        })
+    };
+    // v3 only takes three steps: creative, natural, robust.
+    let stability = if model == "eleven_v3" {
+        json!({
+            "type": "number", "enum": [0.0, 0.5, 1.0], "default": 0.5,
+            "description": "0 creative, 0.5 natural, 1 robust"
+        })
+    } else {
+        unit(
+            0.5,
+            "Higher is steadier and more monotone, lower more expressive",
+        )
+    };
+    json!({
+        "type": "object",
+        "properties": {
+            "stability": stability,
+            "similarity_boost": unit(0.75, "How closely it sticks to the original voice"),
+            "style": unit(0.0, "Exaggerates the voice's style; slower and less stable when high"),
+            "speed": {
+                "type": "number", "minimum": 0.7, "maximum": 1.2, "default": 1.0,
+                "description": "Below 1 is slower, above 1 faster"
+            },
+            "use_speaker_boost": {
+                "type": "boolean", "default": true,
+                "description": "Closer to the original speaker, a bit slower"
+            }
+        }
+    })
+}
+
+/// `GET /v1/voices` as the protocol's voice list.
+pub fn voice_list(v: &Value) -> Voices {
+    let voices = v
+        .get("voices")
+        .and_then(Value::as_array)
+        .map(|vs| {
+            vs.iter()
+                .filter_map(|x| {
+                    let s = |k: &str| x.get(k).and_then(Value::as_str).map(str::to_string);
+                    let labels: Vec<String> = x
+                        .get("labels")
+                        .and_then(Value::as_object)
+                        .map(|l| {
+                            l.values()
+                                .filter_map(Value::as_str)
+                                .map(str::to_string)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(VoiceInfo {
+                        id: s("voice_id")?,
+                        name: s("name").unwrap_or_default(),
+                        description: s("description")
+                            .filter(|d| !d.is_empty())
+                            .or_else(|| (!labels.is_empty()).then(|| labels.join(", "))),
+                        preview: s("preview_url"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Voices { voices }
 }
 
 pub struct ElevenLabs {
@@ -180,9 +254,13 @@ impl ElevenLabs {
     }
 
     async fn subscription(&self) -> Result<Value> {
+        self.get("user/subscription").await
+    }
+
+    async fn get(&self, what: &str) -> Result<Value> {
         let r = self
             .http
-            .get(format!("{}/user/subscription", self.base))
+            .get(format!("{}/{what}", self.base))
             .header("xi-api-key", self.key()?)
             .send()
             .await
@@ -319,6 +397,10 @@ impl Plugin for ElevenLabs {
                 .into_iter()
                 .collect(),
         })
+    }
+
+    async fn voices(&self) -> Result<Voices> {
+        Ok(voice_list(&self.get("voices").await?))
     }
 
     async fn balance(&self) -> Result<Balance> {

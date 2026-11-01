@@ -90,6 +90,10 @@ Model fields other than `id` and `op` are optional; leave out what doesn't apply
 - `start_frame`, `start_frame_with_refs`, `audio_input`: what the model accepts.
 - `notes`: name of a prompt template (`prompts/models/<notes>.md`) with per-model tweaks.
 - `params_schema`: JSON Schema for anything the model takes in `params`.
+- `voice_schema`: for `audio.tts`, JSON Schema for the voice `settings` (an object with
+  `properties`). The app shows a slider for a number with `minimum` and `maximum`, a list for an
+  `enum`, a checkbox for a boolean and a text box for the rest, with `default` and `description`
+  shown until the user sets one.
 
 Operations:
 
@@ -174,6 +178,18 @@ shotline reads it before and after each job to see how much the job really took.
 ```json
 {"balances": [{"amount": 3.82, "unit": "USD"}, {"amount": 0, "unit": "venice-diem"}]}
 ```
+
+### voices (optional)
+
+The voices `audio.tts` can use on the account. It must be free to call. `shotline plugin voices`
+and the app's voice picker show them.
+
+```json
+{"voices": [{"id": "21m00Tcm4TlvDq8ikWAM", "name": "Rachel", "description": "american, calm",
+  "preview": "https://.../rachel.mp3"}]}
+```
+
+`description` and `preview` (a URL to a short recording) are optional.
 
 ### usage (optional)
 

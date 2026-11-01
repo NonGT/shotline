@@ -89,7 +89,35 @@ async fn mock() -> MockServer {
         })))
         .mount(&s)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/voices"))
+        .and(header("xi-api-key", "k"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"voices": [
+            {"voice_id": "abc", "name": "Rachel", "description": "",
+             "labels": {"accent": "american", "gender": "female"},
+             "preview_url": "https://example.com/rachel.mp3"},
+            {"voice_id": "def", "name": "Somchai", "description": "warm Thai narrator"}
+        ]})))
+        .mount(&s)
+        .await;
     s
+}
+
+#[tokio::test]
+async fn lists_voices() {
+    let s = mock().await;
+    let el = ElevenLabs::new(Some("k".into()), &format!("{}/v1", s.uri()));
+    let v = el.voices().await.unwrap().voices;
+    assert_eq!(v.len(), 2);
+    assert_eq!((v[0].id.as_str(), v[0].name.as_str()), ("abc", "Rachel"));
+    assert_eq!(v[0].description.as_deref(), Some("american, female"));
+    assert_eq!(
+        v[0].preview.as_deref(),
+        Some("https://example.com/rachel.mp3")
+    );
+    assert_eq!(v[1].description.as_deref(), Some("warm Thai narrator"));
+    let d = el.describe().await.unwrap();
+    assert!(d.models.iter().all(|m| m.voice_schema.is_some()));
 }
 
 #[tokio::test]

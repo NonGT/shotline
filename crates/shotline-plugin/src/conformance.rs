@@ -130,6 +130,18 @@ pub async fn check(plugin: &dyn Plugin, opts: &Options<'_>) -> Vec<Check> {
         ),
         Err(e) => r.add("balance", Some(e.to_string())),
     }
+
+    match plugin.voices().await {
+        Err(Error::Unsupported(_)) => {}
+        Ok(v) => r.add(
+            "voices",
+            v.voices
+                .iter()
+                .find(|v| v.id.trim().is_empty())
+                .map(|v| format!("voice {:?} has no id", v.name)),
+        ),
+        Err(e) => r.add("voices", Some(e.to_string())),
+    }
     r.0
 }
 

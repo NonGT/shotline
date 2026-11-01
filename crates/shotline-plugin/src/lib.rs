@@ -6,7 +6,7 @@ use std::path::Path;
 use async_trait::async_trait;
 pub use shotline_protocol as protocol;
 use shotline_protocol::{
-    Balance, Description, Outputs, PluginError, Quote, Rates, Request, Status, Usage,
+    Balance, Description, Outputs, PluginError, Quote, Rates, Request, Status, Usage, Voices,
 };
 
 pub mod conformance;
@@ -51,6 +51,11 @@ pub trait Plugin: Send + Sync {
     /// to see what they really cost.
     async fn balance(&self) -> Result<Balance> {
         Err(Error::Unsupported("balance".into()))
+    }
+
+    /// The voices audio.tts can use. Must be free to call.
+    async fn voices(&self) -> Result<Voices> {
+        Err(Error::Unsupported("voices".into()))
     }
 
     /// Charges since an RFC 3339 time.

@@ -21,7 +21,8 @@ the ... budget", stop and tell the user. Never raise a budget or retry around it
    face the same from shot to shot. Use the user's own with `element_anchor`, or make them with
    `element_anchor_generate` (a few cents each). Make the first one, let the user approve it,
    then make others (side view, full body) from it so they match.
-4. Voices: for cast with lines, `element_voice` with a TTS plugin (`plugin_ls` shows them).
+4. Voices: for cast with lines, `element_voice` with a TTS plugin (`plugin_ls` shows them) and a
+   voice id from `plugin_voices`.
 5. Breakdown: `chapter_add`, then `shot_add` for each shot.
    - One idea per shot. Action 2-4s, emotion 5-8s. Vary the framing: don't put three shots of
      the same size in a row.

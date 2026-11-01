@@ -769,6 +769,16 @@ impl Server {
         args.extend(p.name);
         self.cli(args, None, &ctx).await
     }
+
+    /// The voices a text to speech plugin can use: ids for element_voice. Free.
+    #[tool]
+    async fn plugin_voices(
+        &self,
+        Parameters(p): Parameters<PluginName>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Reply {
+        self.cli(a(["plugin", "voices", &p.name]), None, &ctx).await
+    }
 }
 
 impl Server {

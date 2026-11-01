@@ -99,6 +99,18 @@ fn plugin_doctor() {
 }
 
 #[test]
+fn plugin_voices() {
+    let tmp = TempDir::new().unwrap();
+    home_with_fake(&tmp);
+    shotline(&tmp)
+        .env("SHOTLINE_FAKE_KEY", "k")
+        .args(["plugin", "voices", "fake"])
+        .assert()
+        .success()
+        .stdout("fake-warm  Warm\nfake-bright  Bright\n");
+}
+
+#[test]
 fn broken_plugin_is_reported_not_fatal() {
     let tmp = TempDir::new().unwrap();
     tmp.child(".home/plugins/bad/shotline-plugin.toml")

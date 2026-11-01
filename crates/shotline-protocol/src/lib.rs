@@ -132,6 +132,9 @@ pub struct ModelInfo {
     /// JSON Schema for `params`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params_schema: Option<serde_json::Value>,
+    /// JSON Schema for a voice's `settings`, for audio.tts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_schema: Option<serde_json::Value>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -286,6 +289,23 @@ pub struct Amount {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Balance {
     pub balances: Vec<Amount>,
+}
+
+/// A voice on the account, for audio.tts.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct VoiceInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// A URL to a short recording of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Voices {
+    pub voices: Vec<VoiceInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
