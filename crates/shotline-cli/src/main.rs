@@ -401,8 +401,27 @@ fn ui(p: Option<Project>) -> Result<()> {
         .into_iter()
         .filter_map(|p| p.description.ok())
         .collect();
-    let voices = std::sync::Arc::new(|name: &str| plugins::voices(&plugins::load(), name));
-    shotline_ui::run(p, shotline_core::user_dir(), descriptions, voices)
+    shotline_ui::run(
+        p,
+        shotline_core::user_dir(),
+        descriptions,
+        std::sync::Arc::new(Plugins),
+    )
+}
+
+/// The installed plugins, loaded again for each ask so keys saved since are used.
+#[cfg(feature = "ui")]
+struct Plugins;
+
+#[cfg(feature = "ui")]
+impl shotline_ui::Host for Plugins {
+    fn voices(&self, plugin: &str) -> Result<Vec<shotline_core::protocol::VoiceInfo>> {
+        plugins::voices(&plugins::load(), plugin)
+    }
+
+    fn balance(&self, plugin: &str) -> Result<String> {
+        plugins::balance_of(&plugins::load(), plugin)
+    }
 }
 
 #[cfg(not(feature = "ui"))]

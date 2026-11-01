@@ -2,13 +2,15 @@
 //! menus.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use eframe::egui::{self, RichText};
 use shotline_core::protocol::Description;
 use shotline_core::slug::slugify;
 use shotline_core::{Git, Project};
 
-use crate::{App, ListVoices, caption, hint, read, theme};
+use crate::keys::Keys;
+use crate::{App, Host, caption, hint, read, theme};
 
 const RECENT: usize = 8;
 
@@ -25,6 +27,7 @@ pub enum MenuCommand {
     Copy,
     Paste,
     SelectAll,
+    Settings,
     Quit,
 }
 
@@ -32,7 +35,7 @@ pub struct Shell {
     user_dir: PathBuf,
     git: Option<Git>,
     plugins: Vec<Description>,
-    voices: Option<ListVoices>,
+    host: Option<Arc<dyn Host>>,
     testing: bool,
     themed: bool,
     /// The window title last sent.
@@ -42,6 +45,8 @@ pub struct Shell {
     screen: Screen,
     /// New Film asked for over an open film.
     dialog: Option<Form>,
+    /// Settings, while open.
+    keys_page: Option<Keys>,
     /// Edit commands for egui, sent with the next frame.
     edits: Vec<MenuCommand>,
     /// The text box last typed in, which a click on the window menu takes focus from.
@@ -85,13 +90,14 @@ impl Shell {
             user_dir,
             git: Git::find(),
             plugins: vec![],
-            voices: None,
+            host: None,
             testing: false,
             themed: false,
             titled: String::new(),
             here: here.to_path_buf(),
             screen: Screen::Start(Form::new(here)),
             dialog: None,
+            keys_page: None,
             edits: vec![],
             typing: None,
             window_menu: cfg!(not(any(target_os = "macos", target_os = "windows"))),
@@ -105,12 +111,12 @@ impl Shell {
     }
 
     /// What the installed plugins said about themselves, for picking them in the app.
-    pub fn with_plugins(mut self, plugins: Vec<Description>, voices: Option<ListVoices>) -> Shell {
+    pub fn with_plugins(mut self, plugins: Vec<Description>, host: Option<Arc<dyn Host>>) -> Shell {
         if let Screen::Film(app) = &mut self.screen {
-            app.set_plugins(plugins.clone(), voices.clone());
+            app.set_plugins(plugins.clone(), host.clone());
         }
         self.plugins = plugins;
-        self.voices = voices;
+        self.host = host;
         self
     }
 
@@ -177,6 +183,9 @@ impl Shell {
                     self.dialog = None;
                 }
             }
+            MenuCommand::Settings => {
+                self.keys_page = Some(Keys::new(&self.user_dir, &self.plugins));
+            }
             MenuCommand::Cut
             | MenuCommand::Copy
             | MenuCommand::Paste
@@ -234,6 +243,20 @@ impl Shell {
         if let Some(o) = opened {
             self.go(o);
         }
+        if let Screen::Film(app) = &mut self.screen
+            && std::mem::take(&mut app.wants_keys)
+        {
+            self.command(MenuCommand::Settings);
+        }
+        if let Some(k) = &mut self.keys_page {
+            let (open, changed) = k.show(ui, self.host.clone());
+            if changed && let Screen::Film(app) = &self.screen {
+                app.forget_voices();
+            }
+            if !open {
+                self.keys_page = None;
+            }
+        }
         let title = title(self.film().map(|a| &a.project));
         if title != self.titled {
             ui.ctx()
@@ -255,6 +278,8 @@ impl Shell {
             MenuCommand::OpenFilm
         } else if key(egui::Key::W) {
             MenuCommand::CloseFilm
+        } else if key(egui::Key::Comma) {
+            MenuCommand::Settings
         } else if self.window_menu && key(egui::Key::Q) {
             MenuCommand::Quit
         } else {
@@ -314,6 +339,8 @@ impl Shell {
                         item(ui, "Copy", "Ctrl+C", true, MenuCommand::Copy);
                         item(ui, "Paste", "Ctrl+V", true, MenuCommand::Paste);
                         item(ui, "Select All", "Ctrl+A", true, MenuCommand::SelectAll);
+                        ui.separator();
+                        item(ui, "Settings...", "Ctrl+,", true, MenuCommand::Settings);
                     });
                 });
             });
@@ -423,7 +450,7 @@ impl Shell {
         remember(&self.user_dir, &p.root);
         self.recent = recent(&self.user_dir);
         let mut app = App::new(p, self.user_dir.clone()).with_git(self.git.clone());
-        app.set_plugins(self.plugins.clone(), self.voices.clone());
+        app.set_plugins(self.plugins.clone(), self.host.clone());
         app = if self.testing {
             app.with_viewer(None).silent()
         } else {

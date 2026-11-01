@@ -51,6 +51,8 @@ If you keep the film folder in git, the `.gitignore` that `init` writes leaves o
 was made, from what, and for how much survives even if the media lives elsewhere.
 
 Keys are never stored in the project, only read from the environment or `~/.config/shotline/.env`.
+The app's Settings lists the keys each installed plugin needs, writes them to that file (mode 600)
+and checks one works by asking the plugin for its balance, which is free.
 
 ## Shots
 

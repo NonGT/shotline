@@ -157,6 +157,28 @@ fn print_env(declared: &[String], env_file: &Path) {
 
 /// Describe, env and offline conformance checks. Only calls `quote`, which plugins must keep free.
 /// What's left on each provider account, for plugins that can tell. Reading it is free.
+fn left(b: &shotline_core::protocol::Balance) -> String {
+    let left: Vec<String> = b
+        .balances
+        .iter()
+        .map(|a| format!("{} {}", shotline_core::ledger::money(a.amount), a.unit))
+        .collect();
+    left.join(", ")
+}
+
+/// One plugin's balance in a line, which also shows its key works.
+pub fn balance_of(installed: &Installed, name: &str) -> Result<String> {
+    let rt = runtime();
+    let plugin = open(installed, name)?;
+    match rt.block_on(plugin.balance()) {
+        Ok(b) => Ok(format!("{} left", left(&b))),
+        Err(shotline_plugin::Error::Unsupported(_)) => {
+            bail!("{name} has no free way to check its key")
+        }
+        Err(e) => bail!("{e}"),
+    }
+}
+
 pub fn balance(installed: &Installed, only: Option<&str>) -> Result<()> {
     if let Some(n) = only
         && !installed.plugins.iter().any(|p| p.name == n)
@@ -170,14 +192,7 @@ pub fn balance(installed: &Installed, only: Option<&str>) -> Result<()> {
         }
         let plugin = open(installed, &p.name)?;
         match rt.block_on(plugin.balance()) {
-            Ok(b) => {
-                let left: Vec<String> = b
-                    .balances
-                    .iter()
-                    .map(|a| format!("{} {}", shotline_core::ledger::money(a.amount), a.unit))
-                    .collect();
-                println!("{}  {}", p.name, left.join(", "));
-            }
+            Ok(b) => println!("{}  {}", p.name, left(&b)),
             Err(shotline_plugin::Error::Unsupported(_)) => {
                 println!("{}  can't tell", p.name)
             }

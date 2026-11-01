@@ -48,7 +48,8 @@ found on PATH. `shotline plugin ls` shows what's there and `shotline plugin doct
 one without spending anything. `plugins/local` upscales and interpolates for free with ffmpeg (and
 RIFE if you have `rife-ncnn-vulkan`), for use in recipes.
 
-Needs ffmpeg. API keys go in your environment or `~/.config/shotline/.env`.
+Needs ffmpeg. API keys go in your environment or `~/.config/shotline/.env`, which the app's
+Settings writes for you.
 
 MIT licensed. The app has Noto Sans and Noto Sans Thai built in, under the SIL Open Font License
 (`assets/fonts/OFL.txt`).

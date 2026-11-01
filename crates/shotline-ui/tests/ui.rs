@@ -10,7 +10,7 @@ use egui_kittest::kittest::Queryable;
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{Description, ModelInfo, Op, Quote, VoiceInfo};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
-use shotline_ui::{App, ListVoices, MenuCommand, Shell, Tab};
+use shotline_ui::{App, Host, MenuCommand, Shell, Tab};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
 fn film(dir: &Path) -> Project {
@@ -225,6 +225,93 @@ fn edit_the_story_and_add_shots() {
     assert_eq!(p.chapter("2").unwrap().title, "The river");
 }
 
+/// Plugins as the app sees them: elevenlabs has two voices and 3.5 USD left.
+struct TestHost;
+
+impl Host for TestHost {
+    fn voices(&self, plugin: &str) -> anyhow::Result<Vec<VoiceInfo>> {
+        assert_eq!(plugin, "elevenlabs");
+        let v = |id: &str, name: &str| VoiceInfo {
+            id: id.into(),
+            name: name.into(),
+            ..VoiceInfo::default()
+        };
+        Ok(vec![v("abc", "Rachel"), v("def", "Somchai")])
+    }
+
+    fn balance(&self, plugin: &str) -> anyhow::Result<String> {
+        assert_eq!(plugin, "elevenlabs");
+        Ok("3.5 USD left".into())
+    }
+}
+
+#[test]
+fn keys_in_settings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    // A name nobody has set, so the file is what counts.
+    let var = "SHOTLINE_TEST_ELEVENLABS_KEY";
+    let plugins = vec![Description {
+        name: "elevenlabs".into(),
+        version: "1".into(),
+        protocol: 1,
+        env: vec![var.into()],
+        models: vec![],
+    }];
+    let shell = Shell::new(None, home.clone(), tmp.path())
+        .with_plugins(plugins, Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 800.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    h.state_mut().command(MenuCommand::Settings);
+    h.run();
+    h.get_by_label("not set");
+    // Nothing to check with yet.
+    h.get_by_label("Check").click();
+    h.run();
+    assert!(h.query_by_label_contains("works").is_none());
+
+    let field = h.get_by_role_and_label(Role::TextInput, var);
+    field.focus();
+    field.type_text("sk-123");
+    h.run();
+    h.get_by_label("Save").click();
+    h.run();
+    let env = home.join(".env");
+    assert_eq!(
+        std::fs::read_to_string(&env).unwrap(),
+        format!("{var}=sk-123\n")
+    );
+    h.get_by_label("in .env");
+
+    h.get_by_label("Check").click();
+    assert!(wait_for_shell(&mut h, |h| h
+        .query_by_label("works: 3.5 USD left")
+        .is_some()));
+
+    h.get_by_label("Remove").click();
+    h.run();
+    assert_eq!(std::fs::read_to_string(&env).unwrap(), "\n");
+    h.get_by_label("not set");
+    h.get_by_label("Close").click();
+    h.run();
+    assert!(h.query_by_label("Keys").is_none());
+}
+
+fn wait_for_shell(h: &mut Harness<Shell>, done: impl Fn(&Harness<Shell>) -> bool) -> bool {
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        if done(h) {
+            return true;
+        }
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    done(h)
+}
+
 #[test]
 fn edit_elements() {
     let tmp = tempfile::tempdir().unwrap();
@@ -246,15 +333,7 @@ fn edit_elements() {
         }})),
         ..ModelInfo::default()
     };
-    let voices: ListVoices = Arc::new(|plugin: &str| {
-        assert_eq!(plugin, "elevenlabs");
-        let v = |id: &str, name: &str| VoiceInfo {
-            id: id.into(),
-            name: name.into(),
-            ..VoiceInfo::default()
-        };
-        Ok(vec![v("abc", "Rachel"), v("def", "Somchai")])
-    });
+    let voices: Arc<dyn Host> = Arc::new(TestHost);
     app.set_plugins(
         vec![Description {
             name: "elevenlabs".into(),

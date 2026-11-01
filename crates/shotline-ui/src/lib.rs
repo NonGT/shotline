@@ -4,6 +4,7 @@
 
 mod edit;
 mod git;
+mod keys;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
 mod player;
@@ -70,8 +71,12 @@ struct Film {
     takes: HashMap<ShotRef, usize>,
 }
 
-/// Asks a plugin for its voices. The app calls it off the UI thread.
-pub type ListVoices = Arc<dyn Fn(&str) -> anyhow::Result<Vec<VoiceInfo>> + Send + Sync>;
+/// What the app asks of installed plugins. The CLI provides it; the app calls it off the UI thread.
+pub trait Host: Send + Sync {
+    fn voices(&self, plugin: &str) -> anyhow::Result<Vec<VoiceInfo>>;
+    /// What's left on the account, said in a line. It costs nothing, so it checks a key.
+    fn balance(&self, plugin: &str) -> anyhow::Result<String>;
+}
 
 #[derive(Clone)]
 enum VoiceList {
@@ -109,7 +114,9 @@ pub struct App {
     /// The picture shown big over everything.
     zoom: Option<PathBuf>,
     plugins: Vec<Description>,
-    list_voices: Option<ListVoices>,
+    host: Option<Arc<dyn Host>>,
+    /// Keys asked for, e.g. from a plugin that said it has none; the shell opens Settings.
+    wants_keys: bool,
     voice_lists: Arc<Mutex<HashMap<String, VoiceList>>>,
     history: History,
     git: Option<Git>,
@@ -207,7 +214,8 @@ impl App {
             new_element: NewElement::default(),
             zoom: None,
             plugins: vec![],
-            list_voices: None,
+            host: None,
+            wants_keys: false,
             voice_lists: Arc::default(),
             history: History::default(),
             git: Git::find(),
@@ -229,9 +237,14 @@ impl App {
         &self.project
     }
 
-    pub fn set_plugins(&mut self, plugins: Vec<Description>, voices: Option<ListVoices>) {
+    pub fn set_plugins(&mut self, plugins: Vec<Description>, host: Option<Arc<dyn Host>>) {
         self.plugins = plugins;
-        self.list_voices = voices;
+        self.host = host;
+    }
+
+    /// Voice lists are asked for again, e.g. once a key is set.
+    pub(crate) fn forget_voices(&self) {
+        self.voice_lists.lock().unwrap().clear();
     }
 
     pub fn with_git(mut self, git: Option<Git>) -> App {
@@ -854,6 +867,7 @@ impl App {
             .or(models.first())
             .and_then(|m| m.voice_schema.clone());
         let mut sample = None;
+        let mut keys = false;
         egui::Grid::new("voice")
             .num_columns(2)
             .spacing(egui::vec2(12.0, 8.0))
@@ -903,7 +917,7 @@ impl App {
                     .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Model"));
                 ui.end_row();
                 ui.weak("Voice");
-                voice_picker(ui, &mut v.voice_id, voices.as_ref());
+                keys |= voice_picker(ui, &mut v.voice_id, voices.as_ref());
                 ui.end_row();
                 let l = ui.weak("Sample");
                 ui.horizontal(|ui| {
@@ -921,6 +935,7 @@ impl App {
                 settings_rows(ui, schema.as_ref(), &mut v.settings);
             });
         let none = v.plugin.is_empty();
+        self.wants_keys |= keys;
         if let Some(f) = sample {
             self.element_form.voice.sample = self.project.rel(&f);
         }
@@ -944,13 +959,13 @@ impl App {
         if let Some(l) = lists.get(plugin) {
             return l.clone();
         }
-        let Some(ask) = self.list_voices.clone() else {
+        let Some(host) = self.host.clone() else {
             return VoiceList::Failed("can't ask plugins for voices here".into());
         };
         lists.insert(plugin.to_string(), VoiceList::Loading);
         let (lists, ctx, plugin) = (self.voice_lists.clone(), ctx.clone(), plugin.to_string());
         std::thread::spawn(move || {
-            let got = match ask(&plugin) {
+            let got = match host.voices(&plugin) {
                 Ok(v) => VoiceList::Ready(v),
                 Err(e) => VoiceList::Failed(e.to_string()),
             };
@@ -1616,8 +1631,10 @@ fn quiet_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(egui::Button::new(RichText::new(text).color(theme::DUST)).frame(false))
 }
 
-/// The voice by name from the plugin's list, or its ID typed in when there's no list.
-fn voice_picker(ui: &mut egui::Ui, id: &mut String, list: Option<&VoiceList>) {
+/// The voice by name from the plugin's list, or its ID typed in when there's no list. Returns
+/// whether the keys were asked for.
+fn voice_picker(ui: &mut egui::Ui, id: &mut String, list: Option<&VoiceList>) -> bool {
+    let mut keys = false;
     let field = |ui: &mut egui::Ui, id: &mut String| {
         ui.add(
             egui::TextEdit::singleline(id)
@@ -1657,12 +1674,17 @@ fn voice_picker(ui: &mut egui::Ui, id: &mut String, list: Option<&VoiceList>) {
         Some(VoiceList::Failed(e)) => {
             ui.vertical(|ui| {
                 field(ui, id);
-                ui.label(RichText::new(short(e, 70)).small().color(theme::DUST))
-                    .on_hover_text(e);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(short(e, 56)).small().color(theme::DUST))
+                        .on_hover_text(e);
+                    // Most often the key isn't set.
+                    keys = ui.small_button("Keys…").clicked();
+                });
             });
         }
         _ => field(ui, id),
     }
+    keys
 }
 
 /// Voice settings as the model's schema describes them, or as `key = value` lines without one.
@@ -1844,7 +1866,7 @@ pub fn run(
     project: Option<Project>,
     user_dir: PathBuf,
     plugins: Vec<Description>,
-    voices: ListVoices,
+    host: Arc<dyn Host>,
 ) -> anyhow::Result<()> {
     let title = start::title(project.as_ref());
     let here = std::env::current_dir()?;
@@ -1856,7 +1878,7 @@ pub fn run(
         &title,
         options,
         Box::new(move |cc| {
-            let shell = Shell::new(project, user_dir, &here).with_plugins(plugins, Some(voices));
+            let shell = Shell::new(project, user_dir, &here).with_plugins(plugins, Some(host));
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             let shell = shell.with_native_menu(cc);
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
