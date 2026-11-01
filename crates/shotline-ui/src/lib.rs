@@ -771,13 +771,9 @@ impl App {
 
     fn story(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::BAY)
-                    .inner_margin(egui::vec2(28.0, 20.0)),
-            )
+            .frame(egui::Frame::new().fill(theme::BAY))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                page(ui, PAGE, |ui| {
                     ui.set_max_width(720.0);
                     let t = &mut self.texts;
                     text_field(ui, "Story", &mut t.story, "What the film is about");
@@ -799,13 +795,9 @@ impl App {
         egui::Panel::left("elements")
             .resizable(true)
             .default_size(260.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::RACK)
-                    .inner_margin(egui::vec2(8.0, 12.0)),
-            )
+            .frame(egui::Frame::new().fill(theme::RACK))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                page(ui, SIDE, |ui| {
                     for (kind, heading) in [
                         (Kind::Cast, "Cast"),
                         (Kind::Set, "Sets"),
@@ -897,25 +889,21 @@ impl App {
             self.open_element_named(h);
         }
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::BAY)
-                    .inner_margin(egui::vec2(28.0, 20.0)),
-            )
+            .frame(egui::Frame::new().fill(theme::BAY))
             .show(ui, |ui| {
                 let found = self.element.as_ref().and_then(|h| {
                     self.film.elements.iter().find(|(e, _)| e.handle == *h).cloned()
                 });
                 match found {
                     Some((el, anchors)) => {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
+                        page(ui, PAGE, |ui| {
                             self.element_detail(ui, &el, &anchors);
                         });
                     }
                     None if self.film.elements.is_empty() => {
-                        hint(ui, "Cast, sets and props that shots name as @handles. Add the first one on the left.");
+                        page(ui, PAGE, |ui| hint(ui, "Cast, sets and props that shots name as @handles. Add the first one on the left."));
                     }
-                    None => hint(ui, "Pick an element on the left."),
+                    None => page(ui, PAGE, |ui| hint(ui, "Pick an element on the left.")),
                 }
             });
     }
@@ -1182,13 +1170,9 @@ impl App {
         egui::Panel::left("shots")
             .resizable(true)
             .default_size(260.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::RACK)
-                    .inner_margin(egui::vec2(8.0, 12.0)),
-            )
+            .frame(egui::Frame::new().fill(theme::RACK))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                page(ui, SIDE, |ui| {
                     for (c, shots) in &self.film.chapters {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
@@ -1243,23 +1227,21 @@ impl App {
             self.open_shot(r);
         }
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::BAY)
-                    .inner_margin(egui::vec2(28.0, 20.0)),
-            )
+            .frame(egui::Frame::new().fill(theme::BAY))
             .show(ui, |ui| match self.open() {
                 Some((r, s)) => {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
+                    page(ui, PAGE, |ui| {
                         self.deck(ui);
                         self.shot_detail(ui, r, &s)
                     });
                 }
                 None if self.film.chapters.is_empty() => {
-                    hint(ui, "Shots go in chapters. Add the first one on the left.");
+                    page(ui, PAGE, |ui| {
+                        hint(ui, "Shots go in chapters. Add the first one on the left.")
+                    });
                 }
                 None => {
-                    hint(ui, "Pick a shot on the left.");
+                    page(ui, PAGE, |ui| hint(ui, "Pick a shot on the left."));
                 }
             });
     }
@@ -2069,4 +2051,18 @@ fn renders(dir: &Path) -> Vec<PathBuf> {
         .collect();
     files.sort_by_key(|f| std::cmp::Reverse(f.0));
     files.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Room round a tab's content, and round the lists down the side.
+const PAGE: egui::Vec2 = egui::vec2(28.0, 20.0);
+const SIDE: egui::Vec2 = egui::vec2(8.0, 12.0);
+
+/// Scrolls `add` with the bar at the panel's edge: the panel has no margin, the content does.
+fn page<R>(ui: &mut egui::Ui, margin: egui::Vec2, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            egui::Frame::new().inner_margin(margin).show(ui, add).inner
+        })
+        .inner
 }

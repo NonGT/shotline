@@ -6,7 +6,7 @@ use eframe::egui::{self, RichText};
 use shotline_core::{MatchAt, Transition};
 
 use crate::edit::Action;
-use crate::{App, hint, remove_button, short, theme};
+use crate::{App, PAGE, hint, page, remove_button, short, theme};
 
 #[derive(Clone, Default)]
 pub(crate) enum Render {
@@ -22,13 +22,9 @@ impl App {
     pub(crate) fn cut(&mut self, ui: &mut egui::Ui) {
         self.render_finished();
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::BAY)
-                    .inner_margin(egui::vec2(28.0, 20.0)),
-            )
+            .frame(egui::Frame::new().fill(theme::BAY))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                page(ui, PAGE, |ui| {
                     self.deck(ui);
                     if self.film.cut.is_empty() {
                         hint(ui, "No shots yet. Add some in Shots.");

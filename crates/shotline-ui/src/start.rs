@@ -486,28 +486,30 @@ fn start_page(
     recent: &[(PathBuf, String)],
 ) -> Option<Opened> {
     let mut out = None;
-    egui::CentralPanel::default().show(ui, |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let w = 460.0_f32.min(ui.available_width());
-            ui.add_space(72.0);
-            ui.vertical_centered(|ui| {
-                ui.set_max_width(w);
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.label(
-                        RichText::new("shotline")
-                            .font(theme::slate())
-                            .color(theme::PAPER),
-                    );
-                    ui.add_space(32.0);
-                    ui.heading("New film");
-                    ui.add_space(10.0);
-                    out = form
-                        .show(ui, has_git, |_| {})
-                        .or_else(|| open_film(ui, &form.folder, recent));
+    egui::CentralPanel::default()
+        .frame(egui::Frame::central_panel(ui.style()).inner_margin(0.0))
+        .show(ui, |ui| {
+            crate::page(ui, egui::vec2(8.0, 8.0), |ui| {
+                let w = 460.0_f32.min(ui.available_width());
+                ui.add_space(72.0);
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(w);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.label(
+                            RichText::new("shotline")
+                                .font(theme::slate())
+                                .color(theme::PAPER),
+                        );
+                        ui.add_space(32.0);
+                        ui.heading("New film");
+                        ui.add_space(10.0);
+                        out = form
+                            .show(ui, has_git, |_| {})
+                            .or_else(|| open_film(ui, &form.folder, recent));
+                    });
                 });
             });
         });
-    });
     out
 }
 

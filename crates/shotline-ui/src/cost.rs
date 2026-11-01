@@ -7,7 +7,7 @@ use jiff::civil::Date;
 use shotline_core::ledger::report::{self, By, Row, Summary};
 use shotline_core::ledger::{Entry, Kind, money};
 
-use crate::{App, hint, theme};
+use crate::{App, PAGE, hint, page, theme};
 
 /// Model colours, biggest spender first. Red is left out: it means trouble elsewhere.
 const PALETTE: [Color32; 8] = [
@@ -157,13 +157,9 @@ pub(crate) struct View {
 impl App {
     pub(crate) fn costs(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::BAY)
-                    .inner_margin(egui::vec2(28.0, 20.0)),
-            )
+            .frame(egui::Frame::new().fill(theme::BAY))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                page(ui, PAGE, |ui| {
                     let Some(c) = &self.film.cost else {
                         hint(
                             ui,
