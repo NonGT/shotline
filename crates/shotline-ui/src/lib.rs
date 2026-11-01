@@ -170,9 +170,35 @@ fn read(path: &Path) -> String {
 }
 
 /// Anchors and frames are often 2-4K, past what some GPUs take as one texture, so they're shrunk
-/// once when first shown.
+/// once when first shown. Big ones are decoded off the UI thread; that takes a moment.
 #[derive(Default)]
-struct Thumbs(HashMap<(PathBuf, u32), Option<egui::TextureHandle>>);
+struct Thumbs {
+    done: HashMap<(PathBuf, u32), Option<egui::TextureHandle>>,
+    decoding: Arc<Mutex<HashMap<(PathBuf, u32), Decoded>>>,
+}
+
+/// None while the thread is still at it, then what it made of the file.
+type Decoded = Option<Option<egui::ColorImage>>;
+
+enum Big {
+    Ready(egui::TextureHandle),
+    Decoding,
+    Failed,
+}
+
+fn decode(path: &Path, px: u32) -> Option<egui::ColorImage> {
+    // By its bytes, not its name: a .png that's really a JPEG still shows.
+    let img = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?
+        .thumbnail(px, px)
+        .to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
+}
 
 const THUMB: u32 = 512;
 const BIG: u32 = 2048;
@@ -185,15 +211,44 @@ impl Thumbs {
         px: u32,
         name: &str,
     ) -> Option<egui::TextureHandle> {
-        self.0
+        self.done
             .entry((path.to_path_buf(), px))
             .or_insert_with(|| {
-                let img = image::open(path).ok()?.thumbnail(px, px).to_rgba8();
-                let size = [img.width() as usize, img.height() as usize];
-                let pixels = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                let pixels = decode(path, px)?;
                 Some(ui.ctx().load_texture(name, pixels, Default::default()))
             })
             .clone()
+    }
+
+    /// Like `texture`, but decoded on another thread, asking for a repaint when it's there.
+    fn texture_later(&mut self, ui: &egui::Ui, path: &Path, px: u32, name: &str) -> Big {
+        let key = (path.to_path_buf(), px);
+        if let Some(t) = self.done.get(&key) {
+            return t.clone().map_or(Big::Failed, Big::Ready);
+        }
+        let mut decoding = self.decoding.lock().unwrap();
+        match decoding.get_mut(&key) {
+            None => {
+                decoding.insert(key.clone(), None);
+                let (all, ctx) = (self.decoding.clone(), ui.ctx().clone());
+                std::thread::spawn(move || {
+                    let img = decode(&key.0, key.1);
+                    all.lock().unwrap().insert(key, Some(img));
+                    ctx.request_repaint();
+                });
+                Big::Decoding
+            }
+            Some(None) => Big::Decoding,
+            Some(Some(img)) => {
+                let t = img
+                    .take()
+                    .map(|img| ui.ctx().load_texture(name, img, Default::default()));
+                decoding.remove(&key);
+                drop(decoding);
+                self.done.insert(key, t.clone());
+                t.map_or(Big::Failed, Big::Ready)
+            }
+        }
     }
 
     /// A thumbnail; clicking it asks for the picture full size.
@@ -674,22 +729,51 @@ impl App {
         let name = self.project.rel(&path);
         let room = ui.ctx().content_rect().size() * 0.88;
         let mut close = false;
+        let max = room - egui::vec2(0.0, 40.0);
         let modal = egui::Modal::new(egui::Id::unique("zoom")).show(ui.ctx(), |ui| {
-            if let Some(t) = self.thumbs.texture(ui, &path, BIG, &name) {
-                let img = ui.add(
-                    egui::Image::new(&t)
-                        .max_size(room - egui::vec2(0.0, 40.0))
-                        .alt_text(format!("{name} big"))
-                        .sense(egui::Sense::click()),
-                );
-                close = img.clicked();
+            match self.thumbs.texture_later(ui, &path, BIG, &name) {
+                Big::Ready(t) => {
+                    let img = ui.add(
+                        egui::Image::new(&t)
+                            .max_size(max)
+                            .alt_text(format!("{name} big"))
+                            .sense(egui::Sense::click()),
+                    );
+                    close = img.clicked();
+                }
+                Big::Decoding => {
+                    // The size it will show at, from the header, so nothing jumps once it's in.
+                    let size = image::ImageReader::open(&path)
+                        .ok()
+                        .and_then(|r| r.with_guessed_format().ok()?.into_dimensions().ok())
+                        .map_or(egui::vec2(max.y, max.y), |(w, h)| {
+                            let s = egui::vec2(w as f32, h as f32);
+                            s * (BIG as f32 / s.max_elem()).min(1.0)
+                        });
+                    let size = size * (max / size).min_elem().min(1.0);
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, theme::RACK);
+                    egui::Spinner::new().size(32.0).paint_at(
+                        ui,
+                        egui::Rect::from_center_size(rect.center(), egui::vec2(32.0, 32.0)),
+                    );
+                }
+                Big::Failed => {
+                    ui.weak(format!("can't show {name}"));
+                }
             }
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&name).color(theme::DUST));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close |= ui.button("Close").clicked();
-                });
-            });
+            // As wide as the picture, or a right-to-left row widens the modal every frame.
+            let width = ui.min_rect().width().max(320.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, ui.spacing().interact_size.y),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(RichText::new(&name).color(theme::DUST));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close |= ui.button("Close").clicked();
+                    });
+                },
+            );
         });
         if close || modal.should_close() {
             self.zoom = None;

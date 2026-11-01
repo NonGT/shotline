@@ -550,6 +550,10 @@ fn edit_elements() {
     h.get_by_role_and_label(Role::ComboBox, "Plugin").click();
     h.run();
     h.get_by_label("elevenlabs").click();
+    // The plugin is asked for its voices in the background; its repaint can land mid-run.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::ComboBox, "Voice")
+        .is_some()));
     h.run();
     h.get_by_role_and_label(Role::ComboBox, "Model").click();
     h.run();
@@ -572,10 +576,6 @@ fn edit_elements() {
     h.run();
     h.run();
     let mali = p.element("mali").unwrap();
-    // The plugin is asked for its voices in the background; its repaint can land mid-run.
-    assert!(wait_for(&mut h, |h| h
-        .query_by_role_and_label(Role::ComboBox, "Voice")
-        .is_some()));
     assert_eq!(mali.description, "young woman, short black hair");
     let voice = mali.voice.unwrap();
     assert_eq!(voice.plugin, "elevenlabs");
@@ -590,8 +590,16 @@ fn edit_elements() {
     h.get_by_label("@paka  Paka").click();
     h.run();
     h.get_by_label("elements/cast/paka/01.png").click();
+    // It opens at once with a spinner while the big one decodes.
+    h.step();
+    h.step();
+    assert!(h.query_by_label("elements/cast/paka/01.png big").is_none());
+    h.get_by_label("Close");
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("elements/cast/paka/01.png big")
+        .is_some()));
+    // A new modal takes a frame or two to find its place.
     h.run();
-    h.get_by_label("elements/cast/paka/01.png big");
     h.get_by_label("Close").click();
     h.run();
     assert!(h.query_by_label("elements/cast/paka/01.png big").is_none());
