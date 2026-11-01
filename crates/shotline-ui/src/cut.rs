@@ -21,29 +21,35 @@ pub(crate) enum Render {
 impl App {
     pub(crate) fn cut(&mut self, ui: &mut egui::Ui) {
         self.render_finished();
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                self.deck(ui);
-                if self.film.cut.is_empty() {
-                    hint(ui, "No shots yet. Add some in Shots.");
-                    return;
-                }
-                let mut acts = vec![];
-                self.cut_actions(ui);
-                ui.add_space(10.0);
-                self.cut_shots(ui);
-                ui.add_space(18.0);
-                self.joins(ui);
-                ui.add_space(18.0);
-                self.music(ui, &mut acts);
-                ui.add_space(18.0);
-                self.renders(ui);
-                if !acts.is_empty() {
-                    self.flush();
-                    self.apply(acts);
-                }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BAY)
+                    .inner_margin(egui::vec2(28.0, 20.0)),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.deck(ui);
+                    if self.film.cut.is_empty() {
+                        hint(ui, "No shots yet. Add some in Shots.");
+                        return;
+                    }
+                    let mut acts = vec![];
+                    self.cut_actions(ui);
+                    ui.add_space(10.0);
+                    self.cut_shots(ui);
+                    ui.add_space(18.0);
+                    self.joins(ui);
+                    ui.add_space(18.0);
+                    self.music(ui, &mut acts);
+                    ui.add_space(18.0);
+                    self.renders(ui);
+                    if !acts.is_empty() {
+                        self.flush();
+                        self.apply(acts);
+                    }
+                });
             });
-        });
     }
 
     /// Play and Render, and how the render is going.

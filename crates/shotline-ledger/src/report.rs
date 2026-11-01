@@ -38,7 +38,7 @@ impl FromStr for By {
 
 /// What an entry spent in `currency`. Lines booked in another currency (the film's currency was
 /// changed later) are converted at today's rates.
-fn value(e: &Entry, currency: &str, rates: &Rates) -> Result<f64> {
+pub fn value(e: &Entry, currency: &str, rates: &Rates) -> Result<f64> {
     if e.base_currency == currency {
         return Ok(e.spent());
     }

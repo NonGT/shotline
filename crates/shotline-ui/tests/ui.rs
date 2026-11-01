@@ -1051,6 +1051,12 @@ fn elements_story_and_cost() {
     h.get_by_label("0.4 USD");
     h.get_by_label("in the cut 0, thrown away 0.4, other 0");
     h.get_by_label("01-010");
+    // Per day and model, and the bars grow in again for another span.
+    h.get_by_label("spent per day, last 7 days");
+    h.get_by_label("fake/video  0.4 USD");
+    h.get_by_label("30 days").click();
+    h.run();
+    h.get_by_label("spent per day, last 30 days");
 }
 
 #[test]

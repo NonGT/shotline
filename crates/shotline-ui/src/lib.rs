@@ -3,6 +3,7 @@
 //! both always agree.
 
 mod anchor;
+mod cost;
 mod cut;
 mod edit;
 mod git;
@@ -20,11 +21,10 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
-use shotline_core::ledger::report::{self, By, Row, Summary};
 use shotline_core::protocol::{Description, ModelInfo, Op, VoiceInfo};
 use shotline_core::{
     Chapter, CutShot, Element, Git, JobStatus, Kind, Project, Shot, ShotRef, Take, Timeline,
-    Transition, UserConfig,
+    Transition,
 };
 use shotline_media::Ffmpeg;
 
@@ -71,7 +71,7 @@ struct Film {
     timeline: Timeline,
     /// renders/*.mp4, newest first.
     renders: Vec<PathBuf>,
-    cost: Option<(Summary, Vec<Row>)>,
+    cost: Option<cost::Cost>,
     /// How many takes each shot has.
     takes: HashMap<ShotRef, usize>,
 }
@@ -147,6 +147,7 @@ pub struct App {
     /// timeline.toml as edited, saved once nothing has focus.
     timeline_form: Timeline,
     render: Arc<Mutex<cut::Render>>,
+    cost_view: cost::View,
     voice_lists: Arc<Mutex<HashMap<String, VoiceList>>>,
     history: History,
     git: Option<Git>,
@@ -304,6 +305,7 @@ impl App {
             maker: None,
             timeline_form: Timeline::default(),
             render: Arc::default(),
+            cost_view: cost::View::default(),
             voice_lists: Arc::default(),
             history: History::default(),
             git: Git::find(),
@@ -500,23 +502,10 @@ impl App {
             cut: p.cut(&timeline)?,
             timeline,
             renders: renders(&p.root.join("renders")),
-            cost: self.cost()?,
+            cost: cost::load(p, &self.user_dir)?,
             takes: takes.into_iter().map(|(s, t)| (s, t.len())).collect(),
         };
         self.load_takes()
-    }
-
-    fn cost(&self) -> anyhow::Result<Option<(Summary, Vec<Row>)>> {
-        let p = &self.project;
-        let user = UserConfig::load(&self.user_dir)?;
-        let b = p.books(&self.user_dir, &user, &[])?;
-        let entries = b.ledger.entries()?;
-        if entries.is_empty() {
-            return Ok(None);
-        }
-        let s = report::summary(&entries, &b.currency, &b.rates, &p.selected_take_ids()?)?;
-        let rows = report::group(&entries, By::Shot, &b.currency, &b.rates, &b.tz)?;
-        Ok(Some((s, rows)))
     }
 
     fn load_takes(&mut self) -> anyhow::Result<()> {
@@ -1543,49 +1532,6 @@ impl App {
         if let Some(f) = open {
             self.open_file(&f);
         }
-    }
-
-    fn costs(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            let Some((s, rows)) = &self.film.cost else {
-                ui.weak("nothing spent yet");
-                return;
-            };
-            let cur = &s.currency;
-            ui.heading(format!("{} {cur}", money(s.spent)));
-            ui.label(format!(
-                "in the cut {}, thrown away {}, other {}",
-                money(s.in_cut),
-                money(s.discarded),
-                money(s.other)
-            ));
-            if s.held > 0.0 {
-                ui.label(
-                    RichText::new(format!(
-                        "{} {cur} held for jobs still running",
-                        money(s.held)
-                    ))
-                    .color(theme::PAPER),
-                );
-            }
-            ui.add_space(12.0);
-            egui::Grid::new("by shot").striped(true).show(ui, |ui| {
-                ui.strong("shot");
-                ui.strong(cur.as_str());
-                ui.strong("jobs");
-                ui.end_row();
-                for r in rows {
-                    ui.label(if r.key == "-" {
-                        "outside shots"
-                    } else {
-                        &r.key
-                    });
-                    ui.label(money(r.spent));
-                    ui.label(r.jobs.to_string());
-                    ui.end_row();
-                }
-            });
-        });
     }
 
     pub fn tab(&self) -> Tab {

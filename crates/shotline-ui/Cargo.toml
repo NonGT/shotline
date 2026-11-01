@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+jiff = "0.2.38"
 anyhow = "1.0.104"
 cpal = "0.18.2"
 eframe = { version = "0.37.0", features = ["persistence"] }

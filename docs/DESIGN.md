@@ -496,6 +496,9 @@ colour matching, music tracks with start and volume; a track from outside the fi
 `music/`) and renders in the background with the same code as `shotline timeline render`, into
 `renders/`. Past renders play in the app.
 
+The Cost tab charts spending per day as stacked bars, one colour per model (last 7 or 30 days,
+or all of it), with a table of models under it (usage, jobs, money) and the spend per shot.
+
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first: an element's "Make image…" shows
 "Get price" (free), then a "Make it for $0.04" button, and the CLI refuses the job if the price has
