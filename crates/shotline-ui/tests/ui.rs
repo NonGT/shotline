@@ -741,7 +741,10 @@ fn menu_in_the_window() {
         .with_git(None)
         .with_window_menu()
         .testing();
-    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    // Tall enough for the list under Linux's in-window menu bar.
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();

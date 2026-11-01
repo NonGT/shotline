@@ -513,9 +513,10 @@ pub fn spend_once(
     what: &str,
     go: Go,
 ) -> Result<Option<Job>> {
+    // rt bound first so it drops last, after the plugins.
     let Priced {
-        opened,
         rt,
+        opened,
         b,
         quote,
         cost,
