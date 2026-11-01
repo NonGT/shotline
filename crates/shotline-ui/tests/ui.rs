@@ -440,6 +440,19 @@ fn clip(path: &Path) -> Option<()> {
     ok.then_some(())
 }
 
+/// Steps the app until `done`, for up to five seconds: slow CI machines take a while to start ffmpeg.
+fn wait_for(h: &mut Harness<App>, done: impl Fn(&Harness<App>) -> bool) -> bool {
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        if done(h) {
+            return true;
+        }
+        h.step();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    done(h)
+}
+
 /// Steps the app for a while in real time, as playback needs.
 fn wait(h: &mut Harness<App>, secs: f64) {
     let until = Instant::now() + Duration::from_secs_f64(secs);
@@ -488,7 +501,10 @@ fn plays_compares_and_plays_the_cut() {
     wait(&mut h, 0.3);
     assert!(h.state().is_playing());
     // The title, and the picture's alt text.
-    assert_eq!(h.query_all_by_label("01-010#1").count(), 2);
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("01-010#1")
+        .count()
+        == 2));
     h.get_by_label("Pause");
 
     h.get_by_label("Compare #3").click();
@@ -503,11 +519,14 @@ fn plays_compares_and_plays_the_cut() {
     wait(&mut h, 0.1);
     h.get_by_label("Play the cut").click();
     wait(&mut h, 0.3);
-    assert_eq!(h.query_all_by_label("the cut").count(), 2);
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("the cut")
+        .count()
+        == 2));
     assert!(h.state().is_playing());
     // The cut doesn't loop: it stops after its one second.
-    wait(&mut h, 1.5);
-    assert!(!h.state().is_playing());
+    wait(&mut h, 1.0);
+    assert!(wait_for(&mut h, |h| !h.state().is_playing()));
     h.get_by_label("Close player").click();
     wait(&mut h, 0.1);
     assert_eq!(h.query_all_by_label("the cut").count(), 0);
