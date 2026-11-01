@@ -189,8 +189,10 @@ pub fn balance(installed: &Installed, only: Option<&str>) -> Result<()> {
 
 /// The voices a plugin's audio.tts can use.
 pub fn voices(installed: &Installed, name: &str) -> Result<Vec<VoiceInfo>> {
+    // The plugin goes before its runtime, or Windows waits on it forever.
+    let rt = runtime();
     let plugin = open(installed, name)?;
-    match runtime().block_on(plugin.voices()) {
+    match rt.block_on(plugin.voices()) {
         Ok(v) => Ok(v.voices),
         Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't list its voices"),
         Err(e) => bail!("{name}: {e}"),
