@@ -299,6 +299,12 @@ pub struct ShotSet {
     duration: Option<f64>,
     transition: Option<String>,
     recipe: Option<String>,
+    /// Video model instead of the film's (see plugin_ls); "" goes back to the film's
+    model: Option<String>,
+    /// The model's plugin (default: the film's)
+    plugin: Option<String>,
+    /// Instead of the film's; "" goes back to the film's
+    resolution: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -612,7 +618,8 @@ impl Server {
         self.cli(args, None, &ctx).await
     }
 
-    /// Change a shot's title, plot, prompt, frame prompt, duration, transition or recipe.
+    /// Change a shot's title, plot, prompt, frame prompt, duration, transition, recipe, or the
+    /// video model and resolution it's made with instead of the film's.
     #[tool]
     async fn shot_set(
         &self,
@@ -627,6 +634,9 @@ impl Server {
         opt(&mut args, "--duration", p.duration);
         opt(&mut args, "--transition", p.transition);
         opt(&mut args, "--recipe", p.recipe);
+        opt(&mut args, "--model", p.model);
+        opt(&mut args, "--plugin", p.plugin);
+        opt(&mut args, "--resolution", p.resolution);
         self.cli(args, None, &ctx).await
     }
 

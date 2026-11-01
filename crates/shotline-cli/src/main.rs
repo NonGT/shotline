@@ -408,6 +408,15 @@ enum ShotCmd {
         transition: Option<Transition>,
         #[arg(long)]
         recipe: Option<String>,
+        /// Video model instead of the film's; "" goes back to the film's
+        #[arg(long)]
+        model: Option<String>,
+        /// The model's plugin (default: the film's)
+        #[arg(long, requires = "model")]
+        plugin: Option<String>,
+        /// Instead of the film's; "" goes back to the film's
+        #[arg(long)]
+        resolution: Option<String>,
     },
     /// Add a line of dialogue: `shot line 01-010 paka "..."`
     Line {
@@ -726,9 +735,25 @@ fn run(cli: Cli) -> Result<()> {
             duration,
             transition,
             ref recipe,
+            ref model,
+            ref plugin,
+            ref resolution,
         }) => {
             let p = open()?;
             let mut s = p.shot(shot)?;
+            if let Some(m) = model {
+                let m = (!m.is_empty()).then(|| {
+                    let plugin = plugin.clone().unwrap_or_else(|| p.config.plugin.clone());
+                    (plugin, m.clone())
+                });
+                if let Some((plugin, m)) = &m {
+                    format::video_model(&p, plugin, m)?;
+                }
+                s.set_video_model(m);
+            }
+            if let Some(r) = resolution {
+                s.set_resolution((!r.is_empty()).then(|| r.clone()));
+            }
             if let Some(t) = frame_prompt {
                 s.frame_prompt = (!t.is_empty()).then(|| t.clone());
             }

@@ -25,6 +25,10 @@ pub(crate) struct Form {
     pub duration: f64,
     pub transition: Transition,
     pub recipe: Option<String>,
+    /// Plugin and model instead of the film's.
+    pub model: Option<(String, String)>,
+    /// Instead of the film's.
+    pub resolution: Option<String>,
     pub lines: Vec<LineForm>,
     /// The line being added.
     pub new: LineForm,
@@ -176,6 +180,8 @@ pub(crate) enum Field {
     Duration(f64),
     Transition(Transition),
     Recipe(Option<String>),
+    Model(Option<(String, String)>),
+    Resolution(Option<String>),
 }
 
 pub(crate) enum Action {
@@ -380,6 +386,8 @@ impl Form {
             duration: s.duration.unwrap_or(default_duration),
             transition: s.transition,
             recipe: s.recipe.clone(),
+            model: video_model(s),
+            resolution: s.model.as_ref().and_then(|m| m.resolution.clone()),
             lines: s.lines.iter().map(LineForm::of).collect(),
             new: LineForm::default(),
         }
@@ -409,6 +417,14 @@ impl Form {
             Field::Transition(self.transition),
         );
         set(self.recipe != s.recipe, Field::Recipe(self.recipe.clone()));
+        set(
+            self.model != video_model(s),
+            Field::Model(self.model.clone()),
+        );
+        set(
+            self.resolution != s.model.as_ref().and_then(|m| m.resolution.clone()),
+            Field::Resolution(self.resolution.clone()),
+        );
         for (i, (f, l)) in self.lines.iter().zip(&s.lines).enumerate() {
             if *f != LineForm::of(l) {
                 out.push(Action::SetLine(r, i, f.clone()));
@@ -587,6 +603,8 @@ impl App {
                     }
                     Field::Transition(t) => s.transition = t,
                     Field::Recipe(rc) => s.recipe = rc,
+                    Field::Model(m) => s.set_video_model(m),
+                    Field::Resolution(r) => s.set_resolution(r),
                 }
                 p.save_shot(r, &s)?;
                 format!("{r} saved").into()
@@ -739,6 +757,12 @@ fn restore(step: &Step, back: bool) -> anyhow::Result<()> {
         c.ends(back).1.put(&c.path)?;
     }
     Ok(())
+}
+
+/// The shot's own video model, when it has both halves of one.
+fn video_model(s: &Shot) -> Option<(String, String)> {
+    let m = s.model.as_ref()?;
+    Some((m.plugin.clone()?, m.id.clone()?))
 }
 
 #[cfg(test)]

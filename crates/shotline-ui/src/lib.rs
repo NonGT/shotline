@@ -1407,6 +1407,9 @@ impl App {
             ),
         }
         ui.add_space(12.0);
+        let models = self.video_models();
+        let film = self.project.format();
+        let mut flags = vec![];
         let f = &mut self.form;
         egui::Grid::new("facts")
             .num_columns(2)
@@ -1448,16 +1451,11 @@ impl App {
                         });
                     ui.end_row();
                 }
-                if let Some(m) = &s.model {
-                    ui.weak("Model");
-                    ui.label(format!(
-                        "{} {}",
-                        m.plugin.as_deref().unwrap_or("-"),
-                        m.id.as_deref().unwrap_or("-")
-                    ));
-                    ui.end_row();
-                }
+                flags = shot_model(ui, f, &models, &film, s);
             });
+        for flag in flags {
+            ui.label(RichText::new(flag).color(theme::FLAG));
+        }
     }
 
     fn take_list(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, acts: &mut Vec<Action>) {
@@ -2254,4 +2252,83 @@ fn format_fields(
             ),
         );
     }
+}
+
+/// The Model and Resolution rows of a shot: the film's unless picked. Returns what's wrong
+/// with them, for under the grid where it has room to wrap.
+fn shot_model(
+    ui: &mut egui::Ui,
+    f: &mut Form,
+    models: &[(String, ModelInfo)],
+    film: &shotline_core::Format,
+    s: &Shot,
+) -> Vec<String> {
+    // Ids are too long for the column: "minimax/h3-max/reference-to-video" shows as h3-max,
+    // "fal-ai/flux" as flux, a Venice id as it is.
+    let short = |m: &str| m.split('/').nth(1).unwrap_or(m).to_string();
+    let l = ui.weak("Model");
+    let film_says = format!("Film's ({})", short(&film.model));
+    egui::ComboBox::from_id_salt("shot model")
+        .selected_text(
+            f.model
+                .as_ref()
+                .map_or(film_says.clone(), |(_, m)| short(m)),
+        )
+        .width(150.0)
+        .truncate()
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut f.model, None, &film_says);
+            for (p, m) in models {
+                let pick = Some((p.clone(), m.id.clone()));
+                ui.selectable_value(&mut f.model, pick, format!("{p} · {}", m.id));
+            }
+        })
+        .response
+        .on_hover_text(match &f.model {
+            Some((p, m)) => format!("{p} · {m}"),
+            None => format!("{} · {}", film.plugin, film.model),
+        })
+        .labelled_by(l.id);
+    ui.end_row();
+
+    let (plugin, model) = f
+        .model
+        .clone()
+        .unwrap_or((film.plugin.clone(), film.model.clone()));
+    let spec = models
+        .iter()
+        .find(|(p, m)| *p == plugin && m.id == model)
+        .map(|(_, m)| m);
+    let l = ui.weak("Resolution");
+    let film_says = format!("Film's ({})", film.resolution);
+    egui::ComboBox::from_id_salt("shot resolution")
+        .selected_text(f.resolution.clone().unwrap_or(film_says.clone()))
+        .width(150.0)
+        .truncate()
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut f.resolution, None, &film_says);
+            for r in spec.map_or(&[][..], |m| &m.resolutions) {
+                ui.selectable_value(&mut f.resolution, Some(r.clone()), r);
+            }
+        })
+        .response
+        .labelled_by(l.id);
+    ui.end_row();
+
+    let resolution = f.resolution.as_ref().unwrap_or(&film.resolution);
+    let aspect = s.model.as_ref().and_then(|m| m.aspect.as_ref());
+    let mut flags = vec![];
+    if let Some(m) = spec
+        && !m.resolutions.is_empty()
+        && !m.resolutions.contains(resolution)
+    {
+        flags.push(format!("{} doesn't do {resolution}", short(&m.id)));
+    }
+    if let Some(a) = aspect.filter(|a| **a != film.aspect) {
+        flags.push(format!(
+            "This shot is {a} but the film is {}; the render will stretch it.",
+            film.aspect
+        ));
+    }
+    flags
 }

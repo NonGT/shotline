@@ -428,6 +428,7 @@ shotline chapter ls
 shotline shot add <chapter> [--after id] --plot ... [--prompt ...] [--duration n] [--transition cut|continue]
 shotline shot add ... [--plugin p] [--model m] [--recipe r]
 shotline shot set <shot> [--title] [--plot] [--prompt] [--frame-prompt] [--duration] [--transition] [--recipe]
+                  [--model m [--plugin p]] [--resolution r]   "" goes back to the film's
 shotline shot draft <shot> [--as video|image|translate] [--write] [--plugin p] [--model m] [--yes]
 shotline shot line <shot> <who> <text> [--at s]
 shotline shot ls [chapter]
@@ -499,8 +500,11 @@ The film's format is the shape, resolution, shot length and video model in shotl
 film picks its shape (9:16 unless chosen); `shotline format` and the Format section at the top of
 the Story tab change it later, as an undo step like any other edit. The resolutions on offer are
 the model's own names for them. Takes already made keep the shape they were made at, so it says
-how many shots have one. A shot can still override any of it in its `[model]` table, but the
-render scales every clip to the first one's size, so a shot of another shape comes out stretched.
+how many shots have one. A shot can use another model or resolution (`shot set --model`, or the
+Model and Resolution rows next to the shot), kept in its `[model]` table, which goes away once
+both are back to the film's. Its shape can only be changed by hand there, and is warned about:
+the render scales every clip to the first one's size, so a shot of another shape comes out
+stretched.
 
 The Cut tab lists the shots in play order with their takes, edits timeline.toml (crossfade,
 colour matching, music tracks with start and volume; a track from outside the film is copied into

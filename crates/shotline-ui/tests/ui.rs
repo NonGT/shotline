@@ -97,6 +97,8 @@ const R: ShotRef = ShotRef {
 fn edit_a_shot() {
     let tmp = tempfile::tempdir().unwrap();
     let mut h = harness(tmp.path());
+    // Wide enough for the shot's settings column to be all on screen.
+    h.set_size(egui::vec2(1100.0, 800.0));
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();
@@ -1333,6 +1335,72 @@ fn set_the_format_on_the_story_tab() {
     h.run();
     let f = aspect();
     assert_eq!((f.aspect.as_str(), f.resolution.as_str()), ("9:16", "768P"));
+}
+
+#[test]
+fn a_shot_on_another_model() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let video = |id: &str, res: &[&str]| ModelInfo {
+        id: id.into(),
+        op: Op::VideoGenerate,
+        resolutions: res.iter().map(|r| r.to_string()).collect(),
+        ..ModelInfo::default()
+    };
+    app.set_plugins(
+        vec![Description {
+            name: "fal".into(),
+            version: "1".into(),
+            protocol: 1,
+            env: vec![],
+            models: vec![
+                video("minimax/h3-max/reference-to-video", &["768P", "1080P"]),
+                video("bytedance/seedance/v2", &["480p", "1080p"]),
+            ],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let model = || p.shot(R).unwrap().model;
+
+    h.get_by_role_and_label(Role::ComboBox, "Model").click();
+    h.run();
+    h.get_by_label("fal · bytedance/seedance/v2").click();
+    h.run();
+    h.run();
+    let m = model().unwrap();
+    assert_eq!(m.id.as_deref(), Some("bytedance/seedance/v2"));
+    // The film's 768P isn't one of this model's.
+    h.get_by_label("seedance doesn't do 768P");
+    h.get_by_role_and_label(Role::ComboBox, "Resolution")
+        .click();
+    h.run();
+    h.get_by_label("1080p").click();
+    h.run();
+    h.run();
+    assert_eq!(model().unwrap().resolution.as_deref(), Some("1080p"));
+    assert!(h.query_by_label_contains("doesn't do").is_none());
+
+    // Back to the film's: the shot file loses its [model].
+    h.get_by_role_and_label(Role::ComboBox, "Resolution")
+        .click();
+    h.run();
+    h.get_by_label("Film's (768P)").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Model").click();
+    h.run();
+    h.get_by_label("Film's (h3-max)").click();
+    h.run();
+    h.run();
+    assert_eq!(model(), None);
 }
 
 #[test]

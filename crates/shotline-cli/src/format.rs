@@ -65,10 +65,16 @@ pub fn apply(p: &mut Project, c: &Change) -> Result<Format> {
         f.duration = d;
     }
     // Refused before anything is written: a model nothing provides can't make a shot.
-    let installed = plugins::load();
-    plugins::catalog(p, &installed)?.get(&f.plugin, &f.model, &Op::VideoGenerate)?;
+    video_model(p, &f.plugin, &f.model)?;
     p.set_format(&f)?;
     Ok(f)
+}
+
+/// Refuses a video model nothing installed provides.
+pub fn video_model(p: &Project, plugin: &str, model: &str) -> Result<()> {
+    let installed = plugins::load();
+    plugins::catalog(p, &installed)?.get(plugin, model, &Op::VideoGenerate)?;
+    Ok(())
 }
 
 /// What the model says it can't do.

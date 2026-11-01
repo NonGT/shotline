@@ -90,6 +90,12 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
     let duration = shot.duration.unwrap_or(cfg.duration);
     let spec = &catalog.get(&plugin, &model, &Op::VideoGenerate)?.info;
     let mut warnings = vec![];
+    if aspect != cfg.aspect {
+        warnings.push(format!(
+            "{r} is {aspect} but the film is {}; the render will stretch it",
+            cfg.aspect
+        ));
+    }
     if shot.prompt.trim().is_empty() {
         warnings.push(format!(
             "{r} has no prompt yet, `shotline shot draft {r}` can write one from the plot"

@@ -84,6 +84,31 @@ pub struct Shot {
     pub frame_prompt: Option<String>,
 }
 
+impl Shot {
+    /// The video model (plugin, id) to use instead of the film's; None for the film's.
+    pub fn set_video_model(&mut self, m: Option<(String, String)>) {
+        let o = self.model.get_or_insert_default();
+        (o.plugin, o.id) = m.unzip();
+        self.prune_model();
+    }
+
+    /// The resolution to use instead of the film's; None for the film's.
+    pub fn set_resolution(&mut self, r: Option<String>) {
+        self.model.get_or_insert_default().resolution = r;
+        self.prune_model();
+    }
+
+    fn prune_model(&mut self) {
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|m| *m == ModelOverride::default())
+        {
+            self.model = None;
+        }
+    }
+}
+
 /// Something a cast member says in the shot.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Line {

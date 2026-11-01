@@ -191,3 +191,61 @@ fn the_film_format() {
     f().assert()
         .stdout(predicate::str::contains("duration    5 s\n"));
 }
+
+#[test]
+fn a_shot_on_another_model() {
+    let tmp = TempDir::new().unwrap();
+    shotline(&tmp).args(["init", "f"]).assert().success();
+    let run = |args: &[&str]| {
+        let mut c = shotline(&tmp);
+        c.arg("-C").arg("f").args(args);
+        c.assert()
+    };
+    run(&["chapter", "add", "One"]).success();
+    run(&["shot", "add", "1", "--prompt", "rain"]).success();
+    let model = "minimax/h3-max/reference-to-video";
+    run(&[
+        "shot",
+        "set",
+        "01-010",
+        "--model",
+        model,
+        "--resolution",
+        "1080P",
+    ])
+    .success();
+    run(&["prompt", "01-010"])
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "fal {model} · 8s · 1080P · 9:16"
+        )));
+    run(&["shot", "set", "01-010", "--model", "nope"])
+        .failure()
+        .stderr(predicate::str::contains("no video.generate model nope"));
+    // Back to the film's, and nothing left behind in the shot file.
+    run(&["shot", "set", "01-010", "--model", "", "--resolution", ""]).success();
+    let shot = std::fs::read_to_string(
+        std::fs::read_dir(tmp.path().join("f/chapters"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("shots/010.toml"),
+    )
+    .unwrap();
+    assert!(!shot.contains("[model]"), "{shot}");
+
+    // A shot of another shape is warned about: the render stretches it.
+    let path = std::fs::read_dir(tmp.path().join("f/chapters"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("shots/010.toml");
+    std::fs::write(&path, shot + "\n[model]\naspect = \"16:9\"\n").unwrap();
+    run(&["prompt", "01-010"])
+        .success()
+        .stderr(predicate::str::contains("the render will stretch it"));
+}
