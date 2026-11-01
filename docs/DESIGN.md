@@ -417,7 +417,7 @@ shotline story | style [--set text]
 shotline doctor
 shotline plugin ls | doctor <name> | balance [name] | voices <name>
 shotline element add <kind> <name> [--handle h] [--desc ...]
-shotline element anchor <handle> (--file img | --generate [--prompt ..] [--plugin p] [--model m] [--yes])
+shotline element anchor <handle> (--file img | --generate [--prompt ..] [--ref file|url].. [--no-anchors] [--plugin p] [--model m] [--yes])
 shotline element draft <handle> [--write] [--plugin p] [--model m] [--yes]
 shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--sample f] [--set k=v]
 shotline element ls
@@ -492,7 +492,12 @@ live in the system menu bar on macOS and Windows (muda) and in a menu bar inside
 Linux, where muda would need GTK; all three send the same commands.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
-in the project folder. Paid actions still quote and ask first.
+in the project folder. Paid actions still quote and ask first: an element's "Make image…" shows
+"Get price" (free), then a "Make it for $0.04" button, and the CLI refuses the job if the price has
+changed since. The image becomes an anchor like one added from a file, so it can be undone.
+Models that take reference images get the element's own anchors to start with; any can be left
+out, and others added from any element, a file, or a web address (downloaded into
+`.shotline/cache/refs`). The prompt names them Image 1, Image 2… in that order.
 
 It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window
 was. When working on the UI, keep it open with

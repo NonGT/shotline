@@ -4426,6 +4426,7 @@ dependencies = [
  "assert_fs",
  "clap",
  "predicates",
+ "reqwest",
  "rmcp",
  "schemars",
  "serde",

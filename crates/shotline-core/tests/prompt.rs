@@ -203,6 +203,7 @@ fn anchor_prompt_keeps_the_look() {
         ImageFor::Anchor {
             handle: "mali".into(),
             prompt: "side view".into(),
+            refs: None,
         },
     )
     .unwrap();
@@ -223,6 +224,7 @@ fn anchor_prompt_keeps_the_look() {
         ImageFor::Anchor {
             handle: "paka".into(),
             prompt: "next to @kan".into(),
+            refs: None,
         },
     )
     .unwrap();
@@ -237,6 +239,54 @@ fn anchor_prompt_keeps_the_look() {
     );
     assert!(b.text.contains("next to image 1"), "{}", b.text);
     assert!(b.text.contains("Keep each character's face"), "{}", b.text);
+}
+
+#[test]
+fn anchor_with_picked_images() {
+    let (_dir, p) = film();
+    let paka = p.anchors(&p.element("paka").unwrap()).unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let outside = elsewhere.path().join("dress.png");
+    let b = image(
+        &p,
+        ImageFor::Anchor {
+            handle: "paka".into(),
+            prompt: "next to @kan, in the dress from image 2".into(),
+            refs: Some(vec![paka[1].clone(), outside.clone()]),
+        },
+    )
+    .unwrap();
+    let refs: Vec<_> = b
+        .references
+        .iter()
+        .map(|r| (r.label.as_str(), r.handle.as_str(), r.path.clone()))
+        .collect();
+    assert_eq!(
+        refs,
+        [
+            ("image 1", "paka", p.rel(&paka[1])),
+            ("image 2", "", outside.to_string_lossy().into_owned()),
+        ]
+    );
+    // Kan's anchors aren't picked, so Kan is only named.
+    assert!(
+        b.text
+            .contains("next to Kan, in the dress from image 2 Paka as shown in image 1."),
+        "{}",
+        b.text
+    );
+
+    // None picked: text only.
+    let b = image(
+        &p,
+        ImageFor::Anchor {
+            handle: "paka".into(),
+            prompt: String::new(),
+            refs: Some(vec![]),
+        },
+    )
+    .unwrap();
+    assert!(b.references.is_empty());
 }
 
 #[test]

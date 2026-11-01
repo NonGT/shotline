@@ -86,6 +86,40 @@ fn generated_anchor() {
         .assert()
         .stdout("cast  @paka             Paka (2 anchors)\n");
     assert_eq!(ledger(&tmp), 4);
+
+    // Picked references: one anchor left out entirely, a file from elsewhere instead.
+    tmp.child("dress.png")
+        .write_binary(b"\x89PNG fake")
+        .unwrap();
+    shotline(&tmp)
+        .args(["element", "anchor", "paka", "--generate", "--no-anchors"])
+        .args([
+            "--ref",
+            "../dress.png",
+            "--prompt",
+            "in the dress from image 1",
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("elements/cast/paka/03.png"));
+    let jobs = std::fs::read_dir(tmp.path().join("film/jobs")).unwrap();
+    let last = jobs.map(|e| e.unwrap().path()).max().unwrap();
+    let job = std::fs::read_to_string(last.join("job.toml")).unwrap();
+    assert!(job.contains("dress.png"), "{job}");
+    assert!(!job.contains("01.png"), "{job}");
+    shotline(&tmp)
+        .args([
+            "element",
+            "anchor",
+            "paka",
+            "--generate",
+            "--ref",
+            "nope.png",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nope.png doesn't exist"));
 }
 
 #[test]

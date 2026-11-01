@@ -274,7 +274,10 @@ impl Project {
 
     /// Path relative to the project root with `/` separators on every OS.
     pub fn rel(&self, path: &Path) -> String {
-        let rel = path.strip_prefix(&self.root).unwrap_or(path);
+        // Outside the film, e.g. a reference image from Downloads, it stays as it is.
+        let Ok(rel) = path.strip_prefix(&self.root) else {
+            return path.to_string_lossy().into_owned();
+        };
         rel.components()
             .map(|c| c.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()

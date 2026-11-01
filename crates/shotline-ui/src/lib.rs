@@ -2,6 +2,7 @@
 //! the cut. It reads and writes the project folder through shotline-core like the CLI does, so
 //! both always agree.
 
+mod anchor;
 mod edit;
 mod git;
 mod keys;
@@ -76,6 +77,24 @@ pub trait Host: Send + Sync {
     fn voices(&self, plugin: &str) -> anyhow::Result<Vec<VoiceInfo>>;
     /// What's left on the account, said in a line. It costs nothing, so it checks a key.
     fn balance(&self, plugin: &str) -> anyhow::Result<String>;
+    /// What a new anchor image would cost, e.g. "$0.04". Free.
+    fn anchor_quote(&self, film: &Path, ask: &AnchorAsk) -> anyhow::Result<String>;
+    /// Downloads a reference image into the film's cache. Free.
+    fn fetch_image(&self, film: &Path, url: &str) -> anyhow::Result<PathBuf>;
+    /// Spends, if the price is still `at`, and returns the image, not yet an anchor.
+    fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf>;
+}
+
+/// A new anchor image for an element, made by an image model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnchorAsk {
+    pub handle: String,
+    /// Added to the element's description.
+    pub prompt: String,
+    pub plugin: String,
+    pub model: String,
+    /// The images that go along, named Image 1, Image 2… in this order.
+    pub refs: Vec<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -117,6 +136,7 @@ pub struct App {
     host: Option<Arc<dyn Host>>,
     /// Keys asked for, e.g. from a plugin that said it has none; the shell opens Settings.
     wants_keys: bool,
+    maker: Option<anchor::Maker>,
     voice_lists: Arc<Mutex<HashMap<String, VoiceList>>>,
     history: History,
     git: Option<Git>,
@@ -216,6 +236,7 @@ impl App {
             plugins: vec![],
             host: None,
             wants_keys: false,
+            maker: None,
             voice_lists: Arc::default(),
             history: History::default(),
             git: Git::find(),
@@ -240,6 +261,53 @@ impl App {
     pub fn set_plugins(&mut self, plugins: Vec<Description>, host: Option<Arc<dyn Host>>) {
         self.plugins = plugins;
         self.host = host;
+    }
+
+    /// A paid-for image is kept whichever element is showing now.
+    fn add_made_anchor(&mut self) {
+        let Some(m) = &mut self.maker else { return };
+        let Some(out) = m.take_made() else { return };
+        match self.project.element(&m.handle) {
+            Ok(el) => {
+                self.flush();
+                self.apply(vec![Action::AddAnchor(el, out)]);
+            }
+            Err(e) => self.status = Some((format!("made {}, but {e}", out.display()), true)),
+        }
+    }
+
+    fn image_models(&self) -> Vec<anchor::ImageModel> {
+        self.plugins
+            .iter()
+            .flat_map(|d| {
+                d.models
+                    .iter()
+                    .filter(|m| m.op == Op::ImageGenerate)
+                    .map(|m| anchor::ImageModel {
+                        plugin: d.name.clone(),
+                        model: m.id.clone(),
+                        ref_label: m.ref_image.clone(),
+                        max_refs: m.max_images,
+                    })
+            })
+            .collect()
+    }
+
+    /// Every element's anchors, named like "@paka 2", to pick references from.
+    fn anchor_pool(&self) -> Vec<(String, PathBuf)> {
+        let mut pool = vec![];
+        for el in self.project.elements().unwrap_or_default() {
+            for (i, a) in self
+                .project
+                .anchors(&el)
+                .unwrap_or_default()
+                .into_iter()
+                .enumerate()
+            {
+                pool.push((format!("@{} {}", el.handle, i + 1), a));
+            }
+        }
+        pool
     }
 
     /// Voice lists are asked for again, e.g. once a key is set.
@@ -477,6 +545,7 @@ impl App {
             self.themed = true;
             theme::apply(ui.ctx());
         }
+        self.add_made_anchor();
         let tab = self.tab;
         egui::Panel::top("bar")
             .frame(
@@ -813,12 +882,62 @@ impl App {
             if let Some(a) = remove {
                 acts.push(Action::RemoveAnchor(el.clone(), a));
             }
-            if ui.button("Add image…").clicked()
-                && let Some(file) = rfd::FileDialog::new()
-                    .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
-                    .pick_file()
-            {
-                acts.push(Action::AddAnchor(el.clone(), file));
+            let models = self.image_models();
+            let making = self.maker.as_ref().is_some_and(|m| m.handle == el.handle);
+            ui.horizontal(|ui| {
+                if ui.button("Add image…").clicked()
+                    && let Some(file) = rfd::FileDialog::new()
+                        .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                        .pick_file()
+                {
+                    acts.push(Action::AddAnchor(el.clone(), file));
+                }
+                let busy = self.maker.as_ref().filter(|m| m.busy()).map(|m| m.handle.clone());
+                if !models.is_empty()
+                    && !making
+                    && ui
+                        .add_enabled(busy.is_none(), egui::Button::new("Make image…"))
+                        .on_disabled_hover_text(format!(
+                            "still making one for @{}",
+                            busy.unwrap_or_default()
+                        ))
+                        .clicked()
+                {
+                    let cfg = &self.project.config.image;
+                    self.maker = Some(anchor::Maker::new(
+                        &el.handle,
+                        anchors.to_vec(),
+                        &models,
+                        (&cfg.plugin, &cfg.model),
+                    ));
+                }
+            });
+            if making {
+                ui.add_space(6.0);
+                let pool = self.anchor_pool();
+                let wants = self.maker.as_mut().unwrap().show(
+                    ui,
+                    &models,
+                    &pool,
+                    &mut self.thumbs,
+                    self.host.clone(),
+                    &self.project.root,
+                );
+                let host = self.host.clone();
+                match (wants, host) {
+                    (anchor::Wants::Price(ask), Some(host)) => {
+                        self.flush();
+                        let m = self.maker.as_ref().unwrap();
+                        m.price(ui.ctx(), host, &self.project.root, ask);
+                    }
+                    (anchor::Wants::Make(ask, cost), Some(host)) => {
+                        self.flush();
+                        let m = self.maker.as_ref().unwrap();
+                        m.make(ui.ctx(), host, &self.project.root, ask, cost);
+                    }
+                    (anchor::Wants::Zoom(p), _) => self.zoom = Some(p),
+                    _ => {}
+                }
             }
             if el.kind == Kind::Cast {
                 ui.add_space(20.0);
@@ -1864,6 +1983,18 @@ fn setting(ui: &mut egui::Ui, key: &str, p: &serde_json::Value, table: &mut toml
 }
 
 /// Framed so it reads as a button under a picture, in red as it takes something away.
+/// A grid label for a cell several rows tall, beside the first row rather than the middle.
+fn top_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.vertical(|ui| {
+        let row = egui::vec2(0.0, ui.spacing().interact_size.y);
+        let center = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(row, center, |ui| ui.weak(text))
+            .inner
+    })
+    .inner
+}
+
+// No fill of its own, so it lights up on hover like every other button.
 fn remove_button(ui: &mut egui::Ui) -> egui::Response {
     ui.button(RichText::new("Remove").small().color(theme::FLAG))
 }
@@ -1928,15 +2059,3 @@ pub fn run(
     )
     .map_err(|e| anyhow::anyhow!("can't open the window: {e}"))
 }
-/// A grid label for a cell several rows tall, beside the first row rather than the middle.
-fn top_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.vertical(|ui| {
-        let row = egui::vec2(0.0, ui.spacing().interact_size.y);
-        let center = egui::Layout::left_to_right(egui::Align::Center);
-        ui.allocate_ui_with_layout(row, center, |ui| ui.weak(text))
-            .inner
-    })
-    .inner
-}
-
-// No fill of its own, so it lights up on hover like every other button.

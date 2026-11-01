@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -9,6 +9,7 @@ use shotline_core::{
 
 mod cost;
 mod draft;
+mod fetch;
 mod image;
 mod mcp;
 mod plugins;
@@ -161,6 +162,8 @@ impl ImageArgs {
             plugin: self.plugin.as_deref(),
             model: self.model.as_deref(),
             yes: self.yes,
+            at: None,
+            refs: None,
         }
     }
 }
@@ -279,6 +282,13 @@ enum ElementCmd {
         /// What to add to the element's description, e.g. "side view"
         #[arg(long, default_value = "", requires = "generate")]
         prompt: String,
+        /// Another image to go along, a file or an http(s) URL; named Image 2, Image 3… after
+        /// the element's own anchors
+        #[arg(long = "ref", requires = "generate")]
+        refs: Vec<String>,
+        /// Leave the element's own anchors out
+        #[arg(long, requires = "generate")]
+        no_anchors: bool,
         #[command(flatten)]
         image: ImageArgs,
     },
@@ -422,6 +432,35 @@ impl shotline_ui::Host for Plugins {
     fn balance(&self, plugin: &str) -> Result<String> {
         plugins::balance_of(&plugins::load(), plugin)
     }
+
+    fn anchor_quote(&self, film: &Path, ask: &shotline_ui::AnchorAsk) -> Result<String> {
+        let p = Project::open(film)?;
+        image::anchor_quote(&p, &ask.handle, &anchor_make(ask, None))
+    }
+
+    fn fetch_image(&self, film: &Path, url: &str) -> Result<PathBuf> {
+        fetch::image(&Project::open(film)?, url)
+    }
+
+    fn make_anchor(&self, film: &Path, ask: &shotline_ui::AnchorAsk, at: &str) -> Result<PathBuf> {
+        let p = Project::open(film)?;
+        match image::anchor_image(&p, &ask.handle, &anchor_make(ask, Some(at)))? {
+            Some((_, out)) => Ok(out),
+            None => bail!("nothing was made"),
+        }
+    }
+}
+
+#[cfg(feature = "ui")]
+fn anchor_make<'a>(ask: &'a shotline_ui::AnchorAsk, at: Option<&'a str>) -> image::Make<'a> {
+    image::Make {
+        prompt: &ask.prompt,
+        plugin: Some(&ask.plugin),
+        model: Some(&ask.model),
+        yes: false,
+        at,
+        refs: Some(ask.refs.clone()),
+    }
 }
 
 #[cfg(not(feature = "ui"))]
@@ -471,11 +510,16 @@ fn run(cli: Cli) -> Result<()> {
             ref file,
             generate,
             ref prompt,
+            ref refs,
+            no_anchors,
             ref image,
         }) => {
             let p = open()?;
             if generate {
-                image::anchor(&p, handle, &image.make(prompt))?;
+                let picked = image::picked(&p, handle, refs, no_anchors)?;
+                let mut m = image.make(prompt);
+                m.refs = picked;
+                image::anchor(&p, handle, &m)?;
             } else {
                 let dest = p.add_anchor(handle, file.as_ref().unwrap())?;
                 println!("{}", p.rel(&dest));

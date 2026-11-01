@@ -436,7 +436,7 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
         let v = serde_json::from_str(v).unwrap_or(serde_json::Value::String(v.clone()));
         req.params.insert(k.clone(), v);
     }
-    let Some(job) = spend_once(p, &a.plugin, &req, None, &a.op.to_string(), a.yes)? else {
+    let Some(job) = spend_once(p, &a.plugin, &req, None, &a.op.to_string(), a.yes.into())? else {
         return Ok(());
     };
     for f in &job.outputs {
@@ -454,22 +454,36 @@ pub fn job_cost(job: &Job) -> String {
 }
 
 /// Quotes one request, asks, then runs it as a job of its own. None if the answer was no.
-pub fn spend_once(
-    p: &Project,
-    plugin_name: &str,
-    req: &Request,
-    shot: Option<ShotRef>,
-    what: &str,
-    yes: bool,
-) -> Result<Option<Job>> {
+/// Whether to spend once the price is known.
+pub enum Go<'a> {
+    Ask,
+    Yes,
+    /// Agreed to elsewhere (the app) at this price; a different one stops it.
+    At(&'a str),
+}
+
+impl From<bool> for Go<'_> {
+    fn from(yes: bool) -> Self {
+        if yes { Go::Yes } else { Go::Ask }
+    }
+}
+
+// Fields drop in order: the plugins before their runtime.
+struct Priced {
+    opened: Opened,
+    rt: Runtime,
+    b: Books,
+    quote: Quote,
+    cost: String,
+}
+
+fn price_once(p: &Project, plugin_name: &str, req: &Request) -> Result<Priced> {
     let installed = plugins::load();
     let rt = plugins::runtime();
     let mut opened = Opened::new(&installed)?;
-    let name = plugin_name.to_string();
-    opened.load_rates(&rt, [&name]);
+    opened.load_rates(&rt, [&plugin_name.to_string()]);
     let b = books(p, &opened.rates)?;
-    let plugin = opened.plugin(plugin_name)?;
-    let quote = rt.block_on(plugin.quote(req))?;
+    let quote = rt.block_on(opened.plugin(plugin_name)?.quote(req))?;
     let c = b.rates.convert(quote.amount, &quote.unit, &b.currency)?;
     let cost = price(
         &quote,
@@ -477,12 +491,50 @@ pub fn spend_once(
         &b.currency,
         pricing(&quote.unit, &c.source),
     );
+    Ok(Priced {
+        opened,
+        rt,
+        b,
+        quote,
+        cost,
+    })
+}
+
+/// What a request would cost, said the way `spend_once` says it.
+pub fn quote_once(p: &Project, plugin_name: &str, req: &Request) -> Result<String> {
+    Ok(price_once(p, plugin_name, req)?.cost)
+}
+
+pub fn spend_once(
+    p: &Project,
+    plugin_name: &str,
+    req: &Request,
+    shot: Option<ShotRef>,
+    what: &str,
+    go: Go,
+) -> Result<Option<Job>> {
+    let Priced {
+        opened,
+        rt,
+        b,
+        quote,
+        cost,
+    } = price_once(p, plugin_name, req)?;
+    let name = plugin_name.to_string();
     println!("{what} · {plugin_name} {} · {cost}", req.model);
     show_balances(&rt, &opened, &b, &[(name.clone(), quote.clone())]);
-    if !yes && !confirm(&format!("spend {cost}?"))? {
-        println!("nothing spent");
-        return Ok(None);
+    match go {
+        Go::Yes => {}
+        Go::At(agreed) if agreed == cost => {}
+        Go::At(agreed) => bail!("the price changed from {agreed} to {cost}; nothing spent"),
+        Go::Ask => {
+            if !confirm(&format!("spend {cost}?"))? {
+                println!("nothing spent");
+                return Ok(None);
+            }
+        }
     }
+    let plugin = opened.plugin(plugin_name)?;
     let opts = options();
     let (job, err) = rt.block_on(async {
         on_ctrl_c(&opts);

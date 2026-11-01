@@ -37,7 +37,7 @@ fn make(
         prompt: Some(b.text),
         ..Request::default()
     };
-    let Some(job) = spend_once(p, &b.plugin, &req, shot, label, a.yes)? else {
+    let Some(job) = spend_once(p, &b.plugin, &req, shot, label, a.yes.into())? else {
         return Ok(None);
     };
     let file = job

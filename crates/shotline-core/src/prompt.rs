@@ -53,7 +53,13 @@ pub struct Built {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageFor {
     /// A new anchor image of an element, from its description and any anchors it has.
-    Anchor { handle: String, prompt: String },
+    Anchor {
+        handle: String,
+        prompt: String,
+        /// The images to go along instead of the element's anchors: some of them, others from
+        /// anywhere, or none. The prompt names them `Image 1`, `Image 2`… in this order.
+        refs: Option<Vec<std::path::PathBuf>>,
+    },
     /// A shot's storyboard frame: the first frame of the video.
     Frame(ShotRef),
 }
@@ -225,16 +231,23 @@ pub fn build_image(
     let spec = &catalog.get(&plugin, &model, &Op::ImageGenerate)?.info;
     let mut warnings = vec![];
     let (mut parts, references, aspect) = match what {
-        ImageFor::Anchor { handle, prompt } => {
+        ImageFor::Anchor {
+            handle,
+            prompt,
+            refs,
+        } => {
             let el = project.element(handle)?;
-            // The element's own anchors go along so a new one keeps the same look.
-            let (prompt, references) = resolve(
-                project,
-                spec,
-                prompt,
-                std::slice::from_ref(&el.handle),
-                &mut warnings,
-            )?;
+            let (prompt, references) = match refs {
+                // The element's own anchors go along so a new one keeps the same look.
+                None => resolve(
+                    project,
+                    spec,
+                    prompt,
+                    std::slice::from_ref(&el.handle),
+                    &mut warnings,
+                )?,
+                Some(files) => chosen(project, spec, &el, prompt, files, &mut warnings)?,
+            };
             // Making the first anchor of an element is the point, not something to warn about.
             let first = format!("@{} has no anchor images", el.handle);
             warnings.retain(|w| !w.starts_with(&first));
@@ -369,6 +382,80 @@ fn resolve(
         last = m.span.end;
     }
     text.push_str(&prompt[last..]);
+    Ok((text.trim().to_string(), references))
+}
+
+/// An anchor prompt with the images picked for it. Handles in the prompt become names, since only
+/// the picked images go along.
+fn chosen(
+    project: &Project,
+    spec: &ModelInfo,
+    el: &crate::Element,
+    prompt: &str,
+    files: &[std::path::PathBuf],
+    warnings: &mut Vec<String>,
+) -> Result<(String, Vec<Reference>)> {
+    let mut text = String::new();
+    let mut last = 0;
+    for m in handle::find(prompt) {
+        text.push_str(&prompt[last..m.span.start]);
+        match project.element(&m.handle) {
+            Ok(e) => text.push_str(&e.name),
+            Err(_) => text.push_str(&prompt[m.span.clone()]),
+        }
+        last = m.span.end;
+    }
+    text.push_str(&prompt[last..]);
+    let Some(ref_image) = &spec.ref_image else {
+        if !files.is_empty() {
+            warnings.push(format!(
+                "{} doesn't take reference images, so they're left out",
+                spec.id
+            ));
+        }
+        return Ok((text.trim().to_string(), vec![]));
+    };
+    let own: Vec<_> = project
+        .anchors(el)?
+        .iter()
+        .map(|a| project.rel(a))
+        .collect();
+    let mut references = vec![];
+    let mut shown = vec![];
+    for f in files {
+        let path = project.rel(f);
+        let label = render(ref_image, &[("n", &(references.len() + 1).to_string())]);
+        let mine = own.contains(&path);
+        if mine {
+            shown.push(label.clone());
+        }
+        references.push(Reference {
+            label,
+            handle: if mine {
+                el.handle.clone()
+            } else {
+                String::new()
+            },
+            path,
+        });
+    }
+    if let Some(max) = spec.max_images
+        && references.len() > max
+    {
+        warnings.push(format!(
+            "{} reference images but {} takes at most {max}",
+            references.len(),
+            spec.id,
+        ));
+    }
+    if !shown.is_empty() {
+        text = format!(
+            "{} {} as shown in {}.",
+            text.trim(),
+            el.name,
+            shown.join(" and ")
+        );
+    }
     Ok((text.trim().to_string(), references))
 }
 

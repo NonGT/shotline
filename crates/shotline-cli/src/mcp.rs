@@ -202,6 +202,13 @@ pub struct MakeAnchor {
     /// Image plugin and model instead of [image] in shotline.toml
     plugin: Option<String>,
     model: Option<String>,
+    /// More images to go along: files (relative to the project folder) or http(s) URLs. The
+    /// prompt names them Image 1, Image 2… after the element's own anchors.
+    #[serde(default)]
+    refs: Vec<String>,
+    /// Leave the element's own anchors out
+    #[serde(default)]
+    no_anchors: bool,
     /// Spend the money. Only after the user agreed to the price.
     #[serde(default)]
     confirm: bool,
@@ -467,8 +474,8 @@ impl Server {
         .await
     }
 
-    /// Make a new anchor image of an element with the image model, from its description and the
-    /// anchors it already has. SPENDS MONEY. Without confirm it only shows the price.
+    /// Make a new anchor image of an element with the image model, from its description, the
+    /// anchors it already has and any other reference images given. SPENDS MONEY. Without confirm it only shows the price.
     #[tool]
     async fn element_anchor_generate(
         &self,
@@ -479,6 +486,12 @@ impl Server {
         opt(&mut args, "--prompt", p.prompt);
         opt(&mut args, "--plugin", p.plugin);
         opt(&mut args, "--model", p.model);
+        for r in p.refs {
+            args.extend(["--ref".into(), r]);
+        }
+        if p.no_anchors {
+            args.push("--no-anchors".into());
+        }
         self.spend(args, p.confirm, &ctx).await
     }
 

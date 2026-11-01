@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use egui_kittest::kittest::Queryable;
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{Description, ModelInfo, Op, Quote, VoiceInfo};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
-use shotline_ui::{App, Host, MenuCommand, Shell, Tab};
+use shotline_ui::{AnchorAsk, App, Host, MenuCommand, Shell, Tab};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
 fn film(dir: &Path) -> Project {
@@ -243,6 +243,105 @@ impl Host for TestHost {
         assert_eq!(plugin, "elevenlabs");
         Ok("3.5 USD left".into())
     }
+
+    fn anchor_quote(&self, _film: &Path, ask: &AnchorAsk) -> anyhow::Result<String> {
+        assert_eq!(
+            (ask.plugin.as_str(), ask.model.as_str()),
+            ("fal", "fal-ai/nano-banana")
+        );
+        Ok("$0.04".into())
+    }
+
+    fn fetch_image(&self, film: &Path, url: &str) -> anyhow::Result<PathBuf> {
+        assert_eq!(url, "https://example.com/dress.png");
+        let out = film.join(".shotline").join("dress.png");
+        image::RgbImage::new(8, 8).save(&out)?;
+        Ok(out)
+    }
+
+    fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf> {
+        assert_eq!(
+            (ask.handle.as_str(), ask.prompt.as_str(), at),
+            ("paka", "side view", "$0.04")
+        );
+        assert_eq!(ask.refs, [film.join(".shotline").join("dress.png")]);
+        let out = film.join(".shotline").join("made.png");
+        image::RgbImage::new(8, 8).save(&out)?;
+        Ok(out)
+    }
+}
+
+fn anchors(p: &Project) -> Vec<PathBuf> {
+    p.anchors(&p.element("paka").unwrap()).unwrap()
+}
+
+#[test]
+fn make_an_anchor_image() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let model = |id: &str| ModelInfo {
+        id: id.into(),
+        op: Op::ImageGenerate,
+        ref_image: Some("Image {n}".into()),
+        max_images: Some(2),
+        ..ModelInfo::default()
+    };
+    app.set_plugins(
+        vec![Description {
+            name: "fal".into(),
+            version: "1".into(),
+            protocol: 1,
+            env: vec![],
+            models: vec![model("fal-ai/flux"), model("fal-ai/nano-banana")],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Elements").click();
+    h.run();
+    h.get_by_label_contains("@paka").click();
+    h.run();
+    h.get_by_label("Make image…").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Image model")
+        .click();
+    h.run();
+    h.get_by_label("fal · fal-ai/nano-banana").click();
+    h.run();
+    let prompt = h.get_by_role_and_label(Role::TextInput, "Image prompt");
+    prompt.focus();
+    prompt.type_text("side view");
+    h.run();
+    // Paka has no anchors yet, so a picture from the web goes along instead.
+    h.get_by_label("None: the image comes from the words alone.");
+    let url = h.get_by_role_and_label(Role::TextInput, "Image address");
+    url.focus();
+    url.type_text("https://example.com/dress.png");
+    h.run();
+    h.get_by_label("Fetch").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("Image 1")
+        .count()
+        > 0));
+    h.get_by_label("Get price").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make it for $0.04")
+        .is_some()));
+    assert!(anchors(&p).is_empty());
+    h.get_by_label("Make it for $0.04").click();
+    assert!(wait_for(&mut h, |_| !anchors(&p).is_empty()));
+    h.run();
+    assert_eq!(anchors(&p).len(), 1);
+    // Undone like an image added from a file.
+    h.get_by_label("Undo").click();
+    h.run();
+    assert!(anchors(&p).is_empty());
 }
 
 #[test]

@@ -7,22 +7,29 @@ use shotline_core::protocol::{MediaKind, Op, Reference, Request};
 use shotline_core::{BuiltImage, ImageFor, Job, Project, ShotRef, build_image};
 
 use crate::plugins;
-use crate::shoot::{job_cost, spend_once};
+use crate::shoot::{Go, job_cost, quote_once, spend_once};
 
 pub struct Make<'a> {
     pub prompt: &'a str,
     pub plugin: Option<&'a str>,
     pub model: Option<&'a str>,
     pub yes: bool,
+    /// The price agreed to in the app.
+    pub at: Option<&'a str>,
+    /// Anchors only: the images to go along instead of the element's own.
+    pub refs: Option<Vec<std::path::PathBuf>>,
 }
 
-fn make(
-    p: &Project,
-    what: ImageFor,
-    label: &str,
-    shot: Option<ShotRef>,
-    m: &Make,
-) -> Result<Option<(Job, std::path::PathBuf)>> {
+impl Make<'_> {
+    fn go(&self) -> Go<'_> {
+        match self.at {
+            Some(c) => Go::At(c),
+            None => self.yes.into(),
+        }
+    }
+}
+
+fn request(p: &Project, what: ImageFor, m: &Make) -> Result<(String, Request)> {
     let installed = plugins::load();
     let catalog = plugins::catalog(p, &installed)?;
     let b: BuiltImage = build_image(p, &catalog, &what, m.plugin, m.model)?;
@@ -45,7 +52,18 @@ fn make(
             .collect(),
         ..Request::default()
     };
-    let Some(job) = spend_once(p, &b.plugin, &req, shot, label, m.yes)? else {
+    Ok((b.plugin, req))
+}
+
+fn make(
+    p: &Project,
+    what: ImageFor,
+    label: &str,
+    shot: Option<ShotRef>,
+    m: &Make,
+) -> Result<Option<(Job, std::path::PathBuf)>> {
+    let (plugin, req) = request(p, what, m)?;
+    let Some(job) = spend_once(p, &plugin, &req, shot, label, m.go())? else {
         return Ok(None);
     };
     let file = job
@@ -56,17 +74,68 @@ fn make(
     Ok(Some((job, out)))
 }
 
-/// Makes a new anchor image for an element.
-pub fn anchor(p: &Project, handle: &str, m: &Make) -> Result<()> {
+fn anchor_for(p: &Project, handle: &str, m: &Make) -> Result<(String, ImageFor)> {
     let el = p.element(handle)?;
     let what = ImageFor::Anchor {
         handle: el.handle.clone(),
         prompt: m.prompt.to_string(),
+        refs: m.refs.clone(),
     };
-    let Some((job, out)) = make(p, what, &format!("anchor for @{}", el.handle), None, m)? else {
+    Ok((el.handle, what))
+}
+
+/// The images an anchor is made from, when it isn't just the element's own: those (unless left
+/// out), then the files and URLs given.
+pub fn picked(
+    p: &Project,
+    handle: &str,
+    refs: &[String],
+    no_anchors: bool,
+) -> Result<Option<Vec<std::path::PathBuf>>> {
+    if refs.is_empty() && !no_anchors {
+        return Ok(None);
+    }
+    let mut out = if no_anchors {
+        vec![]
+    } else {
+        p.anchors(&p.element(handle)?)?
+    };
+    for r in refs {
+        if crate::fetch::is_url(r) {
+            out.push(crate::fetch::image(p, r)?);
+        } else {
+            let f = std::env::current_dir()?.join(r);
+            if !f.is_file() {
+                bail!("{r} doesn't exist");
+            }
+            out.push(f);
+        }
+    }
+    Ok(Some(out))
+}
+
+/// What a new anchor image would cost.
+pub fn anchor_quote(p: &Project, handle: &str, m: &Make) -> Result<String> {
+    let (plugin, req) = request(p, anchor_for(p, handle, m)?.1, m)?;
+    quote_once(p, &plugin, &req)
+}
+
+/// Makes an image for an element, left in its job's folder. None if nothing was spent.
+pub fn anchor_image(
+    p: &Project,
+    handle: &str,
+    m: &Make,
+) -> Result<Option<(Job, std::path::PathBuf)>> {
+    let (handle, what) = anchor_for(p, handle, m)?;
+    make(p, what, &format!("anchor for @{handle}"), None, m)
+}
+
+/// Makes a new anchor image for an element.
+pub fn anchor(p: &Project, handle: &str, m: &Make) -> Result<()> {
+    let Some((job, out)) = anchor_image(p, handle, m)? else {
         return Ok(());
     };
-    let dest = p.add_anchor(&el.handle, &out)?;
+    let dest = p.add_anchor(handle, &out)?;
     println!("{} · {} · job {}", p.rel(&dest), job_cost(&job), job.id);
     Ok(())
 }
