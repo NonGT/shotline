@@ -6,7 +6,10 @@
 use shotline_core::ledger::money;
 use std::path::{Path, PathBuf};
 
-use shotline_core::{Element, Kind, Project, Shot, ShotRef, Take, Transition, Voice};
+use anyhow::Context as _;
+use shotline_core::{
+    Element, Kind, Project, Shot, ShotRef, TIMELINE_FILE, Take, Timeline, Track, Transition, Voice,
+};
 
 use crate::App;
 
@@ -190,6 +193,9 @@ pub(crate) enum Action {
     /// An image file copied in as the element's next anchor.
     AddAnchor(Element, PathBuf),
     RemoveAnchor(Element, PathBuf),
+    Timeline(Timeline),
+    /// Music for the cut; a file from outside the film is copied into music/ first.
+    AddTrack(PathBuf),
 }
 
 impl Action {
@@ -209,6 +215,8 @@ impl Action {
             Action::SaveElement(el) | Action::AddAnchor(el, _) | Action::RemoveAnchor(el, _) => {
                 format!("@{}", el.handle)
             }
+            Action::Timeline(_) => "the cut".into(),
+            Action::AddTrack(_) => "music".into(),
         }
     }
 
@@ -224,6 +232,7 @@ impl Action {
             Action::Style(_) => vec![p.root.join("style.md")],
             Action::SaveElement(el) => vec![p.element_file(el.kind, &el.handle)],
             Action::RemoveAnchor(_, f) => vec![f.clone()],
+            Action::Timeline(_) | Action::AddTrack(_) => vec![p.root.join(TIMELINE_FILE)],
             Action::AddChapter(_)
             | Action::AddShot(..)
             | Action::AddElement(_)
@@ -421,6 +430,7 @@ impl App {
             story: self.film.story.clone(),
             style: self.film.style.clone(),
         };
+        self.timeline_form = self.film.timeline.clone();
         self.element_form = self
             .open_element()
             .map(|el| ElementForm::of(&el))
@@ -440,6 +450,9 @@ impl App {
         }
         if self.texts.style != self.film.style {
             acts.push(Action::Style(self.texts.style.clone()));
+        }
+        if self.timeline_form != self.film.timeline {
+            acts.push(Action::Timeline(self.timeline_form.clone()));
         }
         if let Some(el) = self.open_element()
             && self.element_form.handle.as_ref() == Some(&el.handle)
@@ -634,6 +647,53 @@ impl App {
             Action::RemoveAnchor(el, file) => {
                 std::fs::remove_file(&file)?;
                 format!("{} taken off @{}", p.rel(&file), el.handle).into()
+            }
+            Action::Timeline(t) => {
+                p.save_timeline(&t)?;
+                "cut saved".to_string().into()
+            }
+            Action::AddTrack(file) => {
+                let mut made = vec![];
+                let rel = if file.starts_with(&p.root) {
+                    p.rel(&file)
+                } else {
+                    let dir = p.root.join("music");
+                    if !dir.exists() {
+                        std::fs::create_dir_all(&dir)?;
+                        made.push(dir.clone());
+                    }
+                    let name = file.file_name().context("not a file")?;
+                    let mut dest = dir.join(name);
+                    let stem = Path::new(name)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let ext = Path::new(name)
+                        .extension()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let mut n = 2;
+                    while dest.exists() {
+                        dest = dir.join(format!("{stem}-{n}.{ext}"));
+                        n += 1;
+                    }
+                    std::fs::copy(&file, &dest)?;
+                    if made.is_empty() {
+                        made.push(dest.clone());
+                    }
+                    p.rel(&dest)
+                };
+                let mut t = p.timeline()?;
+                t.tracks.push(Track {
+                    file: rel.clone(),
+                    at: 0.0,
+                    volume: 1.0,
+                });
+                p.save_timeline(&t)?;
+                Done {
+                    msg: format!("{rel} plays over the cut"),
+                    made,
+                }
             }
         })
     }

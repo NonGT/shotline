@@ -90,6 +90,21 @@ impl CutShot {
     }
 }
 
+fn check(t: &Timeline) -> Result<()> {
+    if t.xfade < 0.0 || !(0.0..=1.0).contains(&t.colormatch.strength) {
+        return Err(Error::Invalid(format!(
+            "{TIMELINE_FILE}: xfade can't be negative and colormatch.strength goes from 0 to 1"
+        )));
+    }
+    if let Some(bad) = t.tracks.iter().find(|tr| tr.at < 0.0 || tr.volume < 0.0) {
+        return Err(Error::Invalid(format!(
+            "{TIMELINE_FILE}: track {} can't start or play at less than 0",
+            bad.file
+        )));
+    }
+    Ok(())
+}
+
 impl Project {
     pub fn timeline(&self) -> Result<Timeline> {
         let path = self.root.join(TIMELINE_FILE);
@@ -97,12 +112,13 @@ impl Project {
             return Ok(Timeline::default());
         }
         let t: Timeline = fsx::read_toml(&path)?;
-        if t.xfade < 0.0 || !(0.0..=1.0).contains(&t.colormatch.strength) {
-            return Err(Error::Invalid(format!(
-                "{TIMELINE_FILE}: xfade can't be negative and colormatch.strength goes from 0 to 1"
-            )));
-        }
+        check(&t)?;
         Ok(t)
+    }
+
+    pub fn save_timeline(&self, t: &Timeline) -> Result<()> {
+        check(t)?;
+        fsx::write_toml(&self.root.join(TIMELINE_FILE), t)
     }
 
     /// The shots of the film in play order with their selected takes.

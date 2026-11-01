@@ -3,6 +3,7 @@
 //! both always agree.
 
 mod anchor;
+mod cut;
 mod edit;
 mod git;
 mod keys;
@@ -22,8 +23,8 @@ use shotline_core::ledger::money;
 use shotline_core::ledger::report::{self, By, Row, Summary};
 use shotline_core::protocol::{Description, ModelInfo, Op, VoiceInfo};
 use shotline_core::{
-    Chapter, CutShot, Element, Git, JobStatus, Kind, Project, Shot, ShotRef, Take, Transition,
-    UserConfig,
+    Chapter, CutShot, Element, Git, JobStatus, Kind, Project, Shot, ShotRef, Take, Timeline,
+    Transition, UserConfig,
 };
 use shotline_media::Ffmpeg;
 
@@ -67,6 +68,9 @@ struct Film {
     elements: Vec<(Element, Vec<PathBuf>)>,
     chapters: Vec<(Chapter, Vec<(ShotRef, Shot)>)>,
     cut: Vec<CutShot>,
+    timeline: Timeline,
+    /// renders/*.mp4, newest first.
+    renders: Vec<PathBuf>,
     cost: Option<(Summary, Vec<Row>)>,
     /// How many takes each shot has.
     takes: HashMap<ShotRef, usize>,
@@ -81,6 +85,9 @@ pub trait Host: Send + Sync {
     fn anchor_quote(&self, film: &Path, ask: &AnchorAsk) -> anyhow::Result<String>;
     /// Downloads a reference image into the film's cache. Free.
     fn fetch_image(&self, film: &Path, url: &str) -> anyhow::Result<PathBuf>;
+    /// Renders the cut as timeline.toml says, telling `on` each step. Returns the file and a
+    /// line about it. Free: ffmpeg runs here.
+    fn render(&self, film: &Path, on: &mut dyn FnMut(String)) -> anyhow::Result<(PathBuf, String)>;
     /// Spends, if the price is still `at`, and returns the image, not yet an anchor.
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf>;
 }
@@ -137,6 +144,9 @@ pub struct App {
     /// Keys asked for, e.g. from a plugin that said it has none; the shell opens Settings.
     wants_keys: bool,
     maker: Option<anchor::Maker>,
+    /// timeline.toml as edited, saved once nothing has focus.
+    timeline_form: Timeline,
+    render: Arc<Mutex<cut::Render>>,
     voice_lists: Arc<Mutex<HashMap<String, VoiceList>>>,
     history: History,
     git: Option<Git>,
@@ -237,6 +247,8 @@ impl App {
             host: None,
             wants_keys: false,
             maker: None,
+            timeline_form: Timeline::default(),
+            render: Arc::default(),
             voice_lists: Arc::default(),
             history: History::default(),
             git: Git::find(),
@@ -296,15 +308,9 @@ impl App {
     /// Every element's anchors, named like "@paka 2", to pick references from.
     fn anchor_pool(&self) -> Vec<(String, PathBuf)> {
         let mut pool = vec![];
-        for el in self.project.elements().unwrap_or_default() {
-            for (i, a) in self
-                .project
-                .anchors(&el)
-                .unwrap_or_default()
-                .into_iter()
-                .enumerate()
-            {
-                pool.push((format!("@{} {}", el.handle, i + 1), a));
+        for (el, anchors) in &self.film.elements {
+            for (i, a) in anchors.iter().enumerate() {
+                pool.push((format!("@{} {}", el.handle, i + 1), a.clone()));
             }
         }
         pool
@@ -430,12 +436,15 @@ impl App {
             let shots = p.shots(Some(&c.id()))?;
             chapters.push((c, shots));
         }
+        let timeline = p.timeline()?;
         self.film = Film {
             story: read(&p.root.join("story.md")),
             style: read(&p.root.join("style.md")),
             elements,
             chapters,
-            cut: p.cut(&p.timeline()?)?,
+            cut: p.cut(&timeline)?,
+            timeline,
+            renders: renders(&p.root.join("renders")),
             cost: self.cost()?,
             takes: takes.into_iter().map(|(s, t)| (s, t.len())).collect(),
         };
@@ -1452,49 +1461,6 @@ impl App {
         }
     }
 
-    fn cut(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                self.deck(ui);
-                if self.film.cut.is_empty() {
-                    ui.weak("no shots yet");
-                    return;
-                }
-                let files: Vec<PathBuf> = self
-                    .film
-                    .cut
-                    .iter()
-                    .filter_map(|c| c.video.clone())
-                    .collect();
-                let missing = self.film.cut.len() - files.len();
-                ui.horizontal(|ui| {
-                    if !files.is_empty() && ui.button("Play the cut").clicked() {
-                        self.play("the cut", &files, false);
-                    }
-                    if missing > 0 {
-                        ui.weak(format!("{missing} shots have no take yet and are left out"));
-                    }
-                });
-                ui.weak("Takes as they are: colour matching and music only happen in a render.");
-                ui.add_space(6.0);
-                egui::Grid::new("cut").striped(true).show(ui, |ui| {
-                    for c in &self.film.cut {
-                        ui.label(c.shot.to_string());
-                        ui.weak(match c.transition {
-                            Transition::Cut => "cut",
-                            Transition::Continue => "continue",
-                        });
-                        match &c.take {
-                            Some(t) if c.video.is_some() => ui.label(format!("#{}", t.number)),
-                            _ => ui.weak("no take"),
-                        };
-                        ui.end_row();
-                    }
-                });
-            });
-        });
-    }
-
     fn costs(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             let Some((s, rows)) = &self.film.cost else {
@@ -2058,4 +2024,19 @@ pub fn run(
         }),
     )
     .map_err(|e| anyhow::anyhow!("can't open the window: {e}"))
+}
+
+/// Videos in `dir`, newest first.
+fn renders(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut files: Vec<_> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "mp4"))
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .collect();
+    files.sort_by_key(|f| std::cmp::Reverse(f.0));
+    files.into_iter().map(|(_, p)| p).collect()
 }

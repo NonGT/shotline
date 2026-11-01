@@ -252,6 +252,16 @@ impl Host for TestHost {
         Ok("$0.04".into())
     }
 
+    fn render(&self, film: &Path, on: &mut dyn FnMut(String)) -> anyhow::Result<(PathBuf, String)> {
+        let t = Project::open(film)?.timeline()?;
+        assert_eq!(t.colormatch.at, shotline_core::MatchAt::All);
+        on("1/1 01-010#1".into());
+        let out = film.join("renders").join("cut.mp4");
+        std::fs::create_dir_all(out.parent().unwrap())?;
+        std::fs::write(&out, "")?;
+        Ok((out, "8s · 720x1280".into()))
+    }
+
     fn fetch_image(&self, film: &Path, url: &str) -> anyhow::Result<PathBuf> {
         assert_eq!(url, "https://example.com/dress.png");
         let out = film.join(".shotline").join("dress.png");
@@ -273,6 +283,55 @@ impl Host for TestHost {
 
 fn anchors(p: &Project) -> Vec<PathBuf> {
     p.anchors(&p.element("paka").unwrap()).unwrap()
+}
+
+#[test]
+fn edit_the_cut_and_render() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let r: ShotRef = "01-010".parse().unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    h.run();
+    // Nothing selected yet, so there's nothing to render.
+    h.get_by_label("1 shot without a take: they're left out of Play and stop a render.");
+    h.get_by_label("Render").click();
+    h.run();
+    assert!(!tmp.path().join("film/renders").exists());
+
+    h.get_by_role_and_label(Role::ComboBox, "Colour match")
+        .click();
+    h.run();
+    h.get_by_label("every join").click();
+    h.run();
+    h.run();
+    assert_eq!(
+        p.timeline().unwrap().colormatch.at,
+        shotline_core::MatchAt::All
+    );
+
+    p.select_take(r, "1").unwrap();
+    h.get_by_label("Reload").click();
+    h.run();
+    h.get_by_label("Render").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("renders/cut.mp4 · 8s")
+        .is_some()));
+    h.get_by_label("renders/cut.mp4");
+
+    h.get_by_label("Undo").click();
+    h.run();
+    assert_eq!(
+        p.timeline().unwrap().colormatch.at,
+        shotline_core::MatchAt::Continue
+    );
 }
 
 #[test]
@@ -675,7 +734,10 @@ fn start_a_film() {
 
     // The next time it's in the list.
     let shell = Shell::new(None, home, tmp.path()).testing();
-    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    // Tall enough for the list under Linux's in-window menu bar.
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
     h.get_by_label_contains("Rain  ").click();
     h.run();
@@ -741,10 +803,7 @@ fn menu_in_the_window() {
         .with_git(None)
         .with_window_menu()
         .testing();
-    // Tall enough for the list under Linux's in-window menu bar.
-    let mut h = Harness::builder()
-        .with_size(egui::vec2(900.0, 900.0))
-        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();

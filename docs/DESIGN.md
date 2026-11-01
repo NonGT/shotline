@@ -491,6 +491,11 @@ make one (with `git init`, like `shotline init` unless `--no-git`) or pick a rec
 live in the system menu bar on macOS and Windows (muda) and in a menu bar inside the window on
 Linux, where muda would need GTK; all three send the same commands.
 
+The Cut tab lists the shots in play order with their takes, edits timeline.toml (crossfade,
+colour matching, music tracks with start and volume; a track from outside the film is copied into
+`music/`) and renders in the background with the same code as `shotline timeline render`, into
+`renders/`. Past renders play in the app.
+
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first: an element's "Make image…" shows
 "Get price" (free), then a "Make it for $0.04" button, and the CLI refuses the job if the price has

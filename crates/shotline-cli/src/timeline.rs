@@ -53,6 +53,36 @@ pub fn render(
     colormatch: bool,
     xfade: Option<f64>,
 ) -> Result<()> {
+    let (out, r) = render_with(p, output, colormatch, xfade, |pr| match pr {
+        Progress::Clip {
+            index,
+            of,
+            label,
+            matched,
+        } => {
+            let m = if matched { "  colour matched" } else { "" };
+            println!("[{}/{of}] {label}{m}", index + 1);
+        }
+        Progress::Encoding => println!("encoding"),
+    })?;
+    println!(
+        "{} · {}s · {}x{}",
+        p.rel(&out),
+        money(r.duration),
+        r.width,
+        r.height
+    );
+    Ok(())
+}
+
+/// Renders the cut as timeline.toml says, telling `on` how it goes. Returns the file.
+pub fn render_with(
+    p: &Project,
+    output: Option<&Path>,
+    colormatch: bool,
+    xfade: Option<f64>,
+    on: impl FnMut(Progress),
+) -> Result<(std::path::PathBuf, render::Rendered)> {
     let tl = p.timeline()?;
     let cut = p.cut(&tl)?;
     if cut.is_empty() {
@@ -110,26 +140,7 @@ pub fn render(
     };
     let ff = Ffmpeg::find()?;
     let work = p.root.join(".shotline").join("cache").join("render");
-    let result = render::render(&ff, &clips, &tracks, &opts, &work, &out, |pr| match pr {
-        Progress::Clip {
-            index,
-            of,
-            label,
-            matched,
-        } => {
-            let m = if matched { "  colour matched" } else { "" };
-            println!("[{}/{of}] {label}{m}", index + 1);
-        }
-        Progress::Encoding => println!("encoding"),
-    });
+    let result = render::render(&ff, &clips, &tracks, &opts, &work, &out, on);
     let _ = std::fs::remove_dir_all(&work);
-    let r = result?;
-    println!(
-        "{} · {}s · {}x{}",
-        p.rel(&out),
-        money(r.duration),
-        r.width,
-        r.height
-    );
-    Ok(())
+    Ok((out, result?))
 }
