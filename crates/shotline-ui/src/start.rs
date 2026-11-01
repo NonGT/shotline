@@ -24,6 +24,7 @@ pub enum MenuCommand {
     Copy,
     Paste,
     SelectAll,
+    Quit,
 }
 
 pub struct Shell {
@@ -40,6 +41,10 @@ pub struct Shell {
     dialog: Option<Form>,
     /// Edit commands for egui, sent with the next frame.
     edits: Vec<MenuCommand>,
+    /// The text box last typed in, which a click on the window menu takes focus from.
+    typing: Option<egui::Id>,
+    /// File and Edit drawn in the window, where there's no system menu bar to put them in.
+    window_menu: bool,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     menu: Option<crate::menu::NativeMenu>,
 }
@@ -83,6 +88,8 @@ impl Shell {
             screen: Screen::Start(Form::new(here)),
             dialog: None,
             edits: vec![],
+            typing: None,
+            window_menu: cfg!(not(any(target_os = "macos", target_os = "windows"))),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             menu: None,
         };
@@ -94,6 +101,12 @@ impl Shell {
 
     pub fn with_git(mut self, git: Option<Git>) -> Shell {
         self.git = git;
+        self
+    }
+
+    /// The menu Linux gets, wherever it runs.
+    pub fn with_window_menu(mut self) -> Shell {
+        self.window_menu = true;
         self
     }
 
@@ -149,9 +162,11 @@ impl Shell {
                     self.dialog = None;
                 }
             }
-            MenuCommand::Cut | MenuCommand::Copy | MenuCommand::Paste | MenuCommand::SelectAll => {
-                self.edits.push(cmd)
-            }
+            MenuCommand::Cut
+            | MenuCommand::Copy
+            | MenuCommand::Paste
+            | MenuCommand::SelectAll
+            | MenuCommand::Quit => self.edits.push(cmd),
             MenuCommand::Undo | MenuCommand::Redo => {
                 if let Screen::Film(app) = &mut self.screen {
                     if cmd == MenuCommand::Undo {
@@ -174,8 +189,18 @@ impl Shell {
         }
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.native_menu(ui.ctx());
-        self.keys(ui);
+        // A frame after the menu was clicked, or the click takes the focus away again.
         self.send_edits(ui.ctx());
+        if ui.ctx().egui_wants_keyboard_input() {
+            self.typing = ui.memory(|m| m.focused());
+        }
+        if self.window_menu {
+            self.window_menu(ui);
+        }
+        self.keys(ui);
+        if !self.edits.is_empty() {
+            ui.ctx().request_repaint();
+        }
         let has_git = self.git.is_some();
         let opened = match &mut self.screen {
             Screen::Film(app) => {
@@ -215,18 +240,83 @@ impl Shell {
             MenuCommand::OpenFilm
         } else if key(egui::Key::W) {
             MenuCommand::CloseFilm
+        } else if self.window_menu && key(egui::Key::Q) {
+            MenuCommand::Quit
         } else {
             return;
         };
         self.command(cmd);
     }
 
+    fn window_menu(&mut self, ui: &mut egui::Ui) {
+        let (undo, redo) = match &self.screen {
+            Screen::Film(app) => (
+                app.history.undo_what().is_some(),
+                app.history.redo_what().is_some(),
+            ),
+            Screen::Start(_) => (false, false),
+        };
+        let film = self.film().is_some();
+        let mut picked = None;
+        egui::Panel::top("menu")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::RACK)
+                    .inner_margin(egui::vec2(10.0, 2.0)),
+            )
+            .show(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    let mut item = |ui: &mut egui::Ui, text: &str, keys: &str, on: bool, c| {
+                        let mut b = egui::Button::new(text);
+                        if !keys.is_empty() {
+                            b = b.shortcut_text(keys);
+                        }
+                        if ui.add_enabled(on, b).clicked() {
+                            picked = Some(c);
+                        }
+                    };
+                    ui.menu_button("File", |ui| {
+                        item(ui, "New Film...", "Ctrl+N", true, MenuCommand::NewFilm);
+                        item(ui, "Open Film...", "Ctrl+O", true, MenuCommand::OpenFilm);
+                        ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
+                            ui.menu_button("Open Recent", |ui| {
+                                for (dir, name) in &self.recent {
+                                    let c = MenuCommand::OpenRecent(dir.clone());
+                                    item(ui, name, "", true, c);
+                                }
+                            });
+                        });
+                        ui.separator();
+                        item(ui, "Close Film", "Ctrl+W", film, MenuCommand::CloseFilm);
+                        ui.separator();
+                        item(ui, "Quit", "Ctrl+Q", true, MenuCommand::Quit);
+                    });
+                    ui.menu_button("Edit", |ui| {
+                        item(ui, "Undo", "Ctrl+Z", undo, MenuCommand::Undo);
+                        item(ui, "Redo", "Ctrl+Shift+Z", redo, MenuCommand::Redo);
+                        ui.separator();
+                        item(ui, "Cut", "Ctrl+X", true, MenuCommand::Cut);
+                        item(ui, "Copy", "Ctrl+C", true, MenuCommand::Copy);
+                        item(ui, "Paste", "Ctrl+V", true, MenuCommand::Paste);
+                        item(ui, "Select All", "Ctrl+A", true, MenuCommand::SelectAll);
+                    });
+                });
+            });
+        if let Some(c) = picked {
+            self.command(c);
+        }
+    }
+
     fn send_edits(&mut self, ctx: &egui::Context) {
+        if let (false, Some(id)) = (self.edits.is_empty(), self.typing) {
+            ctx.memory_mut(|m| m.request_focus(id));
+        }
         for e in self.edits.drain(..) {
             let vc = match e {
                 MenuCommand::Cut => egui::ViewportCommand::RequestCut,
                 MenuCommand::Copy => egui::ViewportCommand::RequestCopy,
                 MenuCommand::Paste => egui::ViewportCommand::RequestPaste,
+                MenuCommand::Quit => egui::ViewportCommand::Close,
                 _ => {
                     ctx.input_mut(|i| {
                         i.events.push(egui::Event::Key {

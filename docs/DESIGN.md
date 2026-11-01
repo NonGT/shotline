@@ -485,7 +485,9 @@ Cmd+Shift+Z, or the buttons in the bottom bar). Undo puts the shot file back onl
 changed it since, so it never writes over the co-director's work. The bottom bar also commits the
 film with the user's own git, with a message naming the shots and elements that changed; a commit
 clears the undo steps, and anything older is git's job. Outside a film the app opens on a page to
-make one (with `git init`, like `shotline init` unless `--no-git`) or pick a recent one.
+make one (with `git init`, like `shotline init` unless `--no-git`) or pick a recent one. File and Edit
+live in the system menu bar on macOS and Windows (muda) and in a menu bar inside the window on
+Linux, where muda would need GTK; all three send the same commands.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first.

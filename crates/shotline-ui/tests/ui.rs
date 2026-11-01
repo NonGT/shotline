@@ -335,6 +335,55 @@ fn file_and_edit_commands() {
 }
 
 #[test]
+fn menu_in_the_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_git(None)
+        .with_window_menu()
+        .testing();
+    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+
+    // Select All reaches the box being typed in.
+    let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
+    plot.focus();
+    h.run();
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get_by_label_contains("Select All").click();
+    h.run();
+    h.get_by_role_and_label(Role::MultilineTextInput, "Plot")
+        .type_text("rain");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().plot, "rain");
+
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get_by_label_contains("Ctrl+Z").click();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().plot, "ผกาเดินเข้าป่า");
+
+    h.get_by_label("File").click();
+    h.run();
+    h.get_by_label_contains("Close Film").click();
+    h.run();
+    assert!(h.state().film().is_none());
+    h.get_by_label("File").click();
+    h.run();
+    h.get_by_label("Open Recent").click();
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Rain").click();
+    h.run();
+    assert!(h.state().film().is_some());
+}
+
+#[test]
 fn browse_and_select_a_take() {
     let tmp = tempfile::tempdir().unwrap();
     let mut h = harness(tmp.path());
