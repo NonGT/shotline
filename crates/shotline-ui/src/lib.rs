@@ -88,6 +88,13 @@ pub trait Host: Send + Sync {
     /// Renders the cut as timeline.toml says, telling `on` each step. Returns the file and a
     /// line about it. Free: ffmpeg runs here.
     fn render(&self, film: &Path, on: &mut dyn FnMut(String)) -> anyhow::Result<(PathBuf, String)>;
+    /// Every rate for each unit and where it comes from. Free, but asks each plugin.
+    fn rates(&self, film: &Path) -> anyhow::Result<Vec<shotline_core::ledger::RateLine>>;
+    /// The ledger against what providers say they charged. Free reads.
+    fn reconcile(
+        &self,
+        film: &Path,
+    ) -> anyhow::Result<Vec<shotline_core::ledger::reconcile::Check>>;
     /// Spends, if the price is still `at`, and returns the image, not yet an anchor.
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf>;
 }

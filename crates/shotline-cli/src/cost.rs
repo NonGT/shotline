@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, bail};
-use shotline_core::ledger::reconcile::{Diff, balance_checks, reconcile};
+use shotline_core::ledger::reconcile::{Check, Diff, balance_checks, reconcile};
 use shotline_core::ledger::report::{self, By};
-use shotline_core::ledger::{Books, money, rate};
+use shotline_core::ledger::{Books, RateLine, money, rate};
 use shotline_core::protocol::Quote;
 use shotline_core::{MeasuredRates, Project, UserConfig, user_dir};
 
@@ -135,8 +135,9 @@ pub fn verify(p: &Project) -> Result<()> {
     Ok(())
 }
 
-/// Every rate there is for each unit, which one is used, and where they come from.
-pub fn rates(p: &Project, installed: &Installed) -> Result<()> {
+/// Every rate there is for each unit, highest priority first within a unit, and where they come
+/// from. The first for each unit is the one used.
+pub fn rate_lines(p: &Project, installed: &Installed) -> Result<Vec<RateLine>> {
     let dir = user_dir();
     let user = UserConfig::load(&dir)?;
     // Lowest priority first, as `Project::rates` adds them.
@@ -178,30 +179,47 @@ pub fn rates(p: &Project, installed: &Installed) -> Result<()> {
             all.push((unit.clone(), n, cur, from.display().to_string()));
         }
     }
-    if all.is_empty() {
-        println!("no rates; providers that quote in money don't need any");
-        return Ok(());
-    }
-    let w = all.iter().map(|r| r.0.len()).max().unwrap_or(0);
     // Highest priority first within each unit; the sort is stable.
     all.reverse();
     all.sort_by(|a, b| a.0.cmp(&b.0));
     let mut seen = BTreeSet::new();
-    for (unit, n, cur, from) in &all {
-        let used = if seen.insert(unit) {
-            ""
-        } else {
-            "  (not used)"
-        };
-        println!("{unit:<w$}  {} {cur}  {from}{used}", rate(*n));
+    Ok(all
+        .into_iter()
+        .map(|(unit, rate, currency, from)| RateLine {
+            used: seen.insert(unit.clone()),
+            unit,
+            rate,
+            currency,
+            from,
+        })
+        .collect())
+}
+
+pub fn rates(p: &Project, installed: &Installed) -> Result<()> {
+    let all = rate_lines(p, installed)?;
+    if all.is_empty() {
+        println!("no rates; providers that quote in money don't need any");
+        return Ok(());
+    }
+    let w = all.iter().map(|r| r.unit.len()).max().unwrap_or(0);
+    for r in &all {
+        let used = if r.used { "" } else { "  (not used)" };
+        println!(
+            "{:<w$}  {} {}  {}{used}",
+            r.unit,
+            rate(r.rate),
+            r.currency,
+            r.from
+        );
     }
     Ok(())
 }
 
-pub fn reconcile_cmd(p: &Project, installed: &Installed, only: Option<&str>) -> Result<()> {
+/// The ledger against what each provider says it charged, and against balance readings.
+pub fn checks(p: &Project, installed: &Installed, only: Option<&str>) -> Result<Vec<Check>> {
     let b = books(p)?;
     let entries = b.ledger.entries()?;
-    let mut differ = false;
+    let mut out = vec![];
     let checks = balance_checks(&entries, &b.rates);
     let checks: Vec<_> = checks
         .iter()
@@ -209,37 +227,47 @@ pub fn reconcile_cmd(p: &Project, installed: &Installed, only: Option<&str>) -> 
         .collect();
     if !checks.is_empty() {
         let off: Vec<_> = checks.iter().filter(|c| !c.agrees()).collect();
-        println!(
-            "balances: {} jobs read before and after, {} differ",
-            checks.len(),
-            off.len()
-        );
-        for c in off {
-            differ = true;
-            println!(
-                "  {} ({}): booked {} {} but the balance dropped {} {}",
-                c.job,
-                c.plugin,
-                money(c.booked.0),
-                c.booked.1,
-                money(c.measured.0),
-                c.measured.1
-            );
-        }
+        out.push(Check {
+            title: format!(
+                "balances: {} jobs read before and after, {} differ",
+                checks.len(),
+                off.len()
+            ),
+            ok: off.is_empty(),
+            details: off
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{} ({}): booked {} {} but the balance dropped {} {}",
+                        c.job,
+                        c.plugin,
+                        money(c.booked.0),
+                        c.booked.1,
+                        money(c.measured.0),
+                        c.measured.1
+                    )
+                })
+                .collect(),
+        });
     }
     let names: BTreeSet<&str> = entries
         .iter()
         .filter_map(|e| e.plugin.as_deref())
         .filter(|n| only.is_none_or(|o| o == *n))
         .collect();
+    let line = |title: String| Check {
+        title,
+        ok: true,
+        details: vec![],
+    };
     if names.is_empty() {
-        println!("no charges to check");
-        return Ok(());
+        out.push(line("no charges to check".into()));
+        return Ok(out);
     }
     let rt = plugins::runtime();
     for name in names {
         if !installed.plugins.iter().any(|p| p.name == name) {
-            println!("{name}: not installed, skipped");
+            out.push(line(format!("{name}: not installed, skipped")));
             continue;
         }
         let plugin = plugins::open(installed, name)?;
@@ -252,42 +280,59 @@ pub fn reconcile_cmd(p: &Project, installed: &Installed, only: Option<&str>) -> 
         let usage = match rt.block_on(plugin.usage(&since.to_string())) {
             Ok(u) => u,
             Err(shotline_plugin::Error::Unsupported(_)) => {
-                println!("{name}: doesn't report usage, skipped");
+                out.push(line(format!("{name}: doesn't report usage, skipped")));
                 continue;
             }
             Err(e) => return Err(e.into()),
         };
         let diffs = reconcile(&entries, name, &usage.charges);
         if diffs.is_empty() {
-            println!("{name}: matches ({} charges)", usage.charges.len());
+            out.push(line(format!(
+                "{name}: matches ({} charges)",
+                usage.charges.len()
+            )));
             continue;
         }
-        differ = true;
-        println!("{name}:");
         let amt = |(a, u): &(f64, String)| format!("{} {u}", money(*a));
-        for d in diffs {
-            match d {
-                Diff::Mismatch {
-                    job,
-                    ledger,
-                    provider,
-                } => println!(
-                    "  {job}: ledger {} but provider {}",
-                    amt(&ledger),
-                    amt(&provider)
-                ),
-                Diff::OnlyProvider { job, provider } => println!(
-                    "  {}: provider charged {}, not in the ledger",
-                    job.as_deref().unwrap_or("(no job id)"),
-                    amt(&provider)
-                ),
-                Diff::OnlyLedger { job, ledger } => {
-                    println!("  {job}: ledger has {}, provider doesn't", amt(&ledger))
-                }
-            }
+        out.push(Check {
+            title: format!("{name}:"),
+            ok: false,
+            details: diffs
+                .into_iter()
+                .map(|d| match d {
+                    Diff::Mismatch {
+                        job,
+                        ledger,
+                        provider,
+                    } => format!(
+                        "{job}: ledger {} but provider {}",
+                        amt(&ledger),
+                        amt(&provider)
+                    ),
+                    Diff::OnlyProvider { job, provider } => format!(
+                        "{}: provider charged {}, not in the ledger",
+                        job.as_deref().unwrap_or("(no job id)"),
+                        amt(&provider)
+                    ),
+                    Diff::OnlyLedger { job, ledger } => {
+                        format!("{job}: ledger has {}, provider doesn't", amt(&ledger))
+                    }
+                })
+                .collect(),
+        });
+    }
+    Ok(out)
+}
+
+pub fn reconcile_cmd(p: &Project, installed: &Installed, only: Option<&str>) -> Result<()> {
+    let checks = checks(p, installed, only)?;
+    for c in &checks {
+        println!("{}", c.title);
+        for d in &c.details {
+            println!("  {d}");
         }
     }
-    if differ {
+    if checks.iter().any(|c| !c.ok) {
         bail!("the ledger and the providers disagree");
     }
     Ok(())

@@ -1,11 +1,14 @@
 //! The Cost tab: what was spent, per day and model, and per shot.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Color32, RichText};
 use jiff::civil::Date;
+use shotline_core::ledger::reconcile::Check;
 use shotline_core::ledger::report::{self, By, Row, Summary};
-use shotline_core::ledger::{Entry, Kind, money};
+use shotline_core::ledger::{Books, Entry, Kind, RateLine, money, rate};
+use shotline_core::protocol::Quote;
 
 use crate::{App, PAGE, hint, page, theme};
 
@@ -31,6 +34,18 @@ pub(crate) struct Cost {
     /// Spent per model, same order as `models`.
     days: BTreeMap<Date, Vec<f64>>,
     today: Date,
+    /// Units money has been booked in, the film's currency first.
+    units: Vec<String>,
+    /// Charges that can be refunded, newest first.
+    charges: Vec<Charged>,
+}
+
+#[derive(Clone)]
+struct Charged {
+    job: String,
+    label: String,
+    amount: f64,
+    unit: String,
 }
 
 struct Model {
@@ -103,6 +118,33 @@ impl Cost {
         for (d, i, v) in spent {
             days.entry(d).or_insert_with(|| vec![0.0; models.len()])[rank[i]] += v;
         }
+        let mut units = vec![summary.currency.clone()];
+        let more: BTreeSet<&String> = entries.iter().map(|e| &e.unit).collect();
+        units.extend(
+            more.into_iter()
+                .filter(|u| **u != summary.currency)
+                .cloned(),
+        );
+        let charges = entries
+            .iter()
+            .rev()
+            .filter(|e| e.kind == Kind::Charge)
+            .filter_map(|e| {
+                let job = e.job.clone()?;
+                let what = e.model.as_deref().or(e.plugin.as_deref()).unwrap_or("job");
+                Some(Charged {
+                    label: format!(
+                        "{} · {what} · {} {}",
+                        e.time.to_zoned(tz.clone()).strftime("%b %-d %H:%M"),
+                        money(e.amount),
+                        e.unit
+                    ),
+                    job,
+                    amount: e.amount,
+                    unit: e.unit.clone(),
+                })
+            })
+            .collect();
         let mut sorted: Vec<Option<Model>> = models.into_iter().map(Some).collect();
         let models = order.iter().map(|&i| sorted[i].take().unwrap()).collect();
         Ok(Cost {
@@ -111,6 +153,8 @@ impl Cost {
             models,
             days,
             today: now.to_zoned(tz.clone()).date(),
+            units,
+            charges,
         })
     }
 
@@ -152,6 +196,41 @@ pub(crate) struct View {
     /// A model to pick out, from the table.
     pick: Option<usize>,
     all: bool,
+    tool: Tool,
+    verified: Vec<(String, bool, Vec<String>)>,
+    rates: Arc<Mutex<Ask<Vec<RateLine>>>>,
+    checks: Arc<Mutex<Ask<Vec<Check>>>>,
+    adjust: Form,
+    refund: Form,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Tool {
+    #[default]
+    None,
+    Verify,
+    Rates,
+    Reconcile,
+    Adjust,
+    Refund,
+}
+
+/// Something asked of a plugin on another thread.
+#[derive(Default)]
+enum Ask<T> {
+    #[default]
+    Idle,
+    Busy,
+    Done(Result<T, String>),
+}
+
+#[derive(Default)]
+struct Form {
+    amount: String,
+    unit: String,
+    note: String,
+    /// Index into `Cost::charges`, for a refund.
+    job: Option<usize>,
 }
 
 impl App {
@@ -202,6 +281,8 @@ impl App {
                     models(ui, c, v, hovered);
                     ui.add_space(18.0);
                     by_shot(ui, c);
+                    ui.add_space(18.0);
+                    self.ledger(ui);
                 });
             });
     }
@@ -534,4 +615,384 @@ pub(crate) fn load(
         &b.tz,
         p.clock.now(),
     )?))
+}
+
+impl App {
+    /// Checks on the books, and corrections to them.
+    fn ledger(&mut self, ui: &mut egui::Ui) {
+        let Some(c) = &self.film.cost else { return };
+        ui.label(
+            RichText::new("Ledger")
+                .text_style(egui::TextStyle::Heading)
+                .color(theme::PAPER),
+        );
+        ui.add_space(4.0);
+        let v = &mut self.cost_view;
+        let mut open = v.tool;
+        ui.horizontal(|ui| {
+            for (t, name, tip) in [
+                (
+                    Tool::Verify,
+                    "Check the ledger",
+                    "that no line was changed by hand",
+                ),
+                (
+                    Tool::Rates,
+                    "Rates",
+                    "what each provider unit is worth, and where that comes from",
+                ),
+                (
+                    Tool::Reconcile,
+                    "Compare with providers",
+                    "the ledger against what providers say they charged; free",
+                ),
+                (
+                    Tool::Adjust,
+                    "Adjust…",
+                    "record a fee, or a promo credit as a negative",
+                ),
+                (Tool::Refund, "Refund…", "record money back for a job"),
+            ] {
+                if ui
+                    .selectable_label(v.tool == t, name)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    open = if v.tool == t { Tool::None } else { t };
+                }
+            }
+        });
+        let fresh = open != v.tool;
+        v.tool = open;
+        if open == Tool::None {
+            return;
+        }
+        if fresh {
+            let (host, ctx) = (self.host.clone(), ui.ctx().clone());
+            let film = self.project.root.clone();
+            match open {
+                Tool::Verify => v.verified = verify(&self.project, &self.user_dir),
+                Tool::Rates => ask(&v.rates, host, ctx, move |h| h.rates(&film)),
+                Tool::Reconcile => ask(&v.checks, host, ctx, move |h| h.reconcile(&film)),
+                Tool::Adjust if v.adjust.unit.is_empty() => v.adjust.unit = c.units[0].clone(),
+                _ => {}
+            }
+        }
+        ui.add_space(6.0);
+        let mut book = false;
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(4.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                match open {
+                    Tool::Verify => {
+                        for (title, ok, details) in &v.verified {
+                            finding(ui, title, *ok, details);
+                        }
+                    }
+                    Tool::Rates => rates(ui, &v.rates),
+                    Tool::Reconcile => checks(ui, &v.checks),
+                    Tool::Adjust => book = adjust(ui, &mut v.adjust, &c.units),
+                    Tool::Refund => book = refund(ui, &mut v.refund, &c.charges),
+                    Tool::None => {}
+                }
+            });
+        if book {
+            self.book(open);
+        }
+    }
+
+    /// Writes the adjustment or refund in the form to the ledger.
+    fn book(&mut self, t: Tool) {
+        let Some(c) = &self.film.cost else { return };
+        let v = &self.cost_view;
+        let done = (|| -> anyhow::Result<String> {
+            let user = shotline_core::UserConfig::load(&self.user_dir)?;
+            let b: Books = self.project.books(&self.user_dir, &user, &[])?;
+            let now = self.project.clock.now();
+            Ok(if t == Tool::Adjust {
+                let f = &v.adjust;
+                let q = quote(f.amount.trim().parse()?, &f.unit);
+                let e = b.adjust(now, &q, f.note.trim())?;
+                format!("adjusted {} {}", money(e.base), e.base_currency)
+            } else {
+                let f = &v.refund;
+                let ch = &c.charges[f.job.unwrap_or_default()];
+                let q = quote(f.amount.trim().parse()?, &ch.unit);
+                let e = b.refund(now, &ch.job, &q, f.note.trim())?;
+                format!("refunded {} {}", money(e.base), e.base_currency)
+            })
+        })();
+        match done {
+            Ok(msg) => {
+                let v = &mut self.cost_view;
+                v.adjust = Form::default();
+                v.refund = Form::default();
+                v.tool = Tool::None;
+                v.since = None;
+                self.reload();
+                self.info(msg);
+            }
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+}
+
+fn quote(amount: f64, unit: &str) -> Quote {
+    Quote {
+        amount,
+        unit: unit.into(),
+        units: None,
+        unit_name: None,
+    }
+}
+
+fn ask<T: Send + 'static>(
+    slot: &Arc<Mutex<Ask<T>>>,
+    host: Option<Arc<dyn crate::Host>>,
+    ctx: egui::Context,
+    f: impl FnOnce(&dyn crate::Host) -> anyhow::Result<T> + Send + 'static,
+) {
+    let Some(host) = host else {
+        *slot.lock().unwrap() = Ask::Done(Err("plugins aren't loaded here".into()));
+        return;
+    };
+    *slot.lock().unwrap() = Ask::Busy;
+    let slot = slot.clone();
+    std::thread::spawn(move || {
+        let r = f(&*host).map_err(|e| format!("{e:#}"));
+        *slot.lock().unwrap() = Ask::Done(r);
+        ctx.request_repaint();
+    });
+}
+
+/// Each ledger, this film's and the one across films, with any lines that don't add up.
+fn verify(
+    p: &shotline_core::Project,
+    user_dir: &std::path::Path,
+) -> Vec<(String, bool, Vec<String>)> {
+    let run = || -> anyhow::Result<Vec<(String, bool, Vec<String>)>> {
+        let user = shotline_core::UserConfig::load(user_dir)?;
+        let b = p.books(user_dir, &user, &[])?;
+        let mut ledgers = vec![("This film", b.ledger.clone())];
+        if let Some(g) = &b.global {
+            ledgers.push(("All films", g.ledger.clone()));
+        }
+        let mut out = vec![];
+        for (name, l) in ledgers {
+            let problems = l.verify()?;
+            let n = l.entries().map(|e| e.len()).unwrap_or(0);
+            let ok = problems.is_empty();
+            let title = if ok {
+                format!("{name}: {n} lines, none changed by hand")
+            } else {
+                format!("{name}: changed by hand")
+            };
+            let mut details: Vec<String> = problems
+                .into_iter()
+                .map(|pr| match pr.line {
+                    0 => pr.message,
+                    n => format!("line {n}: {}", pr.message),
+                })
+                .collect();
+            details.push(l.path().display().to_string());
+            out.push((title, ok, details));
+        }
+        Ok(out)
+    };
+    run().unwrap_or_else(|e| vec![(format!("{e:#}"), false, vec![])])
+}
+
+fn finding(ui: &mut egui::Ui, title: &str, ok: bool, details: &[String]) {
+    ui.label(RichText::new(title).color(if ok { theme::PAPER } else { theme::FLAG }));
+    for d in details {
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.weak(d);
+        });
+    }
+}
+
+fn busy<T>(
+    ui: &mut egui::Ui,
+    slot: &Arc<Mutex<Ask<T>>>,
+    what: &str,
+    show: impl FnOnce(&mut egui::Ui, &T),
+) {
+    match &*slot.lock().unwrap() {
+        Ask::Idle => {}
+        Ask::Busy => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak(what);
+            });
+        }
+        Ask::Done(Err(e)) => {
+            ui.label(RichText::new(e).color(theme::FLAG));
+        }
+        Ask::Done(Ok(t)) => show(ui, t),
+    }
+}
+
+fn rates(ui: &mut egui::Ui, slot: &Arc<Mutex<Ask<Vec<RateLine>>>>) {
+    busy(ui, slot, "asking each plugin for its rates", |ui, all| {
+        if all.is_empty() {
+            hint(
+                ui,
+                "No rates. Providers that quote in money don't need any.",
+            );
+            return;
+        }
+        egui::Grid::new("rates")
+            .num_columns(3)
+            .spacing(egui::vec2(18.0, 6.0))
+            .show(ui, |ui| {
+                for r in all {
+                    let colour = if r.used { theme::PAPER } else { theme::DUST };
+                    ui.label(RichText::new(&r.unit).color(colour));
+                    ui.label(
+                        RichText::new(format!("{} {}", rate(r.rate), r.currency)).color(colour),
+                    );
+                    if r.used {
+                        ui.weak(&r.from);
+                    } else {
+                        ui.weak(format!("{} (not used)", r.from));
+                    }
+                    ui.end_row();
+                }
+            });
+    });
+}
+
+fn checks(ui: &mut egui::Ui, slot: &Arc<Mutex<Ask<Vec<Check>>>>) {
+    busy(
+        ui,
+        slot,
+        "asking each provider what it charged",
+        |ui, all| {
+            for c in all {
+                finding(ui, &c.title, c.ok, &c.details);
+            }
+        },
+    );
+}
+
+/// The adjustment form. True once it's to be booked.
+fn adjust(ui: &mut egui::Ui, f: &mut Form, units: &[String]) -> bool {
+    hint(
+        ui,
+        "A fee the jobs didn't show, or a promo credit as a negative. The ledger only grows: to \
+         take one back, record the opposite.",
+    );
+    ui.add_space(6.0);
+    let mut go = false;
+    egui::Grid::new("adjust")
+        .num_columns(2)
+        .spacing(egui::vec2(12.0, 8.0))
+        .show(ui, |ui| {
+            let l = ui.weak("Amount");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut f.amount)
+                        .desired_width(100.0)
+                        .hint_text("-5"),
+                )
+                .labelled_by(l.id);
+                egui::ComboBox::from_id_salt("adjust unit")
+                    .selected_text(&f.unit)
+                    .show_ui(ui, |ui| {
+                        for u in units {
+                            ui.selectable_value(&mut f.unit, u.clone(), u);
+                        }
+                    })
+                    .response
+                    .labelled_by(l.id);
+            });
+            ui.end_row();
+            let l = ui.weak("Note");
+            ui.add(
+                egui::TextEdit::singleline(&mut f.note)
+                    .desired_width(360.0)
+                    .hint_text("what it was, for later"),
+            )
+            .labelled_by(l.id);
+            ui.end_row();
+            ui.label("");
+            let amount = f.amount.trim().parse::<f64>().ok().filter(|a| *a != 0.0);
+            let ok = amount.is_some() && !f.note.trim().is_empty();
+            go = ui
+                .add_enabled(ok, egui::Button::new("Record adjustment"))
+                .on_disabled_hover_text("an amount other than 0, and a note")
+                .clicked();
+            ui.end_row();
+        });
+    go
+}
+
+/// The refund form. True once it's to be booked.
+fn refund(ui: &mut egui::Ui, f: &mut Form, charges: &[Charged]) -> bool {
+    if charges.is_empty() {
+        hint(ui, "No charged jobs to refund.");
+        return false;
+    }
+    hint(
+        ui,
+        "Money a provider gave back for a job, e.g. one that failed but was charged.",
+    );
+    ui.add_space(6.0);
+    let mut go = false;
+    egui::Grid::new("refund")
+        .num_columns(2)
+        .spacing(egui::vec2(12.0, 8.0))
+        .show(ui, |ui| {
+            let l = ui.weak("Job");
+            let before = f.job;
+            egui::ComboBox::from_id_salt("refund job")
+                .selected_text(f.job.map_or("pick the job", |i| charges[i].label.as_str()))
+                .width(360.0)
+                .show_ui(ui, |ui| {
+                    for (i, ch) in charges.iter().enumerate() {
+                        ui.selectable_value(&mut f.job, Some(i), &ch.label)
+                            .on_hover_text(&ch.job);
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+            if f.job != before
+                && let Some(i) = f.job
+            {
+                f.amount = money(charges[i].amount);
+            }
+            ui.end_row();
+            let l = ui.weak("Amount");
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    f.job.is_some(),
+                    egui::TextEdit::singleline(&mut f.amount).desired_width(100.0),
+                )
+                .labelled_by(l.id);
+                if let Some(i) = f.job {
+                    ui.weak(&charges[i].unit);
+                }
+            });
+            ui.end_row();
+            let l = ui.weak("Note");
+            ui.add(
+                egui::TextEdit::singleline(&mut f.note)
+                    .desired_width(360.0)
+                    .hint_text("optional"),
+            )
+            .labelled_by(l.id);
+            ui.end_row();
+            ui.label("");
+            let ok = f.job.is_some() && f.amount.trim().parse::<f64>().is_ok_and(|a| a > 0.0);
+            go = ui
+                .add_enabled(ok, egui::Button::new("Record refund"))
+                .on_disabled_hover_text("a job, and an amount above 0")
+                .clicked();
+            ui.end_row();
+        });
+    go
 }

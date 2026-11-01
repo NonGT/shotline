@@ -451,6 +451,14 @@ impl shotline_ui::Host for Plugins {
         Ok((out, format!("{secs}s · {}x{}", r.width, r.height)))
     }
 
+    fn rates(&self, film: &Path) -> Result<Vec<shotline_core::ledger::RateLine>> {
+        cost::rate_lines(&Project::open(film)?, &plugins::load())
+    }
+
+    fn reconcile(&self, film: &Path) -> Result<Vec<shotline_core::ledger::reconcile::Check>> {
+        cost::checks(&Project::open(film)?, &plugins::load(), None)
+    }
+
     fn fetch_image(&self, film: &Path, url: &str) -> Result<PathBuf> {
         fetch::image(&Project::open(film)?, url)
     }

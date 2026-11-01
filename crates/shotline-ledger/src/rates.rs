@@ -170,3 +170,13 @@ mod tests {
         assert!(parse_rate("1").is_err());
     }
 }
+
+/// One rate for a unit and where it came from. Of several for the same unit, the first is used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLine {
+    pub unit: String,
+    pub rate: f64,
+    pub currency: String,
+    pub from: String,
+    pub used: bool,
+}

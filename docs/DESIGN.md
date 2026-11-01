@@ -497,7 +497,9 @@ colour matching, music tracks with start and volume; a track from outside the fi
 `renders/`. Past renders play in the app.
 
 The Cost tab charts spending per day as stacked bars, one colour per model (last 7 or 30 days,
-or all of it), with a table of models under it (usage, jobs, money) and the spend per shot.
+or all of it), with a table of models under it (usage, jobs, money) and the spend per shot. Under
+that, the Ledger row does what `cost verify`, `cost rates`, `cost reconcile`, `cost adjust` and
+`cost refund` do; rates and reconcile ask the plugins on another thread.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Paid actions still quote and ask first: an element's "Make image…" shows

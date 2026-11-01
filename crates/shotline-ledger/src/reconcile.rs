@@ -134,3 +134,11 @@ pub fn balance_checks(entries: &[Entry], rates: &Rates) -> Vec<BalanceCheck> {
         })
         .collect()
 }
+
+/// One finding when the ledger is checked against a provider: a line, and what's off if anything.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Check {
+    pub title: String,
+    pub ok: bool,
+    pub details: Vec<String>,
+}

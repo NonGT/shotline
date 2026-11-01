@@ -262,6 +262,24 @@ impl Host for TestHost {
         Ok((out, "8s · 720x1280".into()))
     }
 
+    fn rates(&self, _: &Path) -> anyhow::Result<Vec<shotline_core::ledger::RateLine>> {
+        Ok(vec![shotline_core::ledger::RateLine {
+            unit: "fake-credit".into(),
+            rate: 0.01,
+            currency: "USD".into(),
+            from: "plugin fake".into(),
+            used: true,
+        }])
+    }
+
+    fn reconcile(&self, _: &Path) -> anyhow::Result<Vec<shotline_core::ledger::reconcile::Check>> {
+        Ok(vec![shotline_core::ledger::reconcile::Check {
+            title: "fake:".into(),
+            ok: false,
+            details: vec!["01ABC: ledger has 0.4 USD, provider doesn't".into()],
+        }])
+    }
+
     fn fetch_image(&self, film: &Path, url: &str) -> anyhow::Result<PathBuf> {
         assert_eq!(url, "https://example.com/dress.png");
         let out = film.join(".shotline").join("dress.png");
@@ -1057,6 +1075,51 @@ fn elements_story_and_cost() {
     h.get_by_label("30 days").click();
     h.run();
     h.get_by_label("spent per day, last 30 days");
+
+    // The ledger: checks, rates and the providers' side, then corrections.
+    h.set_size(egui::vec2(1000.0, 1800.0));
+    h.state_mut().set_plugins(vec![], Some(Arc::new(TestHost)));
+    h.run();
+    h.get_by_label("Check the ledger").click();
+    h.run();
+    h.get_by_label("This film: 2 lines, none changed by hand");
+    h.get_by_label("Rates").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("fake-credit")
+        .is_some()));
+    h.get_by_label("Compare with providers").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("01ABC: ledger has 0.4 USD, provider doesn't")
+        .is_some()));
+
+    h.get_by_label("Adjust…").click();
+    h.run();
+    let f = h.get_by_role_and_label(Role::TextInput, "Amount");
+    f.focus();
+    f.type_text("-0.1");
+    h.run();
+    let f = h.get_by_role_and_label(Role::TextInput, "Note");
+    f.focus();
+    f.type_text("promo");
+    h.run();
+    h.run();
+    h.get_by_label("Record adjustment").click();
+    // The bars grow in again with the new numbers.
+    h.run_steps(8);
+    h.get_by_label("0.3 USD");
+    h.get_by_label("adjusted -0.1 USD");
+
+    h.get_by_label("Refund…").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Job").click();
+    h.run();
+    h.get_by_label_contains("fake/video · 0.4 USD").click();
+    h.run();
+    assert_eq!(field(&h, Role::TextInput, "Amount"), "0.4");
+    h.get_by_label("Record refund").click();
+    h.run_steps(8);
+    h.get_by_label("refunded 0.4 USD");
+    h.get_by_label("-0.1 USD");
 }
 
 #[test]

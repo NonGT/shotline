@@ -13,7 +13,7 @@ pub use books::{Books, Context, GlobalLimit};
 pub use budget::Budgets;
 pub use entry::{Entry, Kind, is_currency, pricing};
 pub use ledger::{Ledger, Problem};
-pub use rates::{Converted, Rates, parse_rate};
+pub use rates::{Converted, RateLine, Rates, parse_rate};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
