@@ -550,6 +550,10 @@ fn edit_elements() {
     h.run();
     h.run();
     let mali = p.element("mali").unwrap();
+    // The plugin is asked for its voices in the background; its repaint can land mid-run.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::ComboBox, "Voice")
+        .is_some()));
     assert_eq!(mali.description, "young woman, short black hair");
     let voice = mali.voice.unwrap();
     assert_eq!(voice.plugin, "elevenlabs");
