@@ -798,8 +798,7 @@ fn plays_compares_and_plays_the_cut() {
     wait(&mut h, 0.1);
     assert!(h.query_by_label("Compare #3").is_none());
     h.get_by_label("Play #1").click();
-    wait(&mut h, 0.3);
-    assert!(h.state().is_playing());
+    assert!(wait_for(&mut h, |h| h.state().is_playing()));
     // The title, and the picture's alt text.
     assert!(wait_for(&mut h, |h| h
         .query_all_by_label("01-010#1")
