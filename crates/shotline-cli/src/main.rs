@@ -396,7 +396,13 @@ fn main() {
 
 #[cfg(feature = "ui")]
 fn ui(p: Option<Project>) -> Result<()> {
-    shotline_ui::run(p, shotline_core::user_dir())
+    let descriptions = plugins::load()
+        .plugins
+        .into_iter()
+        .filter_map(|p| p.description.ok())
+        .collect();
+    let voices = std::sync::Arc::new(|name: &str| plugins::voices(&plugins::load(), name));
+    shotline_ui::run(p, shotline_core::user_dir(), descriptions, voices)
 }
 
 #[cfg(not(feature = "ui"))]

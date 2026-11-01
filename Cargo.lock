@@ -4581,9 +4581,11 @@ dependencies = [
  "muda",
  "raw-window-handle",
  "rfd",
+ "serde_json",
  "shotline-core",
  "shotline-media",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

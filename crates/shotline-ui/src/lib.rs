@@ -13,17 +13,19 @@ mod theme;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
 use shotline_core::ledger::report::{self, By, Row, Summary};
+use shotline_core::protocol::{Description, ModelInfo, Op, VoiceInfo};
 use shotline_core::{
     Chapter, CutShot, Element, Git, JobStatus, Kind, Project, Shot, ShotRef, Take, Transition,
     UserConfig,
 };
 use shotline_media::Ffmpeg;
 
-use edit::{Action, Form, History, LineForm, Texts};
+use edit::{Action, ElementForm, Form, History, LineForm, NewElement, Texts};
 use git::{Dialog, Repo};
 use player::{Audio, Deck, Player};
 pub use start::{MenuCommand, Shell};
@@ -68,6 +70,16 @@ struct Film {
     takes: HashMap<ShotRef, usize>,
 }
 
+/// Asks a plugin for its voices. The app calls it off the UI thread.
+pub type ListVoices = Arc<dyn Fn(&str) -> anyhow::Result<Vec<VoiceInfo>> + Send + Sync>;
+
+#[derive(Clone)]
+enum VoiceList {
+    Loading,
+    Ready(Vec<VoiceInfo>),
+    Failed(String),
+}
+
 pub struct App {
     project: Project,
     user_dir: PathBuf,
@@ -84,12 +96,21 @@ pub struct App {
     status: Option<(String, bool)>,
     thumbs: Thumbs,
     /// The tab and shot last written to the place file, when the app keeps one.
-    place: Option<(Tab, Option<ShotRef>)>,
+    place: Option<(Tab, Option<ShotRef>, Option<String>)>,
     themed: bool,
     form: Form,
     texts: Texts,
     /// The title typed for a new chapter.
     new_chapter: String,
+    /// The open element, by handle.
+    element: Option<String>,
+    element_form: ElementForm,
+    new_element: NewElement,
+    /// The picture shown big over everything.
+    zoom: Option<PathBuf>,
+    plugins: Vec<Description>,
+    list_voices: Option<ListVoices>,
+    voice_lists: Arc<Mutex<HashMap<String, VoiceList>>>,
     history: History,
     git: Option<Git>,
     repo: Repo,
@@ -114,24 +135,46 @@ fn read(path: &Path) -> String {
 /// Anchors and frames are often 2-4K, past what some GPUs take as one texture, so they're shrunk
 /// once when first shown.
 #[derive(Default)]
-struct Thumbs(HashMap<PathBuf, Option<egui::TextureHandle>>);
+struct Thumbs(HashMap<(PathBuf, u32), Option<egui::TextureHandle>>);
 
 const THUMB: u32 = 512;
+const BIG: u32 = 2048;
 
 impl Thumbs {
-    fn show(&mut self, ui: &mut egui::Ui, path: &Path, height: f32, name: &str) {
-        let tex = self.0.entry(path.to_path_buf()).or_insert_with(|| {
-            let img = image::open(path).ok()?.thumbnail(THUMB, THUMB).to_rgba8();
-            let size = [img.width() as usize, img.height() as usize];
-            let pixels = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
-            Some(ui.ctx().load_texture(name, pixels, Default::default()))
-        });
-        match tex {
-            Some(t) => {
-                ui.add(egui::Image::new(&*t).max_height(height).alt_text(name));
-            }
+    fn texture(
+        &mut self,
+        ui: &egui::Ui,
+        path: &Path,
+        px: u32,
+        name: &str,
+    ) -> Option<egui::TextureHandle> {
+        self.0
+            .entry((path.to_path_buf(), px))
+            .or_insert_with(|| {
+                let img = image::open(path).ok()?.thumbnail(px, px).to_rgba8();
+                let size = [img.width() as usize, img.height() as usize];
+                let pixels = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                Some(ui.ctx().load_texture(name, pixels, Default::default()))
+            })
+            .clone()
+    }
+
+    /// A thumbnail; clicking it asks for the picture full size.
+    fn show(&mut self, ui: &mut egui::Ui, path: &Path, height: f32, name: &str) -> bool {
+        match self.texture(ui, path, THUMB, name) {
+            Some(t) => ui
+                .add(
+                    egui::Image::new(&t)
+                        .max_height(height)
+                        .alt_text(name)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::ZoomIn)
+                .on_hover_text("click to see it bigger")
+                .clicked(),
             None => {
                 ui.weak(format!("can't show {name}"));
+                false
             }
         }
     }
@@ -159,6 +202,13 @@ impl App {
             form: Form::default(),
             texts: Texts::default(),
             new_chapter: String::new(),
+            element: None,
+            element_form: ElementForm::default(),
+            new_element: NewElement::default(),
+            zoom: None,
+            plugins: vec![],
+            list_voices: None,
+            voice_lists: Arc::default(),
             history: History::default(),
             git: Git::find(),
             repo: Repo::None,
@@ -177,6 +227,11 @@ impl App {
 
     pub fn project(&self) -> &Project {
         &self.project
+    }
+
+    pub fn set_plugins(&mut self, plugins: Vec<Description>, voices: Option<ListVoices>) {
+        self.plugins = plugins;
+        self.list_voices = voices;
     }
 
     pub fn with_git(mut self, git: Option<Git>) -> App {
@@ -201,22 +256,26 @@ impl App {
                         self.open_shot(r);
                     }
                 }
+                Some(("element", h)) => self.open_element_named(h.to_string()),
                 _ => {}
             }
         }
-        self.place = Some((self.tab, self.shot));
+        self.place = Some((self.tab, self.shot, self.element.clone()));
         self
     }
 
     fn keep_place(&mut self) {
-        let now = (self.tab, self.shot);
-        if self.place.is_none_or(|p| p == now) {
+        let now = (self.tab, self.shot, self.element.clone());
+        if self.place.as_ref().is_none_or(|p| *p == now) {
             return;
         }
         self.place = Some(now);
         let mut text = format!("tab={}\n", self.tab.name());
         if let Some(r) = self.shot {
             text += &format!("shot={r}\n");
+        }
+        if let Some(h) = &self.element {
+            text += &format!("element={h}\n");
         }
         let file = self.place_file();
         let _ = std::fs::create_dir_all(file.parent().unwrap());
@@ -251,6 +310,22 @@ impl App {
             .flat_map(|(_, s)| s)
             .find(|(x, _)| *x == r)
             .cloned()
+    }
+
+    /// The open element as last read from disk.
+    fn open_element(&self) -> Option<Element> {
+        let h = self.element.as_ref()?;
+        self.film
+            .elements
+            .iter()
+            .find(|(e, _)| e.handle == *h)
+            .map(|(e, _)| e.clone())
+    }
+
+    fn open_element_named(&mut self, handle: String) {
+        self.flush();
+        self.element = Some(handle);
+        self.fill_form();
     }
 
     fn load(&mut self) -> anyhow::Result<()> {
@@ -469,6 +544,7 @@ impl App {
             Tab::Cost => self.costs(ui),
         }
         self.git_dialog(ui);
+        self.zoomed(ui);
         // Files change outside the app too, from the CLI or the co-director.
         let now = ui.input(|i| i.time);
         if now - self.repo_at > 5.0 {
@@ -500,6 +576,35 @@ impl App {
         }
     }
 
+    fn zoomed(&mut self, ui: &mut egui::Ui) {
+        let Some(path) = self.zoom.clone() else {
+            return;
+        };
+        let name = self.project.rel(&path);
+        let room = ui.ctx().content_rect().size() * 0.88;
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::unique("zoom")).show(ui.ctx(), |ui| {
+            if let Some(t) = self.thumbs.texture(ui, &path, BIG, &name) {
+                let img = ui.add(
+                    egui::Image::new(&t)
+                        .max_size(room - egui::vec2(0.0, 40.0))
+                        .alt_text(format!("{name} big"))
+                        .sense(egui::Sense::click()),
+                );
+                close = img.clicked();
+            }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&name).color(theme::DUST));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close |= ui.button("Close").clicked();
+                });
+            });
+        });
+        if close || modal.should_close() {
+            self.zoom = None;
+        }
+    }
+
     fn story(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(
@@ -525,36 +630,343 @@ impl App {
     }
 
     fn elements(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if self.film.elements.is_empty() {
-                    ui.weak("no elements yet");
-                }
-                for (el, anchors) in &self.film.elements {
-                    ui.horizontal(|ui| {
-                        ui.strong(format!("@{}", el.handle));
-                        ui.label(&el.name);
-                        ui.weak(format!("{:?}", el.kind).to_lowercase());
-                        if let Some(v) = &el.voice {
-                            ui.weak(format!("voice: {}", v.plugin));
+        let mut open = None;
+        let mut acts = vec![];
+        egui::Panel::left("elements")
+            .resizable(true)
+            .default_size(260.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::RACK)
+                    .inner_margin(egui::vec2(8.0, 12.0)),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (kind, heading) in [
+                        (Kind::Cast, "Cast"),
+                        (Kind::Set, "Sets"),
+                        (Kind::Prop, "Props"),
+                    ] {
+                        let els: Vec<_> = self
+                            .film
+                            .elements
+                            .iter()
+                            .filter(|(e, _)| e.kind == kind)
+                            .collect();
+                        if els.is_empty() {
+                            continue;
                         }
-                    });
-                    if !el.description.is_empty() {
-                        ui.label(&el.description);
-                    }
-                    if anchors.is_empty() {
-                        ui.weak("no anchor images");
-                    } else {
-                        ui.horizontal_wrapped(|ui| {
-                            for a in anchors {
-                                self.thumbs.show(ui, a, 160.0, &self.project.rel(a));
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(8.0);
+                            ui.label(
+                                RichText::new(heading)
+                                    .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
+                                    .color(theme::PAPER),
+                            );
+                        });
+                        for (e, anchors) in els {
+                            let here = self.element.as_ref() == Some(&e.handle);
+                            let key = format!("@{}", e.handle);
+                            if list_row(ui, &key, &e.name, anchors.len(), false, here).clicked() {
+                                open = Some(e.handle.clone());
                             }
+                        }
+                        ui.add_space(8.0);
+                    }
+                    ui.add_space(4.0);
+                    let n = &mut self.new_element;
+                    let label = caption(ui, "New element");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt("kind")
+                            .selected_text(n.kind.to_string())
+                            .width(64.0)
+                            .show_ui(ui, |ui| {
+                                for k in Kind::ALL {
+                                    ui.selectable_value(&mut n.kind, k, k.to_string());
+                                }
+                            })
+                            .response
+                            .widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Kind")
+                            });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut n.name)
+                                .hint_text(RichText::new("Name").color(theme::DUST))
+                                .desired_width(f32::INFINITY),
+                        )
+                        .labelled_by(label.id);
+                    });
+                    let slug = shotline_core::slug::slugify(n.name.trim());
+                    let handle = ui
+                        .horizontal(|ui| {
+                            ui.label(RichText::new("@").color(theme::DUST));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut n.handle)
+                                    .hint_text(
+                                        RichText::new(if slug.is_empty() {
+                                            "handle"
+                                        } else {
+                                            slug.as_str()
+                                        })
+                                        .color(theme::DUST),
+                                    )
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .on_hover_text("how prompts name it; made from the name if left empty")
+                        })
+                        .inner;
+                    let enter =
+                        handle.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let ready = !n.name.trim().is_empty();
+                    let add = ui.add_enabled(ready, egui::Button::new("Add element"));
+                    if (add.clicked() || enter) && ready {
+                        acts.push(Action::AddElement(std::mem::take(n)));
+                    }
+                });
+            });
+        if !acts.is_empty() {
+            self.flush();
+            self.apply(acts);
+        }
+        if let Some(h) = open {
+            self.open_element_named(h);
+        }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BAY)
+                    .inner_margin(egui::vec2(28.0, 20.0)),
+            )
+            .show(ui, |ui| {
+                let found = self.element.as_ref().and_then(|h| {
+                    self.film.elements.iter().find(|(e, _)| e.handle == *h).cloned()
+                });
+                match found {
+                    Some((el, anchors)) => {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            self.element_detail(ui, &el, &anchors);
                         });
                     }
-                    ui.separator();
+                    None if self.film.elements.is_empty() => {
+                        hint(ui, "Cast, sets and props that shots name as @handles. Add the first one on the left.");
+                    }
+                    None => hint(ui, "Pick an element on the left."),
                 }
             });
+    }
+
+    fn element_detail(&mut self, ui: &mut egui::Ui, el: &Element, anchors: &[PathBuf]) {
+        let mut acts = vec![];
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("@{}", el.handle))
+                    .font(theme::slate())
+                    .color(theme::PAPER),
+            );
+            ui.add_space(8.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.element_form.name)
+                    .font(egui::TextStyle::Heading)
+                    .text_color(theme::GRAPHITE)
+                    .frame(egui::Frame::NONE)
+                    .desired_width(ui.available_width() - 60.0),
+            )
+            .on_hover_text("its name; the @handle stays as prompts use it");
+            ui.weak(el.kind.to_string());
         });
+        ui.add_space(14.0);
+        ui.vertical(|ui| {
+            ui.set_max_width(620.0);
+            text_field(
+                ui,
+                "Description",
+                &mut self.element_form.description,
+                "How it looks, in English: sent with every shot that names it",
+            );
+            ui.add_space(14.0);
+            caption(ui, "Anchor images");
+            if anchors.is_empty() {
+                hint(ui, "Pictures of it that video models are shown, to keep it the same in every shot.");
+            }
+            let mut remove = None;
+            ui.horizontal_wrapped(|ui| {
+                for a in anchors {
+                    ui.vertical(|ui| {
+                        let name = self.project.rel(a);
+                        if self.thumbs.show(ui, a, 160.0, &name) {
+                            self.zoom = Some(a.clone());
+                        }
+                        if remove_button(ui)
+                            .on_hover_text(format!("take {name} off @{}", el.handle))
+                            .clicked()
+                        {
+                            remove = Some(a.clone());
+                        }
+                    });
+                }
+            });
+            if let Some(a) = remove {
+                acts.push(Action::RemoveAnchor(el.clone(), a));
+            }
+            if ui.button("Add image…").clicked()
+                && let Some(file) = rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                    .pick_file()
+            {
+                acts.push(Action::AddAnchor(el.clone(), file));
+            }
+            if el.kind == Kind::Cast {
+                ui.add_space(20.0);
+                self.voice(ui, el);
+            }
+        });
+        if !acts.is_empty() {
+            self.flush();
+            self.apply(acts);
+        }
+    }
+
+    /// Which TTS plugin and voice speak a cast member's lines.
+    fn voice(&mut self, ui: &mut egui::Ui, el: &Element) {
+        ui.label(
+            RichText::new("Voice")
+                .text_style(egui::TextStyle::Heading)
+                .color(theme::PAPER),
+        );
+        ui.add_space(4.0);
+        let plugin = self.element_form.voice.plugin.clone();
+        let voices = (!plugin.is_empty()).then(|| self.voice_list(ui.ctx(), &plugin));
+        // Plugins that can speak, with their speaking models.
+        let tts: Vec<(String, Vec<&ModelInfo>)> = self
+            .plugins
+            .iter()
+            .filter_map(|d| {
+                let models: Vec<&ModelInfo> =
+                    d.models.iter().filter(|m| m.op == Op::AudioTts).collect();
+                (!models.is_empty()).then(|| (d.name.clone(), models))
+            })
+            .collect();
+        let root = self.project.root.clone();
+        let v = &mut self.element_form.voice;
+        let installed = tts.iter().find(|(p, _)| *p == v.plugin);
+        let shown = match (v.plugin.as_str(), installed) {
+            ("", _) => "no voice".to_string(),
+            (p, Some(_)) => p.to_string(),
+            (p, None) => format!("{p} (not installed)"),
+        };
+        // The model's settings, or the first model's when it's left to the plugin.
+        let models = installed.map(|(_, m)| m.as_slice()).unwrap_or_default();
+        let schema = models
+            .iter()
+            .find(|m| m.id == v.model)
+            .or(models.first())
+            .and_then(|m| m.voice_schema.clone());
+        let mut sample = None;
+        egui::Grid::new("voice")
+            .num_columns(2)
+            .spacing(egui::vec2(12.0, 8.0))
+            .show(ui, |ui| {
+                ui.weak("Plugin");
+                egui::ComboBox::from_id_salt("voice plugin")
+                    .selected_text(shown)
+                    .width(320.0)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(v.plugin.is_empty(), "no voice")
+                            .clicked()
+                        {
+                            *v = Default::default();
+                        }
+                        for (p, _) in &tts {
+                            if ui.selectable_label(v.plugin == *p, p).clicked() && v.plugin != *p {
+                                v.plugin = p.clone();
+                                v.model.clear();
+                                v.voice_id.clear();
+                            }
+                        }
+                    })
+                    .response
+                    .widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Plugin")
+                    });
+                ui.end_row();
+                if v.plugin.is_empty() {
+                    return;
+                }
+                ui.weak("Model");
+                egui::ComboBox::from_id_salt("voice model")
+                    .selected_text(if v.model.is_empty() {
+                        "the plugin's default"
+                    } else {
+                        v.model.as_str()
+                    })
+                    .width(320.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut v.model, String::new(), "the plugin's default");
+                        for m in models {
+                            ui.selectable_value(&mut v.model, m.id.clone(), &m.id);
+                        }
+                    })
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Model"));
+                ui.end_row();
+                ui.weak("Voice");
+                voice_picker(ui, &mut v.voice_id, voices.as_ref());
+                ui.end_row();
+                let l = ui.weak("Sample");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut v.sample)
+                            .hint_text(RichText::new("a recording to clone").color(theme::DUST))
+                            .desired_width(240.0),
+                    )
+                    .labelled_by(l.id);
+                    if ui.button("Choose").clicked() {
+                        sample = rfd::FileDialog::new().set_directory(&root).pick_file();
+                    }
+                });
+                ui.end_row();
+                settings_rows(ui, schema.as_ref(), &mut v.settings);
+            });
+        let none = v.plugin.is_empty();
+        if let Some(f) = sample {
+            self.element_form.voice.sample = self.project.rel(&f);
+        }
+        if tts.is_empty() {
+            hint(
+                ui,
+                "No installed plugin can speak yet. One that does audio.tts, like elevenlabs, \
+                 shows up here once it's installed.",
+            );
+        } else if el.voice.is_none() && none {
+            hint(
+                ui,
+                &format!("Without a voice, @{}'s lines aren't spoken.", el.handle),
+            );
+        }
+    }
+
+    /// A plugin's voices, asked for once in the background.
+    fn voice_list(&mut self, ctx: &egui::Context, plugin: &str) -> VoiceList {
+        let mut lists = self.voice_lists.lock().unwrap();
+        if let Some(l) = lists.get(plugin) {
+            return l.clone();
+        }
+        let Some(ask) = self.list_voices.clone() else {
+            return VoiceList::Failed("can't ask plugins for voices here".into());
+        };
+        lists.insert(plugin.to_string(), VoiceList::Loading);
+        let (lists, ctx, plugin) = (self.voice_lists.clone(), ctx.clone(), plugin.to_string());
+        std::thread::spawn(move || {
+            let got = match ask(&plugin) {
+                Ok(v) => VoiceList::Ready(v),
+                Err(e) => VoiceList::Failed(e.to_string()),
+            };
+            lists.lock().unwrap().insert(plugin, got);
+            ctx.request_repaint();
+        });
+        VoiceList::Loading
     }
 
     fn shots(&mut self, ui: &mut egui::Ui) {
@@ -732,7 +1144,7 @@ impl App {
         if cast.is_empty() {
             hint(
                 ui,
-                "Only cast speak, and there's no cast yet. Add some with shotline element add cast",
+                "Only cast speak, and there's no cast yet. Add some in Elements.",
             );
             return;
         }
@@ -760,7 +1172,12 @@ impl App {
     /// The storyboard frame and the shot's settings.
     fn facts(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
         match &s.frame {
-            Some(f) => self.thumbs.show(ui, &self.project.root.join(f), 150.0, f),
+            Some(f) => {
+                let path = self.project.root.join(f);
+                if self.thumbs.show(ui, &path, 150.0, f) {
+                    self.zoom = Some(path);
+                }
+            }
             None => hint(
                 ui,
                 &format!("No storyboard frame. Make one with shotline frame {r}"),
@@ -1052,10 +1469,29 @@ fn shot_row(ui: &mut egui::Ui, r: ShotRef, s: &Shot, takes: usize, open: bool) -
         &s.title
     };
     let title = title.lines().next().unwrap_or("");
+    list_row(
+        ui,
+        &r.to_string(),
+        title,
+        takes,
+        s.selected_take.is_some(),
+        open,
+    )
+}
+
+/// A row in a side list: its key in grey, a title, a count and maybe an amber dot.
+fn list_row(
+    ui: &mut egui::Ui,
+    key: &str,
+    title: &str,
+    count: usize,
+    dot: bool,
+    open: bool,
+) -> egui::Response {
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 26.0), egui::Sense::click());
     resp.widget_info(|| {
-        egui::WidgetInfo::selected(egui::Role::Button, true, open, format!("{r}  {title}"))
+        egui::WidgetInfo::selected(egui::Role::Button, true, open, format!("{key}  {title}"))
     });
     let p = ui.painter();
     if open {
@@ -1070,7 +1506,7 @@ fn shot_row(ui: &mut egui::Ui, r: ShotRef, s: &Shot, takes: usize, open: bool) -
     }
     let font = egui::TextStyle::Body.resolve(ui.style());
     let mid = rect.center().y;
-    let num = p.layout_no_wrap(r.to_string(), font.clone(), theme::DUST);
+    let num = p.layout_no_wrap(key.to_string(), font.clone(), theme::DUST);
     let x = rect.left() + 12.0;
     p.galley(
         egui::pos2(x, mid - num.size().y / 2.0),
@@ -1079,13 +1515,13 @@ fn shot_row(ui: &mut egui::Ui, r: ShotRef, s: &Shot, takes: usize, open: bool) -
     );
 
     let mut right = rect.right() - 8.0;
-    if s.selected_take.is_some() {
+    if dot {
         p.circle_filled(egui::pos2(right - 3.0, mid), 3.5, theme::TUNGSTEN);
         right -= 14.0;
     }
-    if takes > 0 {
+    if count > 0 {
         let n = p.layout_no_wrap(
-            takes.to_string(),
+            count.to_string(),
             egui::TextStyle::Small.resolve(ui.style()),
             theme::DUST,
         );
@@ -1171,6 +1607,214 @@ fn quiet_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(egui::Button::new(RichText::new(text).color(theme::DUST)).frame(false))
 }
 
+/// The voice by name from the plugin's list, or its ID typed in when there's no list.
+fn voice_picker(ui: &mut egui::Ui, id: &mut String, list: Option<&VoiceList>) {
+    let field = |ui: &mut egui::Ui, id: &mut String| {
+        ui.add(
+            egui::TextEdit::singleline(id)
+                .hint_text(RichText::new("the voice's ID from the provider").color(theme::DUST))
+                .desired_width(320.0),
+        )
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Voice ID"));
+    };
+    match list {
+        Some(VoiceList::Ready(voices)) if !voices.is_empty() => {
+            let name = voices.iter().find(|v| v.id == *id).map(|v| v.name.clone());
+            let shown = match (name, id.is_empty()) {
+                (Some(n), _) => n,
+                (None, true) => "pick a voice".into(),
+                (None, false) => format!("{id} (not on the account)"),
+            };
+            egui::ComboBox::from_id_salt("voice id")
+                .selected_text(shown)
+                .width(320.0)
+                .show_ui(ui, |ui| {
+                    for v in voices {
+                        let r = ui.selectable_value(id, v.id.clone(), &v.name);
+                        if let Some(d) = &v.description {
+                            r.on_hover_text(d);
+                        }
+                    }
+                })
+                .response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Voice"));
+        }
+        Some(VoiceList::Loading) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("asking the plugin for its voices");
+            });
+        }
+        Some(VoiceList::Failed(e)) => {
+            ui.vertical(|ui| {
+                field(ui, id);
+                ui.label(RichText::new(short(e, 70)).small().color(theme::DUST))
+                    .on_hover_text(e);
+            });
+        }
+        _ => field(ui, id),
+    }
+}
+
+/// Voice settings as the model's schema describes them, or as `key = value` lines without one.
+fn settings_rows(ui: &mut egui::Ui, schema: Option<&serde_json::Value>, text: &mut String) {
+    let props = schema
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.as_object())
+        .filter(|p| !p.is_empty());
+    let Some(props) = props else {
+        let l = ui.weak("Settings");
+        ui.add(
+            egui::TextEdit::multiline(text)
+                .hint_text(RichText::new("key = value, one a line").color(theme::DUST))
+                .desired_rows(2)
+                .desired_width(320.0),
+        )
+        .labelled_by(l.id);
+        ui.end_row();
+        return;
+    };
+    let mut table = edit::settings_table(text);
+    let before = table.clone();
+    for (key, p) in props {
+        let l = ui.weak(key.replace('_', " "));
+        if let Some(d) = p.get("description").and_then(|d| d.as_str()) {
+            l.on_hover_text(d);
+        }
+        ui.horizontal(|ui| {
+            setting(ui, key, p, &mut table);
+            // Greyed out while the provider's default is what's used.
+            let set = table.contains_key(key);
+            if ui
+                .add_enabled(set, egui::Button::new("Default"))
+                .on_hover_text("go back to the provider's default")
+                .on_disabled_hover_text("the provider's default is used")
+                .clicked()
+            {
+                table.remove(key);
+            }
+        });
+        ui.end_row();
+    }
+    // Settings the schema doesn't know stay, and can be changed as text.
+    for key in before.keys().filter(|k| !props.contains_key(*k)) {
+        ui.weak(key);
+        let mut raw = before[key].to_string();
+        if ui.text_edit_singleline(&mut raw).changed() {
+            table.insert(key.clone(), edit::setting_value(&raw));
+        }
+        ui.end_row();
+    }
+    if table != before {
+        *text = edit::settings_text(&table);
+    }
+}
+
+/// One setting's widget, by its JSON Schema type. Until it's set, the default shows.
+fn setting(ui: &mut egui::Ui, key: &str, p: &serde_json::Value, table: &mut toml::Table) {
+    use serde_json::Value as J;
+    let default = p.get("default");
+    let now = table.get(key).cloned();
+    let label = key.replace('_', " ");
+    let plain = |v: &J| v.to_string().trim_matches('"').to_string();
+    if let Some(options) = p.get("enum").and_then(J::as_array) {
+        let shown = match (&now, default) {
+            (Some(v), _) => v.to_string().trim_matches('"').to_string(),
+            (None, Some(d)) => format!("{} (default)", plain(d)),
+            (None, None) => String::new(),
+        };
+        egui::ComboBox::from_id_salt(("setting", key))
+            .selected_text(shown)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for o in options {
+                    let v = match o {
+                        J::String(s) => toml::Value::String(s.clone()),
+                        J::Bool(b) => toml::Value::Boolean(*b),
+                        J::Number(n) => match n.as_i64() {
+                            Some(i) => toml::Value::Integer(i),
+                            None => toml::Value::Float(n.as_f64().unwrap_or_default()),
+                        },
+                        _ => continue,
+                    };
+                    if ui
+                        .selectable_label(now.as_ref() == Some(&v), plain(o))
+                        .clicked()
+                    {
+                        table.insert(key.to_string(), v);
+                    }
+                }
+            })
+            .response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &label));
+        return;
+    }
+    let kind = p.get("type").and_then(J::as_str);
+    match kind {
+        Some("number") | Some("integer") => {
+            let whole = kind == Some("integer");
+            let lo = p.get("minimum").and_then(J::as_f64);
+            let hi = p.get("maximum").and_then(J::as_f64);
+            let mut x = now
+                .as_ref()
+                .and_then(|v| v.as_float().or(v.as_integer().map(|i| i as f64)))
+                .or(default.and_then(J::as_f64))
+                .unwrap_or(lo.unwrap_or(0.0));
+            let step = if whole { 1.0 } else { 0.01 };
+            let r = match (lo, hi) {
+                (Some(lo), Some(hi)) => ui.add(egui::Slider::new(&mut x, lo..=hi).step_by(step)),
+                _ => ui.add(egui::DragValue::new(&mut x).speed(step)),
+            };
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, &label));
+            if r.changed() {
+                let v = if whole {
+                    toml::Value::Integer(x.round() as i64)
+                } else {
+                    toml::Value::Float((x * 100.0).round() / 100.0)
+                };
+                table.insert(key.to_string(), v);
+            }
+        }
+        Some("boolean") => {
+            let mut b = now
+                .as_ref()
+                .and_then(toml::Value::as_bool)
+                .or(default.and_then(J::as_bool))
+                .unwrap_or(false);
+            let r = ui.checkbox(&mut b, "");
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &label));
+            if r.changed() {
+                table.insert(key.to_string(), toml::Value::Boolean(b));
+            }
+        }
+        _ => {
+            let mut s = match &now {
+                Some(toml::Value::String(s)) => s.clone(),
+                Some(v) => v.to_string(),
+                None => String::new(),
+            };
+            let hint = default.map(plain).unwrap_or_default();
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut s)
+                    .hint_text(RichText::new(hint).color(theme::DUST))
+                    .desired_width(200.0),
+            );
+            if r.changed() {
+                table.insert(key.to_string(), toml::Value::String(s));
+            }
+        }
+    }
+}
+
+/// Framed so it reads as a button under a picture, in red as it takes something away.
+fn remove_button(ui: &mut egui::Ui) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new("Remove").small().color(theme::FLAG))
+            .fill(theme::RAISED)
+            .stroke(egui::Stroke::new(1.0, theme::LINE)),
+    )
+}
+
 /// A take's button: the number is in the row already, but screen readers and tests get it too.
 fn act(ui: &mut egui::Ui, text: &str, take: usize) -> egui::Response {
     let r = ui.button(text);
@@ -1187,7 +1831,12 @@ impl eframe::App for Shell {
 }
 
 /// Opens the film, or without one a page to make or pick one.
-pub fn run(project: Option<Project>, user_dir: PathBuf) -> anyhow::Result<()> {
+pub fn run(
+    project: Option<Project>,
+    user_dir: PathBuf,
+    plugins: Vec<Description>,
+    voices: ListVoices,
+) -> anyhow::Result<()> {
     let title = start::title(project.as_ref());
     let here = std::env::current_dir()?;
     let options = eframe::NativeOptions {
@@ -1198,7 +1847,7 @@ pub fn run(project: Option<Project>, user_dir: PathBuf) -> anyhow::Result<()> {
         &title,
         options,
         Box::new(move |cc| {
-            let shell = Shell::new(project, user_dir, &here);
+            let shell = Shell::new(project, user_dir, &here).with_plugins(plugins, Some(voices));
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             let shell = shell.with_native_menu(cc);
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]

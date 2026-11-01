@@ -6,7 +6,7 @@
 use shotline_core::ledger::money;
 use std::path::{Path, PathBuf};
 
-use shotline_core::{Project, Shot, ShotRef, Take, Transition};
+use shotline_core::{Element, Kind, Project, Shot, ShotRef, Take, Transition, Voice};
 
 use crate::App;
 
@@ -54,6 +54,116 @@ impl LineForm {
     }
 }
 
+/// What's typed into the open element's fields.
+#[derive(Default, Clone, PartialEq)]
+pub(crate) struct ElementForm {
+    pub handle: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub voice: VoiceForm,
+}
+
+#[derive(Default, Clone, PartialEq)]
+pub(crate) struct VoiceForm {
+    pub plugin: String,
+    pub model: String,
+    pub voice_id: String,
+    pub sample: String,
+    /// One `key = value` a line.
+    pub settings: String,
+}
+
+impl ElementForm {
+    pub fn of(el: &Element) -> ElementForm {
+        let v = el.voice.clone().unwrap_or_default();
+        ElementForm {
+            handle: Some(el.handle.clone()),
+            name: el.name.clone(),
+            description: el.description.clone(),
+            voice: VoiceForm {
+                plugin: v.plugin,
+                model: v.model.unwrap_or_default(),
+                voice_id: v.voice_id.unwrap_or_default(),
+                sample: v.sample.unwrap_or_default(),
+                settings: settings_text(&v.settings),
+            },
+        }
+    }
+
+    /// `el` with the form's fields.
+    fn element(&self, el: &Element) -> anyhow::Result<Element> {
+        let v = &self.voice;
+        let some = |s: &str| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+        let voice = match some(&v.plugin) {
+            None => None,
+            Some(plugin) => {
+                let mut settings = toml::Table::new();
+                for line in v.settings.lines().filter(|l| !l.trim().is_empty()) {
+                    let Some((k, val)) = line.split_once('=') else {
+                        anyhow::bail!("voice settings go one a line as key = value, not {line:?}");
+                    };
+                    settings.insert(k.trim().to_string(), setting_value(val));
+                }
+                Some(Voice {
+                    plugin,
+                    model: some(&v.model),
+                    voice_id: some(&v.voice_id),
+                    sample: some(&v.sample),
+                    settings,
+                })
+            }
+        };
+        let name = self.name.trim();
+        if name.is_empty() {
+            anyhow::bail!("@{} needs a name", el.handle);
+        }
+        Ok(Element {
+            name: name.to_string(),
+            description: self.description.clone(),
+            voice,
+            ..el.clone()
+        })
+    }
+}
+
+/// A typed setting: TOML when it parses, else the text as a string.
+pub(crate) fn setting_value(text: &str) -> toml::Value {
+    let t = text.trim();
+    t.parse::<toml::Value>()
+        .unwrap_or_else(|_| toml::Value::String(t.to_string()))
+}
+
+pub(crate) fn settings_text(t: &toml::Table) -> String {
+    t.iter().map(|(k, v)| format!("{k} = {v}\n")).collect()
+}
+
+/// The `key = value` lines that parse; `element` complains about the rest.
+pub(crate) fn settings_table(text: &str) -> toml::Table {
+    text.lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), setting_value(v)))
+        .filter(|(k, _)| !k.is_empty())
+        .collect()
+}
+
+/// The element being added.
+#[derive(Clone)]
+pub(crate) struct NewElement {
+    pub kind: Kind,
+    pub name: String,
+    pub handle: String,
+}
+
+impl Default for NewElement {
+    fn default() -> NewElement {
+        NewElement {
+            kind: Kind::Cast,
+            name: String::new(),
+            handle: String::new(),
+        }
+    }
+}
+
 pub(crate) enum Field {
     Title(String),
     Plot(String),
@@ -75,6 +185,11 @@ pub(crate) enum Action {
     AddChapter(String),
     /// A new shot at the end of the chapter, or after the given number.
     AddShot(u32, Option<u32>),
+    SaveElement(Element),
+    AddElement(NewElement),
+    /// An image file copied in as the element's next anchor.
+    AddAnchor(Element, PathBuf),
+    RemoveAnchor(Element, PathBuf),
 }
 
 impl Action {
@@ -90,6 +205,10 @@ impl Action {
             Action::Style(_) => "the style".into(),
             Action::AddChapter(t) => format!("chapter {t}"),
             Action::AddShot(..) => "a new shot".into(),
+            Action::AddElement(n) => format!("new {}", n.kind),
+            Action::SaveElement(el) | Action::AddAnchor(el, _) | Action::RemoveAnchor(el, _) => {
+                format!("@{}", el.handle)
+            }
         }
     }
 
@@ -103,7 +222,12 @@ impl Action {
             Action::Select(t) => p.shot_path(t.shot).into_iter().collect(),
             Action::Story(_) => vec![p.root.join("story.md")],
             Action::Style(_) => vec![p.root.join("style.md")],
-            Action::AddChapter(_) | Action::AddShot(..) => vec![],
+            Action::SaveElement(el) => vec![p.element_file(el.kind, &el.handle)],
+            Action::RemoveAnchor(_, f) => vec![f.clone()],
+            Action::AddChapter(_)
+            | Action::AddShot(..)
+            | Action::AddElement(_)
+            | Action::AddAnchor(..) => vec![],
         }
     }
 }
@@ -297,6 +421,10 @@ impl App {
             story: self.film.story.clone(),
             style: self.film.style.clone(),
         };
+        self.element_form = self
+            .open_element()
+            .map(|el| ElementForm::of(&el))
+            .unwrap_or_default();
     }
 
     /// Writes whatever was typed and not saved yet.
@@ -312,6 +440,18 @@ impl App {
         }
         if self.texts.style != self.film.style {
             acts.push(Action::Style(self.texts.style.clone()));
+        }
+        if let Some(el) = self.open_element()
+            && self.element_form.handle.as_ref() == Some(&el.handle)
+            && self.element_form != ElementForm::of(&el)
+        {
+            match self.element_form.element(&el) {
+                Ok(new) => acts.push(Action::SaveElement(new)),
+                Err(e) => {
+                    self.error(e.to_string());
+                    self.element_form = ElementForm::of(&el);
+                }
+            }
         }
         self.apply(acts);
     }
@@ -468,6 +608,32 @@ impl App {
                     msg: format!("added {r}"),
                     made,
                 }
+            }
+            Action::SaveElement(el) => {
+                p.save_element(&el)?;
+                format!("@{} saved", el.handle).into()
+            }
+            Action::AddElement(n) => {
+                let handle = Some(n.handle.trim()).filter(|h| !h.is_empty());
+                let el = p.add_element(n.kind, n.name.trim(), handle, "")?;
+                self.element = Some(el.handle.clone());
+                Done {
+                    msg: format!("added @{}", el.handle),
+                    made: vec![p.element_file(el.kind, &el.handle)],
+                }
+            }
+            Action::AddAnchor(el, file) => {
+                let dir = p.anchor_dir(&el);
+                let new_dir = !dir.exists();
+                let dest = p.add_anchor(&el.handle, &file)?;
+                Done {
+                    msg: format!("@{} has {}", el.handle, p.rel(&dest)),
+                    made: vec![if new_dir { dir } else { dest }],
+                }
+            }
+            Action::RemoveAnchor(el, file) => {
+                std::fs::remove_file(&file)?;
+                format!("{} taken off @{}", p.rel(&file), el.handle).into()
             }
         })
     }

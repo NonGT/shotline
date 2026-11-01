@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -7,9 +8,9 @@ use eframe::egui::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use shotline_core::ledger::Context;
-use shotline_core::protocol::{Op, Quote};
+use shotline_core::protocol::{Description, ModelInfo, Op, Quote, VoiceInfo};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
-use shotline_ui::{App, MenuCommand, Shell, Tab};
+use shotline_ui::{App, ListVoices, MenuCommand, Shell, Tab};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
 fn film(dir: &Path) -> Project {
@@ -222,6 +223,130 @@ fn edit_the_story_and_add_shots() {
     h.get_by_label("Redo").click();
     h.run();
     assert_eq!(p.chapter("2").unwrap().title, "The river");
+}
+
+#[test]
+fn edit_elements() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let png = tmp.path().join("a.png");
+    image::RgbImage::new(8, 8).save(&png).unwrap();
+    let anchor = p.add_anchor("paka", &png).unwrap();
+    let bytes = std::fs::read(&anchor).unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let tts = |id: &str| ModelInfo {
+        id: id.into(),
+        op: Op::AudioTts,
+        voice_schema: Some(serde_json::json!({"type": "object", "properties": {
+            "stability": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5},
+            "boost": {"type": "boolean", "default": false},
+            "mood": {"type": "string", "enum": ["calm", "angry"]}
+        }})),
+        ..ModelInfo::default()
+    };
+    let voices: ListVoices = Arc::new(|plugin: &str| {
+        assert_eq!(plugin, "elevenlabs");
+        let v = |id: &str, name: &str| VoiceInfo {
+            id: id.into(),
+            name: name.into(),
+            ..VoiceInfo::default()
+        };
+        Ok(vec![v("abc", "Rachel"), v("def", "Somchai")])
+    });
+    app.set_plugins(
+        vec![Description {
+            name: "elevenlabs".into(),
+            version: "1".into(),
+            protocol: 1,
+            env: vec![],
+            models: vec![tts("eleven_v3"), tts("eleven_flash_v2_5")],
+        }],
+        Some(voices),
+    );
+    // Tall enough for the whole voice form without scrolling.
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 1100.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Elements").click();
+    h.run();
+
+    let name = h.get_by_role_and_label(Role::TextInput, "New element");
+    name.focus();
+    name.type_text("Mali");
+    h.run();
+    h.get_by_label("Add element").click();
+    h.run();
+    h.run();
+    assert_eq!(p.element("mali").unwrap().name, "Mali");
+    h.get_by_label("added @mali");
+
+    // It opens; what's typed is saved once the box is left.
+    let desc = h.get_by_role_and_label(Role::MultilineTextInput, "Description");
+    desc.focus();
+    desc.type_text("young woman, short black hair");
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Plugin").click();
+    h.run();
+    h.get_by_label("elevenlabs").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Model").click();
+    h.run();
+    h.get_by_label("eleven_v3").click();
+    h.run();
+    // The plugin is asked for its voices in the background.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::ComboBox, "Voice")
+        .is_some()));
+    h.get_by_role_and_label(Role::ComboBox, "Voice").click();
+    h.run();
+    h.get_by_label("Somchai").click();
+    h.run();
+    // Settings as the model describes them.
+    h.get_by_role_and_label(Role::CheckBox, "boost").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "mood").click();
+    h.run();
+    h.get_by_label("angry").click();
+    h.run();
+    h.run();
+    let mali = p.element("mali").unwrap();
+    assert_eq!(mali.description, "young woman, short black hair");
+    let voice = mali.voice.unwrap();
+    assert_eq!(voice.plugin, "elevenlabs");
+    assert_eq!(voice.model.as_deref(), Some("eleven_v3"));
+    assert_eq!(voice.voice_id.as_deref(), Some("def"));
+    assert_eq!(voice.settings["boost"].as_bool(), Some(true));
+    assert_eq!(voice.settings["mood"].as_str(), Some("angry"));
+    // Left alone, it isn't written: the provider's default applies.
+    assert!(!voice.settings.contains_key("stability"));
+
+    // Clicking an anchor shows it big.
+    h.get_by_label("@paka  Paka").click();
+    h.run();
+    h.get_by_label("elements/cast/paka/01.png").click();
+    h.run();
+    h.get_by_label("elements/cast/paka/01.png big");
+    h.get_by_label("Close").click();
+    h.run();
+    assert!(h.query_by_label("elements/cast/paka/01.png big").is_none());
+
+    // Taking an anchor off can be undone.
+    h.get_by_label("Remove").click();
+    h.run();
+    assert!(!anchor.exists());
+    h.get_by_label("Undo").click();
+    h.run();
+    assert_eq!(std::fs::read(&anchor).unwrap(), bytes);
+
+    // And so can adding the element, after the edits to it.
+    while h.query_by_label("Undo").is_some() {
+        h.get_by_label("Undo").click();
+        h.run();
+    }
+    assert!(p.find_element("mali").unwrap().is_none());
 }
 
 #[test]
@@ -637,8 +762,12 @@ fn elements_story_and_cost() {
     h.run();
     h.get_by_label("Elements").click();
     h.run();
-    h.get_by_label("@paka");
-    h.get_by_label("no anchor images");
+    h.get_by_label("@paka  Paka").click();
+    h.run();
+    assert_eq!(
+        field(&h, Role::MultilineTextInput, "Description"),
+        "team lead, 30s"
+    );
 
     h.get_by_label("Story").click();
     h.run();

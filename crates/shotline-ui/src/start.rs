@@ -4,10 +4,11 @@
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, RichText};
+use shotline_core::protocol::Description;
 use shotline_core::slug::slugify;
 use shotline_core::{Git, Project};
 
-use crate::{App, caption, hint, read, theme};
+use crate::{App, ListVoices, caption, hint, read, theme};
 
 const RECENT: usize = 8;
 
@@ -30,6 +31,8 @@ pub enum MenuCommand {
 pub struct Shell {
     user_dir: PathBuf,
     git: Option<Git>,
+    plugins: Vec<Description>,
+    voices: Option<ListVoices>,
     testing: bool,
     themed: bool,
     /// The window title last sent.
@@ -81,6 +84,8 @@ impl Shell {
             recent: recent(&user_dir),
             user_dir,
             git: Git::find(),
+            plugins: vec![],
+            voices: None,
             testing: false,
             themed: false,
             titled: String::new(),
@@ -97,6 +102,16 @@ impl Shell {
             shell.open(p, None);
         }
         shell
+    }
+
+    /// What the installed plugins said about themselves, for picking them in the app.
+    pub fn with_plugins(mut self, plugins: Vec<Description>, voices: Option<ListVoices>) -> Shell {
+        if let Screen::Film(app) = &mut self.screen {
+            app.set_plugins(plugins.clone(), voices.clone());
+        }
+        self.plugins = plugins;
+        self.voices = voices;
+        self
     }
 
     pub fn with_git(mut self, git: Option<Git>) -> Shell {
@@ -408,6 +423,7 @@ impl Shell {
         remember(&self.user_dir, &p.root);
         self.recent = recent(&self.user_dir);
         let mut app = App::new(p, self.user_dir.clone()).with_git(self.git.clone());
+        app.set_plugins(self.plugins.clone(), self.voices.clone());
         app = if self.testing {
             app.with_viewer(None).silent()
         } else {

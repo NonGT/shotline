@@ -49,7 +49,7 @@ impl FromStr for Kind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Element {
     pub name: String,
     pub handle: String,
@@ -90,7 +90,7 @@ fn is_image(path: &Path) -> bool {
 }
 
 impl Project {
-    fn element_file(&self, kind: Kind, handle: &str) -> PathBuf {
+    pub fn element_file(&self, kind: Kind, handle: &str) -> PathBuf {
         self.root
             .join("elements")
             .join(kind.dir())
@@ -180,6 +180,17 @@ impl Project {
         el.voice = Some(voice);
         fsx::write_toml(&self.element_file(el.kind, &el.handle), &el)?;
         Ok(el)
+    }
+
+    /// Writes an element as given, under its kind and handle.
+    pub fn save_element(&self, el: &Element) -> Result<()> {
+        if el.voice.is_some() && el.kind != Kind::Cast {
+            return invalid(format!(
+                "@{} is a {}, only cast have voices",
+                el.handle, el.kind
+            ));
+        }
+        fsx::write_toml(&self.element_file(el.kind, &el.handle), el)
     }
 
     pub fn set_description(&self, handle: &str, description: &str) -> Result<Element> {
