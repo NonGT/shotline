@@ -1865,11 +1865,25 @@ fn setting(ui: &mut egui::Ui, key: &str, p: &serde_json::Value, table: &mut toml
 
 /// Framed so it reads as a button under a picture, in red as it takes something away.
 fn remove_button(ui: &mut egui::Ui) -> egui::Response {
-    ui.add(
-        egui::Button::new(RichText::new("Remove").small().color(theme::FLAG))
-            .fill(theme::RAISED)
-            .stroke(egui::Stroke::new(1.0, theme::LINE)),
-    )
+    ui.button(RichText::new("Remove").small().color(theme::FLAG))
+}
+
+/// The one button that spends money: tungsten, and still lit on hover and press.
+pub(crate) fn spend_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        for (state, fill) in [
+            (&mut w.inactive, theme::TUNGSTEN),
+            (&mut w.hovered, theme::TUNGSTEN_LIT),
+            (&mut w.active, theme::TUNGSTEN_DEEP),
+        ] {
+            state.weak_bg_fill = fill;
+            state.bg_fill = fill;
+            state.fg_stroke.color = theme::RACK;
+        }
+        ui.button(text)
+    })
+    .inner
 }
 
 /// A take's button: the number is in the row already, but screen readers and tests get it too.

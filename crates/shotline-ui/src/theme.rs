@@ -14,6 +14,8 @@ pub const PAPER: Color32 = Color32::from_rgb(0xec, 0xe8, 0xdf);
 pub const GRAPHITE: Color32 = Color32::from_rgb(0xc4, 0xc1, 0xb9);
 pub const DUST: Color32 = Color32::from_rgb(0x9a, 0x97, 0x8f);
 pub const TUNGSTEN: Color32 = Color32::from_rgb(0xe0, 0xa8, 0x4a);
+pub const TUNGSTEN_LIT: Color32 = Color32::from_rgb(0xf0, 0xbd, 0x66);
+pub const TUNGSTEN_DEEP: Color32 = Color32::from_rgb(0xc4, 0x8f, 0x36);
 pub const FLAG: Color32 = Color32::from_rgb(0xe0, 0x6a, 0x5a);
 
 pub const SEMIBOLD: &str = "semibold";

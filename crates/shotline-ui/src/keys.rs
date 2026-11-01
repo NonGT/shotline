@@ -240,11 +240,7 @@ fn key_row(ui: &mut egui::Ui, k: &mut Key, save: &mut Option<(String, Option<Str
         }
         if !k.saved.is_empty()
             && ui
-                .add(
-                    egui::Button::new(RichText::new("Remove").color(theme::FLAG))
-                        .fill(theme::RAISED)
-                        .stroke(egui::Stroke::new(1.0, theme::LINE)),
-                )
+                .button(RichText::new("Remove").color(theme::FLAG))
                 .on_hover_text("take it out of .env")
                 .clicked()
         {
