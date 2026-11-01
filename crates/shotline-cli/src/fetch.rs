@@ -38,7 +38,7 @@ pub fn image(p: &Project, url: &str) -> Result<PathBuf> {
         "image/jpeg" => "jpg",
         "image/webp" => "webp",
         "image/gif" => "gif",
-        _ => match sniff(&bytes) {
+        _ => match shotline_plugin::util::image_ext(&bytes) {
             Some(e) => e,
             None => bail!("{url} isn't a png, jpeg or webp image"),
         },
@@ -48,18 +48,6 @@ pub fn image(p: &Project, url: &str) -> Result<PathBuf> {
     let out = dir.join(format!("{}.{ext}", name(url)));
     std::fs::write(&out, &bytes)?;
     Ok(out)
-}
-
-fn sniff(b: &[u8]) -> Option<&'static str> {
-    if b.starts_with(b"\x89PNG") {
-        Some("png")
-    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("jpg")
-    } else if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
-        Some("webp")
-    } else {
-        None
-    }
 }
 
 /// The URL's last part, safe for a file name, and the time so two fetches never collide.

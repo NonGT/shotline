@@ -187,7 +187,7 @@ async fn mock() -> MockServer {
         .respond_with(
             ResponseTemplate::new(200)
                 .insert_header("content-type", "image/png")
-                .set_body_bytes(b"edited png".to_vec()),
+                .set_body_bytes(b"\xff\xd8\xff edited jpeg".to_vec()),
         )
         .mount(&s)
         .await;
@@ -302,10 +302,12 @@ async fn images() {
     assert_eq!(b["images"].as_array().unwrap().len(), 2);
     assert_eq!(v.quote(&r).await.unwrap().amount, 0.05);
     let job = v.run(&r, dir.path()).await.unwrap();
-    v.fetch(&job, &dir.path().join("e")).await.unwrap();
+    // seedream answers with a JPEG, so it isn't named .png.
+    let out = v.fetch(&job, &dir.path().join("e")).await.unwrap();
+    assert_eq!(out.outputs[0].file, "out.jpg");
     assert_eq!(
-        std::fs::read(dir.path().join("e/out.png")).unwrap(),
-        b"edited png"
+        std::fs::read(dir.path().join("e/out.jpg")).unwrap(),
+        b"\xff\xd8\xff edited jpeg"
     );
 
     r.model = "gpt-image-2".into();

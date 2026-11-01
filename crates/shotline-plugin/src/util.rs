@@ -26,6 +26,20 @@ pub fn mime(path: &Path) -> &'static str {
     }
 }
 
+/// The extension image bytes really have, whatever the file was called: providers send JPEG or
+/// WebP as often as PNG. None if it isn't one of those.
+pub fn image_ext(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(b"\x89PNG") {
+        Some("png")
+    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
 /// A file as a `data:` URL, which most APIs take in place of an upload. `field` is where it goes
 /// in the request, for the error if the file can't be read.
 pub fn data_url(path: &Path, field: &str) -> Result<String, PluginError> {

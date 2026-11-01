@@ -541,12 +541,13 @@ impl Plugin for Fal {
                 .await
                 .map_err(|e| PluginError::new(ErrorKind::Other, format!("download failed: {e}")))?;
             let io = |e: std::io::Error| PluginError::new(ErrorKind::Other, e.to_string());
+            let file = match (kind, shotline_plugin::util::image_ext(&bytes)) {
+                (MediaKind::Image, Some(ext)) => format!("out.{ext}"),
+                _ => file.to_string(),
+            };
             std::fs::create_dir_all(output_dir).map_err(io)?;
-            std::fs::write(output_dir.join(file), &bytes).map_err(io)?;
-            outputs.push(Output {
-                file: file.into(),
-                kind,
-            });
+            std::fs::write(output_dir.join(&file), &bytes).map_err(io)?;
+            outputs.push(Output { file, kind });
         }
         if outputs.is_empty() {
             return Err(PluginError::new(

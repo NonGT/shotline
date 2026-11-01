@@ -799,20 +799,19 @@ impl Plugin for Venice {
                 .to_vec(),
         };
         let (file, kind) = if job.starts_with(IMAGE_JOB) {
-            ("out.png", MediaKind::Image)
+            // Some models send JPEG or WebP; a .png name on those breaks whatever opens it.
+            let ext = shotline_plugin::util::image_ext(&bytes).unwrap_or("png");
+            (format!("out.{ext}"), MediaKind::Image)
         } else if job.starts_with(TEXT_JOB) {
-            ("out.txt", MediaKind::Data)
+            ("out.txt".to_string(), MediaKind::Data)
         } else {
-            ("out.mp4", MediaKind::Video)
+            ("out.mp4".to_string(), MediaKind::Video)
         };
         let io = |e: std::io::Error| other(e.to_string());
         std::fs::create_dir_all(output_dir).map_err(io)?;
-        std::fs::write(output_dir.join(file), bytes).map_err(io)?;
+        std::fs::write(output_dir.join(&file), bytes).map_err(io)?;
         Ok(Outputs {
-            outputs: vec![Output {
-                file: file.into(),
-                kind,
-            }],
+            outputs: vec![Output { file, kind }],
             data: None,
         })
     }
