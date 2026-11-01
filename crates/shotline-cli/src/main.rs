@@ -10,6 +10,7 @@ use shotline_core::{
 mod cost;
 mod draft;
 mod fetch;
+mod format;
 mod image;
 mod mcp;
 mod plugins;
@@ -40,6 +41,26 @@ enum Cmd {
         /// Don't start a git repository for the film
         #[arg(long)]
         no_git: bool,
+        /// Shape of every shot, e.g. 9:16 (vertical, the default) or 16:9
+        #[arg(long)]
+        aspect: Option<String>,
+        /// e.g. 768P (the default) or 1080P, as the video model names it
+        #[arg(long)]
+        resolution: Option<String>,
+    },
+    /// Show the shape, resolution, length and video model every shot is made at, or set them
+    Format {
+        #[arg(long)]
+        aspect: Option<String>,
+        #[arg(long)]
+        resolution: Option<String>,
+        /// Seconds, for shots that don't set their own
+        #[arg(long)]
+        duration: Option<f64>,
+        #[arg(long)]
+        plugin: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Cast, sets and props
     #[command(subcommand)]
@@ -522,8 +543,23 @@ fn run(cli: Cli) -> Result<()> {
             ref dir,
             ref name,
             no_git,
+            ref aspect,
+            ref resolution,
         } => {
-            let p = Project::init(dir, name.as_deref())?;
+            let mut p = Project::init(dir, name.as_deref())?;
+            if aspect.is_some() || resolution.is_some() {
+                let c = format::Change {
+                    aspect: aspect.as_deref(),
+                    resolution: resolution.as_deref(),
+                    ..Default::default()
+                };
+                format::apply(&mut p, &c).map_err(|e| {
+                    e.context(format!(
+                        "made {} with the default format, but couldn't set this one",
+                        dir.display()
+                    ))
+                })?;
+            }
             println!("created {} in {}", p.config.name, dir.display());
             // Inside a repository already, the film is just another folder of it.
             if let Some(git) = Git::find().filter(|g| !no_git && !g.is_repo(dir)) {
@@ -534,6 +570,22 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
 
+        Cmd::Format {
+            ref aspect,
+            ref resolution,
+            duration,
+            ref plugin,
+            ref model,
+        } => format::run(
+            &mut open()?,
+            &format::Change {
+                aspect: aspect.as_deref(),
+                resolution: resolution.as_deref(),
+                duration,
+                plugin: plugin.as_deref(),
+                model: model.as_deref(),
+            },
+        )?,
         Cmd::Story { ref set } => doc(&open()?, "story.md", set.as_deref())?,
         Cmd::Style { ref set } => doc(&open()?, "style.md", set.as_deref())?,
 

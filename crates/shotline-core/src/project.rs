@@ -148,6 +148,19 @@ impl Default for PromptLayers {
     }
 }
 
+/// What every shot's video is made with and at, unless the shot says otherwise.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Format {
+    pub plugin: String,
+    pub model: String,
+    /// e.g. 9:16
+    pub aspect: String,
+    /// As the model names it, e.g. 768P
+    pub resolution: String,
+    /// Seconds.
+    pub duration: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Project {
     pub root: PathBuf,
@@ -229,6 +242,53 @@ impl Project {
             config: fsx::read_toml(&path)?,
             clock: Arc::new(SystemClock),
         })
+    }
+
+    /// shotline.toml again, for when something else changed it.
+    pub fn reread(&mut self) -> Result<()> {
+        self.config = fsx::read_toml(&self.root.join(CONFIG_FILE))?;
+        Ok(())
+    }
+
+    pub fn format(&self) -> Format {
+        let c = &self.config;
+        Format {
+            plugin: c.plugin.clone(),
+            model: c.model.clone(),
+            aspect: c.aspect.clone(),
+            resolution: c.resolution.clone(),
+            duration: c.duration,
+        }
+    }
+
+    /// Writes the format into shotline.toml, leaving everything else in it as it was.
+    pub fn set_format(&mut self, f: &Format) -> Result<()> {
+        if f.duration.is_nan() || f.duration <= 0.0 {
+            return invalid(format!("a shot can't last {} seconds", f.duration));
+        }
+        for (what, v) in [
+            ("plugin", &f.plugin),
+            ("model", &f.model),
+            ("shape", &f.aspect),
+            ("resolution", &f.resolution),
+        ] {
+            if v.trim().is_empty() {
+                return invalid(format!("the {what} can't be empty"));
+            }
+        }
+        let path = self.root.join(CONFIG_FILE);
+        let mut t: toml::Table = fsx::read_toml(&path)?;
+        for (k, v) in [
+            ("plugin", &f.plugin),
+            ("model", &f.model),
+            ("aspect", &f.aspect),
+            ("resolution", &f.resolution),
+        ] {
+            t.insert(k.into(), v.trim().into());
+        }
+        t.insert("duration".into(), f.duration.into());
+        fsx::write_toml(&path, &t)?;
+        self.reread()
     }
 
     /// Opens the project containing `start`, looking upwards.

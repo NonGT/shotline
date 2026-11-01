@@ -15,7 +15,8 @@ the ... budget", stop and tell the user. Never raise a budget or retry around it
 ## Workflow
 
 1. Story: agree on a logline, the world and a short synopsis, then save it with `story`.
-2. Look: write `style` (palette, light, lens, camera habits). It goes into every prompt.
+2. Look: set `format` (vertical 9:16 or wide 16:9, resolution, shot length) and write `style`
+   (palette, light, lens, camera habits). The style goes into every prompt.
 3. Elements: `element_add` the cast, sets and props, with a description of how they look. Each
    gets an @handle. Every recurring character and set needs anchor images: they are what keep a
    face the same from shot to shot. Use the user's own with `element_anchor`, or make them with

@@ -23,7 +23,8 @@ pub use job::{Clock, Cost, Job, JobStatus, SystemClock, Take, TestClock};
 pub use model::{Catalog, ModelSpec};
 pub use money::{Measured, MeasuredRates, UserConfig};
 pub use project::{
-    CONFIG_FILE, Config, ImageConfig, Money, Project, PromptLayers, Step, TextConfig, user_dir,
+    CONFIG_FILE, Config, Format, ImageConfig, Money, Project, PromptLayers, Step, TextConfig,
+    user_dir,
 };
 pub use prompt::{Built, BuiltImage, ImageFor, Reference, StartFrame, build, build_image};
 pub use shot::{Chapter, Line, ModelOverride, Shot, ShotRef, Transition};

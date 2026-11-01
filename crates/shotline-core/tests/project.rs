@@ -1,6 +1,6 @@
 use std::fs;
 
-use shotline_core::{Kind, Project, Shot, ShotRef, Transition};
+use shotline_core::{Format, Kind, Project, Shot, ShotRef, Transition};
 use tempfile::TempDir;
 
 fn new_project() -> (TempDir, Project) {
@@ -170,4 +170,38 @@ fn lines_are_edited_and_removed() {
     assert_eq!(s.lines.len(), 1);
     assert_eq!(p.shot(r).unwrap().lines[0].text, "bye");
     assert!(p.remove_line(r, 1).is_err());
+}
+
+#[test]
+fn format_is_set_without_touching_the_rest() {
+    let (dir, mut p) = new_project();
+    let path = dir.path().join("shotline.toml");
+    let text = fs::read_to_string(&path).unwrap() + "\n[rates]\nfake-credit = \"0.01 USD\"\n";
+    fs::write(&path, text).unwrap();
+    p.reread().unwrap();
+    let f = Format {
+        aspect: "16:9".into(),
+        resolution: "1080P".into(),
+        duration: 5.0,
+        ..p.format()
+    };
+    p.set_format(&f).unwrap();
+    assert_eq!(p.format(), f);
+    assert_eq!(Project::open(dir.path()).unwrap().format(), f);
+    assert_eq!(p.config.rates["fake-credit"], "0.01 USD");
+    assert_eq!(p.config.budget.per_take, Some(2.0));
+
+    for bad in [
+        Format {
+            duration: 0.0,
+            ..f.clone()
+        },
+        Format {
+            aspect: " ".into(),
+            ..f.clone()
+        },
+    ] {
+        assert!(p.set_format(&bad).is_err());
+    }
+    assert_eq!(p.format(), f);
 }

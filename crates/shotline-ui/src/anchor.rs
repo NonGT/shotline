@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 
-use crate::{AnchorAsk, Host, Thumbs, caption, hint, remove_button, short, spend_button, theme};
+use crate::{
+    AnchorAsk, Host, Thumbs, caption, hint, remove_button, shape, short, spend_button, theme,
+};
 
 #[derive(Clone)]
 enum Stage {
@@ -480,29 +482,5 @@ impl Maker {
             );
         }
         zoom
-    }
-}
-
-/// "9:16 tall", so the shape reads without working out the ratio.
-fn shape(aspect: &str) -> String {
-    let what = match aspect {
-        "1:1" => "square",
-        "9:16" => "tall",
-        "16:9" => "wide",
-        "21:9" => "cinema",
-        "adaptive" => "",
-        _ => match aspect
-            .split_once(':')
-            .map(|(w, h)| (w.parse::<f32>(), h.parse::<f32>()))
-        {
-            Some((Ok(w), Ok(h))) if w > h => "landscape",
-            Some((Ok(w), Ok(h))) if w < h => "portrait",
-            _ => "",
-        },
-    };
-    if what.is_empty() {
-        aspect.to_string()
-    } else {
-        format!("{aspect} {what}")
     }
 }

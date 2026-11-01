@@ -771,7 +771,9 @@ fn start_a_film() {
     let shell = Shell::new(None, home.clone(), tmp.path())
         .with_git(git.clone())
         .testing();
-    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(900.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
     let name = h.get_by_role_and_label(Role::TextInput, "Name");
     name.focus();
@@ -790,10 +792,15 @@ fn start_a_film() {
     assert!(!dir.join("shotline.toml").exists());
     std::fs::remove_file(dir.join("notes.txt")).unwrap();
     h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Shape").click();
+    h.run();
+    h.get_by_label("16:9 wide, for YouTube").click();
+    h.run();
     h.get_by_label("Create film").click();
     h.run();
     h.run();
     assert_eq!(Project::open(&dir).unwrap().config.name, "Rain");
+    assert_eq!(Project::open(&dir).unwrap().config.aspect, "16:9");
     assert!(h.state().film().is_some());
     h.get_by_label("Shots");
     if let Some(g) = &git {
@@ -1272,6 +1279,60 @@ fn warn_about_stuck_jobs_on_open() {
     h.get_by_label("Release").click();
     h.run_steps(8);
     h.get_by_label(&format!("released {}, nothing spent", ids[0]));
+}
+
+#[test]
+fn set_the_format_on_the_story_tab() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.select_take("01-010".parse().unwrap(), "1").unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(
+        vec![Description {
+            name: "fal".into(),
+            version: "1".into(),
+            protocol: 1,
+            env: vec![],
+            models: vec![ModelInfo {
+                id: "minimax/h3-max/reference-to-video".into(),
+                op: Op::VideoGenerate,
+                aspects: vec!["9:16".into(), "16:9".into()],
+                resolutions: vec!["768P".into(), "1080P".into()],
+                ..ModelInfo::default()
+            }],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1100.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Story").click();
+    h.run();
+    h.get_by_label_contains("already has a take. Takes keep the shape");
+    let aspect = || Project::open(&p.root).unwrap().format();
+    h.get_by_role_and_label(Role::ComboBox, "Shape").click();
+    h.run();
+    h.get_by_label("16:9 wide").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Resolution")
+        .click();
+    h.run();
+    h.get_by_label("1080P").click();
+    h.run();
+    let f = aspect();
+    assert_eq!(
+        (f.aspect.as_str(), f.resolution.as_str()),
+        ("16:9", "1080P")
+    );
+    h.get_by_label("Undo").click();
+    h.run();
+    h.get_by_label("Undo").click();
+    h.run();
+    let f = aspect();
+    assert_eq!((f.aspect.as_str(), f.resolution.as_str()), ("9:16", "768P"));
 }
 
 #[test]

@@ -74,6 +74,8 @@ struct Film {
     cost: Option<cost::Cost>,
     /// How many takes each shot has.
     takes: HashMap<ShotRef, usize>,
+    /// Shots with a selected take.
+    made: usize,
 }
 
 /// What the app asks of installed plugins. The CLI provides it; the app calls it off the UI thread.
@@ -379,6 +381,19 @@ impl App {
             .collect()
     }
 
+    /// Every installed video model, as plugin, model and what it can do.
+    fn video_models(&self) -> Vec<(String, ModelInfo)> {
+        self.plugins
+            .iter()
+            .flat_map(|d| {
+                d.models
+                    .iter()
+                    .filter(|m| m.op == Op::VideoGenerate)
+                    .map(|m| (d.name.clone(), m.clone()))
+            })
+            .collect()
+    }
+
     /// Every element's anchors, named like "@paka 2", to pick references from.
     fn anchor_pool(&self) -> Vec<(String, PathBuf)> {
         let mut pool = vec![];
@@ -521,6 +536,7 @@ impl App {
             renders: renders(&p.root.join("renders")),
             cost: cost::load(p, &self.user_dir)?,
             takes: takes.into_iter().map(|(s, t)| (s, t.len())).collect(),
+            made: p.selected_take_ids()?.len(),
         };
         self.load_takes()
     }
@@ -793,6 +809,9 @@ impl App {
             .show(ui, |ui| {
                 page(ui, PAGE, |ui| {
                     ui.set_max_width(720.0);
+                    let models = self.video_models();
+                    format_fields(ui, &mut self.texts.format, &models, self.film.made);
+                    ui.add_space(20.0);
                     let t = &mut self.texts;
                     text_field(
                         ui,
@@ -2093,4 +2112,146 @@ fn page<R>(ui: &mut egui::Ui, margin: egui::Vec2, add: impl FnOnce(&mut egui::Ui
             egui::Frame::new().inner_margin(margin).show(ui, add).inner
         })
         .inner
+}
+
+/// "9:16 tall", so the shape reads without working out the ratio.
+pub(crate) fn shape(aspect: &str) -> String {
+    let what = match aspect {
+        "1:1" => "square",
+        "9:16" => "tall",
+        "16:9" => "wide",
+        "21:9" => "cinema",
+        "adaptive" => "",
+        _ => match aspect
+            .split_once(':')
+            .map(|(w, h)| (w.parse::<f32>(), h.parse::<f32>()))
+        {
+            Some((Ok(w), Ok(h))) if w > h => "landscape",
+            Some((Ok(w), Ok(h))) if w < h => "portrait",
+            _ => "",
+        },
+    };
+    if what.is_empty() {
+        aspect.to_string()
+    } else {
+        format!("{aspect} {what}")
+    }
+}
+
+/// Shapes offered when a model doesn't list its own.
+pub(crate) const SHAPES: [&str; 6] = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9"];
+
+/// The Format section of the Story tab: what every shot's video is made with and at.
+fn format_fields(
+    ui: &mut egui::Ui,
+    f: &mut shotline_core::Format,
+    models: &[(String, ModelInfo)],
+    made: usize,
+) {
+    ui.label(RichText::new("Format").text_style(egui::TextStyle::Heading));
+    ui.add_space(8.0);
+    let spec = models
+        .iter()
+        .find(|(p, m)| *p == f.plugin && m.id == f.model)
+        .map(|(_, m)| m);
+    let with = |list: &[String], now: &str| -> Vec<String> {
+        let mut out: Vec<String> = if list.is_empty() {
+            SHAPES.map(String::from).to_vec()
+        } else {
+            list.to_vec()
+        };
+        if !out.iter().any(|x| x == now) {
+            out.insert(0, now.to_string());
+        }
+        out
+    };
+    egui::Grid::new("format")
+        .num_columns(2)
+        .spacing(egui::vec2(12.0, 8.0))
+        .show(ui, |ui| {
+            let l = ui.weak("Video model");
+            egui::ComboBox::from_id_salt("format model")
+                .selected_text(format!("{} · {}", f.plugin, f.model))
+                .width(360.0)
+                .show_ui(ui, |ui| {
+                    for (p, m) in models {
+                        let on = *p == f.plugin && m.id == f.model;
+                        if ui.selectable_label(on, format!("{p} · {}", m.id)).clicked() {
+                            f.plugin = p.clone();
+                            f.model = m.id.clone();
+                        }
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+            ui.end_row();
+
+            let l = ui.weak("Shape");
+            ui.horizontal(|ui| {
+                let aspects = with(spec.map_or(&[][..], |m| &m.aspects), &f.aspect);
+                egui::ComboBox::from_id_salt("format aspect")
+                    .selected_text(shape(&f.aspect))
+                    .width(180.0)
+                    .show_ui(ui, |ui| {
+                        for a in &aspects {
+                            ui.selectable_value(&mut f.aspect, a.clone(), shape(a));
+                        }
+                    })
+                    .response
+                    .labelled_by(l.id);
+                ui.add_space(8.0);
+                let l = ui.weak("Resolution");
+                match spec.filter(|m| !m.resolutions.is_empty()) {
+                    Some(m) => {
+                        let list = with(&m.resolutions, &f.resolution);
+                        egui::ComboBox::from_id_salt("format resolution")
+                            .selected_text(&f.resolution)
+                            .width(110.0)
+                            .show_ui(ui, |ui| {
+                                for r in &list {
+                                    ui.selectable_value(&mut f.resolution, r.clone(), r);
+                                }
+                            })
+                            .response
+                            .labelled_by(l.id);
+                    }
+                    None => {
+                        ui.add(egui::TextEdit::singleline(&mut f.resolution).desired_width(96.0))
+                            .labelled_by(l.id);
+                    }
+                }
+            });
+            ui.end_row();
+
+            let l = ui.weak("Shot length");
+            ui.add(
+                egui::DragValue::new(&mut f.duration)
+                    .range(1.0..=60.0)
+                    .speed(0.1)
+                    .max_decimals(1)
+                    .suffix(" s"),
+            )
+            .on_hover_text("for shots that don't set their own")
+            .labelled_by(l.id);
+            ui.end_row();
+        });
+    if let Some(m) = spec {
+        for (v, list) in [(&f.aspect, &m.aspects), (&f.resolution, &m.resolutions)] {
+            if !list.is_empty() && !list.contains(v) {
+                ui.label(RichText::new(format!("{} doesn't do {v}", m.id)).color(theme::FLAG));
+            }
+        }
+    } else if !models.is_empty() {
+        ui.label(RichText::new(format!("{} isn't installed", f.plugin)).color(theme::FLAG));
+    }
+    if made > 0 {
+        hint(
+            ui,
+            &format!(
+                "{made} shot{} already {} a take. Takes keep the shape and size they were made at.",
+                if made == 1 { "" } else { "s" },
+                if made == 1 { "has" } else { "have" }
+            ),
+        );
+    }
 }

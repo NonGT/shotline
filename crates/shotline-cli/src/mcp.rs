@@ -169,12 +169,26 @@ pub struct Init {
     dir: String,
     /// Film name (default: the folder name)
     name: Option<String>,
+    /// Shape of every shot (default 9:16 vertical); 16:9 for YouTube
+    aspect: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 pub struct Doc {
     /// New contents, replacing the whole file. Leave out to read it.
     text: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FormatArgs {
+    /// Shape of every shot: 9:16 vertical (Reels, vertical drama), 16:9 wide (YouTube), 1:1…
+    aspect: Option<String>,
+    /// As the video model names it, e.g. 768P or 1080P
+    resolution: Option<String>,
+    /// Seconds, for shots that don't set their own
+    duration: Option<f64>,
+    plugin: Option<String>,
+    model: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -406,6 +420,7 @@ impl Server {
             std::env::current_dir().map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let mut args = a(["init", &p.dir]);
         opt(&mut args, "--name", p.name);
+        opt(&mut args, "--aspect", p.aspect);
         let r = self.exec(&here, args, None, &ctx).await?;
         if r.is_error != Some(true) {
             *self.project.lock().unwrap() = Some(here.join(&p.dir));
@@ -435,6 +450,23 @@ impl Server {
     ) -> Reply {
         let mut args = a(["story"]);
         opt(&mut args, "--set", p.text);
+        self.cli(args, None, &ctx).await
+    }
+
+    /// The shape, resolution, shot length and video model every shot is made at. Leave all out
+    /// to read them. Agree the shape with the user before the first take: takes keep theirs.
+    #[tool]
+    async fn format(
+        &self,
+        Parameters(p): Parameters<FormatArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Reply {
+        let mut args = a(["format"]);
+        opt(&mut args, "--aspect", p.aspect);
+        opt(&mut args, "--resolution", p.resolution);
+        opt(&mut args, "--duration", p.duration.map(|d| d.to_string()));
+        opt(&mut args, "--plugin", p.plugin);
+        opt(&mut args, "--model", p.model);
         self.cli(args, None, &ctx).await
     }
 

@@ -158,3 +158,36 @@ fn errors_are_readable() {
         .assert()
         .failure();
 }
+
+#[test]
+fn the_film_format() {
+    let tmp = TempDir::new().unwrap();
+    shotline(&tmp)
+        .args(["init", "f", "--aspect", "16:9", "--resolution", "1080P"])
+        .assert()
+        .success();
+    let f = || {
+        let mut c = shotline(&tmp);
+        c.args(["-C", "f", "format"]);
+        c
+    };
+    f().assert().success().stdout(
+        "model       fal minimax/h3-max/reference-to-video\nshape       16:9\n\
+         resolution  1080P\nduration    8 s\n",
+    );
+    f().args(["--duration", "5", "--aspect", "4:5"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shape       4:5\n"))
+        .stdout(predicate::str::contains("duration    5 s\n"))
+        .stderr(predicate::str::contains(
+            "warning: minimax/h3-max/reference-to-video doesn't do 4:5",
+        ));
+    f().args(["--model", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no video.generate model nope"));
+    f().args(["--duration", "0"]).assert().failure();
+    f().assert()
+        .stdout(predicate::str::contains("duration    5 s\n"));
+}

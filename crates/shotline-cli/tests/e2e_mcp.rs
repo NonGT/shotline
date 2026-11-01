@@ -140,6 +140,7 @@ fn lists_the_tools() {
         "init",
         "open_project",
         "story",
+        "format",
         "element_add",
         "shot_add",
         "shot_set",
@@ -185,6 +186,10 @@ fn plans_and_shoots_a_film() {
              aspect = \"9:16\"\nduration = 4\n[budget]\nper_take = 0.5\n",
         )
         .unwrap();
+    assert!(
+        m.ok("format", json!({"duration": 4.0}))
+            .contains("duration    4 s")
+    );
     m.ok("story", json!({"text": "A girl walks into the forest."}));
     assert_eq!(m.ok("story", json!({})), "A girl walks into the forest.");
     assert_eq!(

@@ -413,7 +413,8 @@ says.
 ## Commands
 
 ```
-shotline init <dir> [--no-git]
+shotline init <dir> [--no-git] [--aspect a] [--resolution r]
+shotline format [--aspect a] [--resolution r] [--duration s] [--plugin p] [--model m]
 shotline story | style [--set text]
 shotline doctor
 shotline plugin ls | doctor <name> | balance [name] | voices <name>
@@ -493,6 +494,13 @@ clears the undo steps, and anything older is git's job. Outside a film the app o
 make one (with `git init`, like `shotline init` unless `--no-git`) or pick a recent one. File and Edit
 live in the system menu bar on macOS and Windows (muda) and in a menu bar inside the window on
 Linux, where muda would need GTK; all three send the same commands.
+
+The film's format is the shape, resolution, shot length and video model in shotline.toml. A new
+film picks its shape (9:16 unless chosen); `shotline format` and the Format section at the top of
+the Story tab change it later, as an undo step like any other edit. The resolutions on offer are
+the model's own names for them. Takes already made keep the shape they were made at, so it says
+how many shots have one. A shot can still override any of it in its `[model]` table, but the
+render scales every clip to the first one's size, so a shot of another shape comes out stretched.
 
 The Cut tab lists the shots in play order with their takes, edits timeline.toml (crossfade,
 colour matching, music tracks with start and volume; a track from outside the film is copied into

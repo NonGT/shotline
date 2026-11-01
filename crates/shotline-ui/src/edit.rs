@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use shotline_core::{
-    Element, Kind, Project, Shot, ShotRef, TIMELINE_FILE, Take, Timeline, Track, Transition, Voice,
+    CONFIG_FILE, Element, Format, Kind, Project, Shot, ShotRef, TIMELINE_FILE, Take, Timeline,
+    Track, Transition, Voice,
 };
 
 use crate::App;
@@ -185,6 +186,7 @@ pub(crate) enum Action {
     Select(Take),
     Story(String),
     Style(String),
+    Format(Format),
     AddChapter(String),
     /// A new shot at the end of the chapter, or after the given number.
     AddShot(u32, Option<u32>),
@@ -209,6 +211,7 @@ impl Action {
             Action::Select(t) => t.shot.to_string(),
             Action::Story(_) => "the story".into(),
             Action::Style(_) => "the style".into(),
+            Action::Format(_) => "the format".into(),
             Action::AddChapter(t) => format!("chapter {t}"),
             Action::AddShot(..) => "a new shot".into(),
             Action::AddElement(n) => format!("new {}", n.kind),
@@ -230,6 +233,7 @@ impl Action {
             Action::Select(t) => p.shot_path(t.shot).into_iter().collect(),
             Action::Story(_) => vec![p.root.join("story.md")],
             Action::Style(_) => vec![p.root.join("style.md")],
+            Action::Format(_) => vec![p.root.join(CONFIG_FILE)],
             Action::SaveElement(el) => vec![p.element_file(el.kind, &el.handle)],
             Action::RemoveAnchor(_, f) => vec![f.clone()],
             Action::Timeline(_) | Action::AddTrack(_) => vec![p.root.join(TIMELINE_FILE)],
@@ -362,6 +366,7 @@ impl History {
 pub(crate) struct Texts {
     pub story: String,
     pub style: String,
+    pub format: Format,
 }
 
 impl Form {
@@ -429,6 +434,7 @@ impl App {
         self.texts = Texts {
             story: self.film.story.clone(),
             style: self.film.style.clone(),
+            format: self.project.format(),
         };
         self.timeline_form = self.film.timeline.clone();
         self.element_form = self
@@ -450,6 +456,9 @@ impl App {
         }
         if self.texts.style != self.film.style {
             acts.push(Action::Style(self.texts.style.clone()));
+        }
+        if self.texts.format != self.project.format() {
+            acts.push(Action::Format(self.texts.format.clone()));
         }
         if self.timeline_form != self.film.timeline {
             acts.push(Action::Timeline(self.timeline_form.clone()));
@@ -605,6 +614,10 @@ impl App {
             Action::Style(t) => {
                 std::fs::write(p.root.join("style.md"), t)?;
                 "style saved".to_string().into()
+            }
+            Action::Format(f) => {
+                Project::open(&p.root)?.set_format(&f)?;
+                format!("shots are now made at {} {}", f.aspect, f.resolution).into()
             }
             Action::AddChapter(t) => {
                 let c = p.add_chapter(t.trim())?;

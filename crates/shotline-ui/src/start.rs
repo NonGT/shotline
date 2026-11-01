@@ -66,6 +66,7 @@ enum Screen {
 struct Form {
     name: String,
     folder: String,
+    aspect: String,
     git: bool,
     error: Option<String>,
 }
@@ -75,6 +76,7 @@ enum Opened {
     New {
         dir: PathBuf,
         name: String,
+        aspect: String,
         git: bool,
     },
 }
@@ -407,7 +409,12 @@ impl Shell {
     fn go(&mut self, o: Opened) {
         let made = match o {
             Opened::Existing(dir) => Project::discover(&dir).map(|p| (p, None)),
-            Opened::New { dir, name, git } => self.create(&dir, &name, git),
+            Opened::New {
+                dir,
+                name,
+                aspect,
+                git,
+            } => self.create(&dir, &name, &aspect, git),
         };
         match made {
             Ok((p, note)) => self.open(p, note),
@@ -422,6 +429,7 @@ impl Shell {
         &self,
         dir: &Path,
         name: &str,
+        aspect: &str,
         git: bool,
     ) -> shotline_core::Result<(Project, Option<Note>)> {
         if has_files(dir) {
@@ -430,7 +438,11 @@ impl Shell {
                 dir.display()
             )));
         }
-        let p = Project::init(dir, Some(name))?;
+        let mut p = Project::init(dir, Some(name))?;
+        p.set_format(&shotline_core::Format {
+            aspect: aspect.to_string(),
+            ..p.format()
+        })?;
         let note = match &self.git {
             Some(g) if git && !g.is_repo(dir) => {
                 match g.init(dir, &format!("start {}", p.config.name)) {
@@ -548,6 +560,7 @@ impl Form {
         Form {
             name: String::new(),
             folder: folder.display().to_string(),
+            aspect: "9:16".into(),
             git: true,
             error: None,
         }
@@ -601,6 +614,22 @@ impl Form {
             Some(d) => hint(ui, &format!("Makes {}", d.display())),
             None => {}
         }
+        ui.add_space(10.0);
+        let label = caption(ui, "Shape");
+        egui::ComboBox::from_id_salt("new film shape")
+            .selected_text(shape_for(&self.aspect))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for a in crate::SHAPES {
+                    ui.selectable_value(&mut self.aspect, a.to_string(), shape_for(a));
+                }
+            })
+            .response
+            .labelled_by(label.id);
+        hint(
+            ui,
+            "Every shot is made this shape. It can change later, on the Story tab.",
+        );
         ui.add_space(6.0);
         if has_git {
             ui.checkbox(&mut self.git, "Keep history with git");
@@ -623,6 +652,7 @@ impl Form {
             Some(dir) if !taken && (create.clicked() || enter) => Some(Opened::New {
                 dir,
                 name: self.name.trim().into(),
+                aspect: self.aspect.clone(),
                 git: has_git && self.git,
             }),
             _ => None,
@@ -688,4 +718,15 @@ fn remember(user_dir: &Path, dir: &Path) {
     }
     let _ = std::fs::create_dir_all(user_dir);
     let _ = std::fs::write(recent_file(user_dir), list.join("\n") + "\n");
+}
+
+/// "9:16 tall, for Reels, TikTok and vertical drama"
+fn shape_for(aspect: &str) -> String {
+    let use_ = match aspect {
+        "9:16" => ", for Reels, TikTok and vertical drama",
+        "16:9" => ", for YouTube",
+        "1:1" => ", for feeds",
+        _ => "",
+    };
+    format!("{}{use_}", crate::shape(aspect))
 }
