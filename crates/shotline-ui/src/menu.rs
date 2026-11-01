@@ -59,7 +59,6 @@ impl NativeMenu {
         let undo = item("&Undo", Some("CmdOrCtrl+Z"));
         let redo = item("&Redo", Some(REDO));
         let edit = Submenu::with_items("&Edit", true, &[&undo, &redo, &sep()]).expect("edit menu");
-        #[allow(unused_mut)]
         let mut commands = vec![
             (new.id().clone(), MenuCommand::NewFilm),
             (open.id().clone(), MenuCommand::OpenFilm),
@@ -67,22 +66,13 @@ impl NativeMenu {
             (undo.id().clone(), MenuCommand::Undo),
             (redo.id().clone(), MenuCommand::Redo),
         ];
-        // The system's own items work on macOS. On Windows they'd go to the window, which
-        // doesn't know them, so these ask egui instead.
-        #[cfg(target_os = "macos")]
-        edit.append_items(&[
-            &PredefinedMenuItem::cut(None),
-            &PredefinedMenuItem::copy(None),
-            &PredefinedMenuItem::paste(None),
-            &PredefinedMenuItem::select_all(None),
-        ])
-        .expect("edit menu");
-        #[cfg(target_os = "windows")]
+        // Not the system's own items: they send copy: and paste: to the window, which winit
+        // doesn't answer, so these ask egui instead.
         for (text, keys, cmd) in [
-            ("Cu&t", "Ctrl+X", MenuCommand::Cut),
-            ("&Copy", "Ctrl+C", MenuCommand::Copy),
-            ("&Paste", "Ctrl+V", MenuCommand::Paste),
-            ("Select &All", "Ctrl+A", MenuCommand::SelectAll),
+            ("Cu&t", "CmdOrCtrl+X", MenuCommand::Cut),
+            ("&Copy", "CmdOrCtrl+C", MenuCommand::Copy),
+            ("&Paste", "CmdOrCtrl+V", MenuCommand::Paste),
+            ("Select &All", "CmdOrCtrl+A", MenuCommand::SelectAll),
         ] {
             let i = item(text, Some(keys));
             edit.append(&i).expect("edit menu");
