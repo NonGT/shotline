@@ -786,7 +786,7 @@ impl App {
                 ui,
                 "Description",
                 &mut self.element_form.description,
-                "How it looks, in English: sent with every shot that names it",
+                "What it looks like. Goes into the prompt of every shot that names it; models follow English best.",
             );
             ui.add_space(14.0);
             caption(ui, "Anchor images");
