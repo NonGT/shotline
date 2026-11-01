@@ -59,6 +59,9 @@ pub enum ImageFor {
         /// The images to go along instead of the element's anchors: some of them, others from
         /// anywhere, or none. The prompt names them `Image 1`, `Image 2`… in this order.
         refs: Option<Vec<std::path::PathBuf>>,
+        /// Instead of [image] in shotline.toml.
+        aspect: Option<String>,
+        resolution: Option<String>,
     },
     /// A shot's storyboard frame: the first frame of the video.
     Frame(ShotRef),
@@ -235,6 +238,8 @@ pub fn build_image(
             handle,
             prompt,
             refs,
+            aspect,
+            ..
         } => {
             let el = project.element(handle)?;
             let (prompt, references) = match refs {
@@ -261,10 +266,9 @@ pub fn build_image(
                     ("prompt", &prompt),
                 ],
             );
-            let aspect = cfg
-                .image
-                .aspect
+            let aspect = aspect
                 .clone()
+                .or_else(|| cfg.image.aspect.clone())
                 .unwrap_or_else(|| cfg.aspect.clone());
             (vec![text.trim().to_string()], references, aspect)
         }
@@ -290,7 +294,13 @@ pub fn build_image(
         }
     };
     add_layers(project, &references, &mut parts)?;
-    let resolution = cfg.image.resolution.clone();
+    let resolution = match what {
+        ImageFor::Anchor {
+            resolution: Some(r),
+            ..
+        } => Some(r.clone()),
+        _ => cfg.image.resolution.clone(),
+    };
     check_size(spec, resolution.as_ref(), &aspect, &mut warnings);
     Ok(BuiltImage {
         plugin,

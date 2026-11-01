@@ -120,6 +120,22 @@ fn generated_anchor() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("nope.png doesn't exist"));
+    // A different shape from the film.
+    shotline(&tmp)
+        .args([
+            "element",
+            "anchor",
+            "paka",
+            "--generate",
+            "--aspect",
+            "1:1",
+            "--resolution",
+            "2K",
+            "--yes",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("elements/cast/paka/04.png"));
 }
 
 #[test]

@@ -25,6 +25,9 @@ pub(crate) struct ImageModel {
     /// How the prompt names a reference, e.g. "Image {n}"; None if it takes none.
     pub ref_label: Option<String>,
     pub max_refs: Option<usize>,
+    /// Empty when the model doesn't say.
+    pub aspects: Vec<String>,
+    pub resolutions: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -41,6 +44,11 @@ pub(crate) struct Maker {
     prompt: String,
     /// Images to go along, in the order the prompt numbers them.
     refs: Vec<PathBuf>,
+    /// None for the film's [image] settings.
+    aspect: Option<String>,
+    resolution: Option<String>,
+    /// The film's: what None means.
+    defaults: (String, Option<String>),
     url: String,
     fetch: Arc<Mutex<Fetch>>,
     stage: Arc<Mutex<Stage>>,
@@ -62,6 +70,7 @@ impl Maker {
         anchors: Vec<PathBuf>,
         models: &[ImageModel],
         preferred: (&str, &str),
+        defaults: (String, Option<String>),
     ) -> Maker {
         Maker {
             handle: handle.to_string(),
@@ -71,6 +80,9 @@ impl Maker {
                 .unwrap_or(0),
             prompt: String::new(),
             refs: anchors,
+            aspect: None,
+            resolution: None,
+            defaults,
             url: String::new(),
             fetch: Arc::new(Mutex::new(Fetch::Idle)),
             stage: Arc::new(Mutex::new(Stage::Idle)),
@@ -183,25 +195,33 @@ impl Maker {
             .show(ui, |ui| {
                 ui.set_max_width(560.0);
                 ui.add_enabled_ui(!busy, |ui| {
-                    ui.horizontal(|ui| {
-                        let l = ui.weak("Image model");
-                        let name = |i: usize| {
-                            models
-                                .get(i)
-                                .map(|m| format!("{} · {}", m.plugin, m.model))
-                                .unwrap_or_default()
-                        };
-                        egui::ComboBox::from_id_salt("anchor model")
-                            .selected_text(name(self.pick))
-                            .width(320.0)
-                            .show_ui(ui, |ui| {
-                                for i in 0..models.len() {
-                                    ui.selectable_value(&mut self.pick, i, name(i));
-                                }
-                            })
-                            .response
-                            .labelled_by(l.id);
-                    });
+                    egui::Grid::new("anchor settings")
+                        .num_columns(2)
+                        .spacing(egui::vec2(12.0, 8.0))
+                        .show(ui, |ui| {
+                            let l = ui.weak("Image model");
+                            let name = |i: usize| {
+                                models
+                                    .get(i)
+                                    .map(|m| format!("{} · {}", m.plugin, m.model))
+                                    .unwrap_or_default()
+                            };
+                            egui::ComboBox::from_id_salt("anchor model")
+                                .selected_text(name(self.pick))
+                                .width(320.0)
+                                .show_ui(ui, |ui| {
+                                    for i in 0..models.len() {
+                                        ui.selectable_value(&mut self.pick, i, name(i));
+                                    }
+                                })
+                                .response
+                                .labelled_by(l.id);
+                            ui.end_row();
+                            if let Some(m) = models.get(self.pick) {
+                                self.size(ui, m);
+                            }
+                        });
+                    ui.add_space(6.0);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.prompt)
                             .hint_text(
@@ -225,6 +245,17 @@ impl Maker {
                 let Some(m) = models.get(self.pick) else {
                     return;
                 };
+                // What another model picked may not be on offer here.
+                if self.aspect.as_ref().is_some_and(|a| !m.aspects.contains(a)) {
+                    self.aspect = None;
+                }
+                if self
+                    .resolution
+                    .as_ref()
+                    .is_some_and(|r| !m.resolutions.contains(r))
+                {
+                    self.resolution = None;
+                }
                 let ask = AnchorAsk {
                     handle: self.handle.clone(),
                     prompt: self.prompt.trim().to_string(),
@@ -236,6 +267,8 @@ impl Maker {
                     } else {
                         vec![]
                     },
+                    aspect: self.aspect.clone(),
+                    resolution: self.resolution.clone(),
                 };
                 ui.add_space(4.0);
                 ui.horizontal(|ui| match &stage {
@@ -274,6 +307,46 @@ impl Maker {
                 });
             });
         wants
+    }
+
+    /// The Size row: shape, and resolution for models that have a choice.
+    fn size(&mut self, ui: &mut egui::Ui, m: &ImageModel) {
+        let l = ui.weak("Size");
+        ui.horizontal(|ui| {
+            let default = format!("Default ({})", shape(&self.defaults.0));
+            egui::ComboBox::from_id_salt("anchor aspect")
+                .selected_text(self.aspect.as_deref().map_or(default.clone(), shape))
+                .width(180.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.aspect, None, &default);
+                    for a in &m.aspects {
+                        ui.selectable_value(&mut self.aspect, Some(a.clone()), shape(a));
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+            if m.resolutions.is_empty() {
+                return;
+            }
+            ui.add_space(8.0);
+            let l = ui.weak("Resolution");
+            let default = match &self.defaults.1 {
+                Some(r) => format!("Default ({r})"),
+                None => "Default".into(),
+            };
+            egui::ComboBox::from_id_salt("anchor resolution")
+                .selected_text(self.resolution.clone().unwrap_or(default.clone()))
+                .width(110.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.resolution, None, &default);
+                    for r in &m.resolutions {
+                        ui.selectable_value(&mut self.resolution, Some(r.clone()), r);
+                    }
+                })
+                .response
+                .labelled_by(l.id);
+        });
+        ui.end_row();
     }
 
     /// The images going along, and ways to add more. Returns a picture to see bigger.
@@ -407,5 +480,29 @@ impl Maker {
             );
         }
         zoom
+    }
+}
+
+/// "9:16 tall", so the shape reads without working out the ratio.
+fn shape(aspect: &str) -> String {
+    let what = match aspect {
+        "1:1" => "square",
+        "9:16" => "tall",
+        "16:9" => "wide",
+        "21:9" => "cinema",
+        "adaptive" => "",
+        _ => match aspect
+            .split_once(':')
+            .map(|(w, h)| (w.parse::<f32>(), h.parse::<f32>()))
+        {
+            Some((Ok(w), Ok(h))) if w > h => "landscape",
+            Some((Ok(w), Ok(h))) if w < h => "portrait",
+            _ => "",
+        },
+    };
+    if what.is_empty() {
+        aspect.to_string()
+    } else {
+        format!("{aspect} {what}")
     }
 }

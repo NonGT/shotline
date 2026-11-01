@@ -18,6 +18,9 @@ pub struct Make<'a> {
     pub at: Option<&'a str>,
     /// Anchors only: the images to go along instead of the element's own.
     pub refs: Option<Vec<std::path::PathBuf>>,
+    /// Anchors only: instead of [image] in shotline.toml.
+    pub aspect: Option<&'a str>,
+    pub resolution: Option<&'a str>,
 }
 
 impl Make<'_> {
@@ -80,6 +83,8 @@ fn anchor_for(p: &Project, handle: &str, m: &Make) -> Result<(String, ImageFor)>
         handle: el.handle.clone(),
         prompt: m.prompt.to_string(),
         refs: m.refs.clone(),
+        aspect: m.aspect.map(Into::into),
+        resolution: m.resolution.map(Into::into),
     };
     Ok((el.handle, what))
 }

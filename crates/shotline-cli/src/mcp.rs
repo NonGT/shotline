@@ -209,6 +209,10 @@ pub struct MakeAnchor {
     /// Leave the element's own anchors out
     #[serde(default)]
     no_anchors: bool,
+    /// e.g. 1:1 for a face, 16:9 for a set; instead of [image] in shotline.toml
+    aspect: Option<String>,
+    /// e.g. 1K or 2K, for models that have a choice
+    resolution: Option<String>,
     /// Spend the money. Only after the user agreed to the price.
     #[serde(default)]
     confirm: bool,
@@ -492,6 +496,8 @@ impl Server {
         if p.no_anchors {
             args.push("--no-anchors".into());
         }
+        opt(&mut args, "--aspect", p.aspect);
+        opt(&mut args, "--resolution", p.resolution);
         self.spend(args, p.confirm, &ctx).await
     }
 

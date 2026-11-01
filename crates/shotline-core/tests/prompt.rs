@@ -204,6 +204,8 @@ fn anchor_prompt_keeps_the_look() {
             handle: "mali".into(),
             prompt: "side view".into(),
             refs: None,
+            aspect: None,
+            resolution: None,
         },
     )
     .unwrap();
@@ -225,6 +227,8 @@ fn anchor_prompt_keeps_the_look() {
             handle: "paka".into(),
             prompt: "next to @kan".into(),
             refs: None,
+            aspect: None,
+            resolution: None,
         },
     )
     .unwrap();
@@ -253,6 +257,8 @@ fn anchor_with_picked_images() {
             handle: "paka".into(),
             prompt: "next to @kan, in the dress from image 2".into(),
             refs: Some(vec![paka[1].clone(), outside.clone()]),
+            aspect: None,
+            resolution: None,
         },
     )
     .unwrap();
@@ -283,6 +289,8 @@ fn anchor_with_picked_images() {
             handle: "paka".into(),
             prompt: String::new(),
             refs: Some(vec![]),
+            aspect: None,
+            resolution: None,
         },
     )
     .unwrap();
@@ -337,5 +345,38 @@ fn storyboard_frame_is_the_start_frame() {
             .warnings
             .iter()
             .any(|w| w.contains("storyboard frame isn't used"))
+    );
+}
+
+#[test]
+fn anchor_size_can_differ_from_the_film() {
+    let (_dir, p) = film();
+    p.add_element(Kind::Set, "Hut", None, "").unwrap();
+    let anchor = |aspect: Option<&str>, resolution: Option<&str>| {
+        image(
+            &p,
+            ImageFor::Anchor {
+                handle: "hut".into(),
+                prompt: String::new(),
+                refs: None,
+                aspect: aspect.map(Into::into),
+                resolution: resolution.map(Into::into),
+            },
+        )
+        .unwrap()
+    };
+    let film = anchor(None, None);
+    assert_eq!(film.aspect, p.config.aspect);
+    let b = anchor(Some("16:9"), Some("2K"));
+    assert_eq!(
+        (b.aspect.as_str(), b.resolution.as_deref()),
+        ("16:9", Some("2K"))
+    );
+    // Something the model can't do is still sent, with a warning.
+    let b = anchor(Some("7:3"), None);
+    assert!(
+        b.warnings.iter().any(|w| w.contains("doesn't do 7:3")),
+        "{:?}",
+        b.warnings
     );
 }

@@ -164,6 +164,8 @@ impl ImageArgs {
             yes: self.yes,
             at: None,
             refs: None,
+            aspect: None,
+            resolution: None,
         }
     }
 }
@@ -299,6 +301,12 @@ enum ElementCmd {
         /// Leave the element's own anchors out
         #[arg(long, requires = "generate")]
         no_anchors: bool,
+        /// e.g. 1:1 or 9:16, instead of [image] in shotline.toml
+        #[arg(long, requires = "generate")]
+        aspect: Option<String>,
+        /// e.g. 1K or 2K, for models that have a choice
+        #[arg(long, requires = "generate")]
+        resolution: Option<String>,
         #[command(flatten)]
         image: ImageArgs,
     },
@@ -491,6 +499,8 @@ fn anchor_make<'a>(ask: &'a shotline_ui::AnchorAsk, at: Option<&'a str>) -> imag
         yes: false,
         at,
         refs: Some(ask.refs.clone()),
+        aspect: ask.aspect.as_deref(),
+        resolution: ask.resolution.as_deref(),
     }
 }
 
@@ -543,6 +553,8 @@ fn run(cli: Cli) -> Result<()> {
             ref prompt,
             ref refs,
             no_anchors,
+            ref aspect,
+            ref resolution,
             ref image,
         }) => {
             let p = open()?;
@@ -550,6 +562,8 @@ fn run(cli: Cli) -> Result<()> {
                 let picked = image::picked(&p, handle, refs, no_anchors)?;
                 let mut m = image.make(prompt);
                 m.refs = picked;
+                m.aspect = aspect.as_deref();
+                m.resolution = resolution.as_deref();
                 image::anchor(&p, handle, &m)?;
             } else {
                 let dest = p.add_anchor(handle, file.as_ref().unwrap())?;

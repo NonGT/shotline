@@ -293,6 +293,10 @@ impl Host for TestHost {
             ("paka", "side view", "$0.04")
         );
         assert_eq!(ask.refs, [film.join(".shotline").join("dress.png")]);
+        assert_eq!(
+            (ask.aspect.as_deref(), ask.resolution.as_deref()),
+            (Some("1:1"), Some("2K"))
+        );
         let out = film.join(".shotline").join("made.png");
         image::RgbImage::new(8, 8).save(&out)?;
         Ok(out)
@@ -386,6 +390,8 @@ fn make_an_anchor_image() {
         op: Op::ImageGenerate,
         ref_image: Some("Image {n}".into()),
         max_images: Some(2),
+        aspects: vec!["9:16".into(), "1:1".into(), "4:3".into()],
+        resolutions: vec!["1K".into(), "2K".into()],
         ..ModelInfo::default()
     };
     app.set_plugins(
@@ -412,6 +418,17 @@ fn make_an_anchor_image() {
         .click();
     h.run();
     h.get_by_label("fal · fal-ai/nano-banana").click();
+    h.run();
+    // The film's own unless picked: 9:16 in a new film.
+    h.get_by_role_and_label(Role::ComboBox, "Size").click();
+    h.run();
+    h.get_by_label("4:3 landscape");
+    h.get_by_label("1:1 square").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Resolution")
+        .click();
+    h.run();
+    h.get_by_label("2K").click();
     h.run();
     let prompt = h.get_by_role_and_label(Role::TextInput, "Image prompt");
     prompt.focus();

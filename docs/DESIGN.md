@@ -418,7 +418,7 @@ shotline story | style [--set text]
 shotline doctor
 shotline plugin ls | doctor <name> | balance [name] | voices <name>
 shotline element add <kind> <name> [--handle h] [--desc ...]
-shotline element anchor <handle> (--file img | --generate [--prompt ..] [--ref file|url].. [--no-anchors] [--plugin p] [--model m] [--yes])
+shotline element anchor <handle> (--file img | --generate [--prompt ..] [--ref file|url].. [--no-anchors] [--aspect a] [--resolution r] [--plugin p] [--model m] [--yes])
 shotline element draft <handle> [--write] [--plugin p] [--model m] [--yes]
 shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--sample f] [--set k=v]
 shotline element ls
@@ -517,7 +517,9 @@ in the project folder. Paid actions still quote and ask first: an element's "Mak
 changed since. The image becomes an anchor like one added from a file, so it can be undone.
 Models that take reference images get the element's own anchors to start with; any can be left
 out, and others added from any element, a file, or a web address (downloaded into
-`.shotline/cache/refs`). The prompt names them Image 1, Image 2… in that order.
+`.shotline/cache/refs`). The prompt names them Image 1, Image 2… in that order. Size picks the
+shape (and the resolution, for models that offer a choice) when it shouldn't be the film's: a
+face square, a set wide.
 
 It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window
 was. When working on the UI, keep it open with

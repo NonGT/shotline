@@ -109,6 +109,9 @@ pub struct AnchorAsk {
     pub model: String,
     /// The images that go along, named Image 1, Image 2… in this order.
     pub refs: Vec<PathBuf>,
+    /// None for [image] in shotline.toml.
+    pub aspect: Option<String>,
+    pub resolution: Option<String>,
 }
 
 #[derive(Clone)]
@@ -369,6 +372,8 @@ impl App {
                         model: m.id.clone(),
                         ref_label: m.ref_image.clone(),
                         max_refs: m.max_images,
+                        aspects: m.aspects.clone(),
+                        resolutions: m.resolutions.clone(),
                     })
             })
             .collect()
@@ -991,12 +996,17 @@ impl App {
                         ))
                         .clicked()
                 {
-                    let cfg = &self.project.config.image;
+                    let film = &self.project.config;
+                    let cfg = &film.image;
                     self.maker = Some(anchor::Maker::new(
                         &el.handle,
                         anchors.to_vec(),
                         &models,
                         (&cfg.plugin, &cfg.model),
+                        (
+                            cfg.aspect.clone().unwrap_or_else(|| film.aspect.clone()),
+                            cfg.resolution.clone(),
+                        ),
                     ));
                 }
             });
