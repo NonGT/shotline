@@ -82,6 +82,34 @@ impl Ffmpeg {
         Ok(FramePipe::new(Some(child), rx, width, height))
     }
 
+    /// Small frames of the whole of `path`, `fps` a second, for showing while the slider is
+    /// dragged. Blocks until ffmpeg is done.
+    pub fn strip(&self, path: &Path, width: u32, height: u32, fps: f64) -> Result<Vec<Frame>> {
+        let mut c = self.command();
+        c.arg("-i")
+            .arg(path)
+            .args(["-an", "-vf", &format!("fps={fps},scale={width}:{height}")])
+            .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = c.spawn().map_err(|_| Error::Missing("ffmpeg".into()))?;
+        let mut out = child.stdout.take().expect("piped");
+        let size = (width * height * 4) as usize;
+        let mut frames = vec![];
+        loop {
+            let mut rgba = vec![0; size];
+            if out.read_exact(&mut rgba).is_err() {
+                break;
+            }
+            frames.push(Frame {
+                pts: frames.len() as f64 / fps,
+                rgba,
+            });
+        }
+        let _ = child.wait();
+        Ok(frames)
+    }
+
     /// Interleaved samples of `path` from `start` seconds on, resampled to `rate` and `channels`.
     pub fn pcm_pipe(
         &self,

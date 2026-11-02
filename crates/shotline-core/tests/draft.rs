@@ -33,6 +33,7 @@ fn film() -> (TempDir, Project, ShotRef) {
                     who: "paka".into(),
                     text: "ไปกันเถอะ".into(),
                     at: None,
+                    audio: None,
                 }],
                 ..Shot::default()
             },

@@ -182,7 +182,7 @@ pub fn input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {
     }
     let mut m = Map::new();
     let mut refs = RefMap::default();
-    if let Some(p) = &req.prompt {
+    if let Some(p) = spoken(req.prompt.as_deref(), &req.references) {
         m.insert("prompt".into(), json!(p));
     }
     if let Some(d) = req.duration {
@@ -237,6 +237,65 @@ pub fn input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {
         m.insert(k.clone(), v.clone());
     }
     Ok((m, refs))
+}
+
+/// h3 takes reference audio as a voice to copy, not the soundtrack, and makes up the speech
+/// itself; told nothing, it reads the prompt out. So each line says whose voice and which words.
+fn spoken(
+    prompt: Option<&str>,
+    references: &[shotline_plugin::protocol::Reference],
+) -> Option<String> {
+    let lines: Vec<String> = references
+        .iter()
+        .filter(|r| r.kind == MediaKind::Audio)
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let s = r.said.as_ref()?;
+            let (how, words) = delivery(&s.text);
+            let how = if how.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", how.join(", "))
+            };
+            Some(format!(
+                "{}{how}, in the voice of Audio {}: \"{words}\"",
+                s.who,
+                i + 1
+            ))
+        })
+        .collect();
+    if lines.is_empty() {
+        return prompt.map(Into::into);
+    }
+    let said = format!(
+        "{}\nOnly these lines are spoken, word for word; nothing else in this prompt is said aloud.",
+        lines.join("\n")
+    );
+    Some(match prompt {
+        Some(p) if !p.trim().is_empty() => format!("{}\n{said}", p.trim_end()),
+        _ => said,
+    })
+}
+
+/// Splits ElevenLabs-style "[shout]" tags from the words.
+fn delivery(text: &str) -> (Vec<&str>, String) {
+    let mut how = vec![];
+    let mut words = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find(']') else {
+            break;
+        };
+        words.push_str(&rest[..open]);
+        let tag = rest[open + 1..open + close].trim();
+        if !tag.is_empty() {
+            how.push(tag);
+        }
+        rest = &rest[open + close + 1..];
+    }
+    words.push_str(rest);
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    (how, words)
 }
 
 fn image_input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {

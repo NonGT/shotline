@@ -10,10 +10,10 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::json;
 use shotline_core::ledger::{Books, Context, Entry, Kind, is_currency, money, pricing};
 use shotline_core::protocol::{
-    Amount, ErrorKind, MediaKind, Op, PluginError, Quote, Reference, Request, State, Status,
+    Amount, ErrorKind, MediaKind, Op, PluginError, Quote, Reference, Request, Said, State, Status,
 };
 use shotline_core::{
-    Built, Catalog, Cost, Job, JobStatus, MeasuredRates, Project, ShotRef, Take, build,
+    Built, Catalog, Cost, Job, JobStatus, Line, MeasuredRates, Project, ShotRef, Step, Take, build,
 };
 use shotline_plugin::{Error as PluginErr, Plugin};
 use tokio::sync::Notify;
@@ -72,6 +72,8 @@ pub struct Plan {
     pub currency: String,
     /// When each line starts, if it says.
     line_starts: Vec<Option<f64>>,
+    /// Who says each line.
+    speakers: Vec<String>,
 }
 
 fn to_json(t: &toml::Table) -> serde_json::Map<String, serde_json::Value> {
@@ -133,6 +135,50 @@ fn plugin_error(e: PluginErr, step: &StepPlan, built: &Built) -> anyhow::Error {
     }
 }
 
+/// What the recipe's tts `step` (or none, for a line recorded on its own) asks of the speaker's
+/// voice for `line`, and which plugin it goes to.
+pub fn line_request(
+    project: &Project,
+    step: Option<&Step>,
+    line: &Line,
+) -> Result<(String, Request)> {
+    let el = project.element(&line.who)?;
+    let Some(voice) = el.voice.clone() else {
+        bail!(
+            "@{} has no voice; give one with `shotline element voice {}`",
+            el.handle,
+            el.handle
+        );
+    };
+    let plugin = step
+        .and_then(|s| s.plugin.clone())
+        .unwrap_or(voice.plugin.clone());
+    let Some(model) = step.and_then(|s| s.model.clone()).or(voice.model.clone()) else {
+        bail!(
+            "@{}'s voice has no model and the recipe step names none",
+            el.handle
+        );
+    };
+    let mut v = json!({"settings": serde_json::to_value(&voice.settings)?});
+    if let Some(id) = &voice.voice_id {
+        v["voice_id"] = json!(id);
+    }
+    if let Some(s) = &voice.sample {
+        v["sample"] = json!(project.root.join(s));
+    }
+    Ok((
+        plugin,
+        Request {
+            op: Op::AudioTts,
+            model,
+            prompt: Some(line.text.clone()),
+            voice: Some(v),
+            params: step.map(|s| to_json(&s.params)).unwrap_or_default(),
+            ..Request::default()
+        },
+    ))
+}
+
 /// Stands in for a file an earlier step will make, so later steps can be quoted.
 fn pending(project: &Project, name: &str) -> PathBuf {
     project.root.join("jobs").join("pending").join(name)
@@ -181,6 +227,7 @@ pub async fn plan(
             .map(|x| Reference {
                 kind: MediaKind::Image,
                 path: project.root.join(&x.path),
+                said: None,
             })
             .collect(),
         start_frame,
@@ -194,40 +241,12 @@ pub async fn plan(
         match &step.op {
             Op::AudioTts => {
                 for (i, line) in shot.lines.iter().enumerate() {
-                    let el = project.element(&line.who)?;
-                    let Some(voice) = el.voice.clone() else {
-                        bail!(
-                            "@{} has no voice; give one with `shotline element voice {}`",
-                            el.handle,
-                            el.handle
-                        );
-                    };
-                    let plugin = step.plugin.clone().unwrap_or(voice.plugin.clone());
-                    let Some(model) = step.model.clone().or(voice.model.clone()) else {
-                        bail!(
-                            "@{}'s voice has no model and the recipe step names none",
-                            el.handle
-                        );
-                    };
-                    let mut v = json!({"settings": serde_json::to_value(&voice.settings)?});
-                    if let Some(id) = &voice.voice_id {
-                        v["voice_id"] = json!(id);
-                    }
-                    if let Some(s) = &voice.sample {
-                        v["sample"] = json!(project.root.join(s));
-                    }
+                    let (plugin, req) = line_request(project, Some(step), line)?;
                     steps.push((
                         StepKind::Line(i),
                         format!("line {} by @{}", i + 1, line.who),
                         plugin,
-                        Request {
-                            op: Op::AudioTts,
-                            model,
-                            prompt: Some(line.text.clone()),
-                            voice: Some(v),
-                            params: params.clone(),
-                            ..Request::default()
-                        },
+                        req,
                     ));
                 }
             }
@@ -244,10 +263,25 @@ pub async fn plan(
                             "the recipe sends the lines' audio to the video model, but {r} has no lines"
                         );
                     }
-                    for i in 0..shot.lines.len() {
+                    if req.references.is_empty()
+                        && catalog
+                            .find(&built.plugin, &built.model, &Op::VideoGenerate)
+                            .is_some_and(|m| m.info.audio_needs_image)
+                    {
+                        bail!("{}", shotline_core::no_image_for_audio(&built.model));
+                    }
+                    for (i, line) in shot.lines.iter().enumerate() {
+                        let who = project
+                            .element(&line.who)
+                            .map(|e| e.name)
+                            .unwrap_or_else(|_| line.who.clone());
                         req.references.push(Reference {
                             kind: MediaKind::Audio,
                             path: pending(project, &format!("line{i}.mp3")),
+                            said: Some(Said {
+                                who,
+                                text: line.text.clone(),
+                            }),
                         });
                     }
                 }
@@ -324,7 +358,13 @@ pub async fn plan(
             reused: None,
             kind,
         };
-        if let Some(t) = reuse_take
+        let picked = match sp.kind {
+            StepKind::Line(i) => project.line_audio(r, i)?,
+            _ => None,
+        };
+        if let Some(job) = picked {
+            sp.reused = Some(job);
+        } else if let Some(t) = reuse_take
             && index < from
         {
             let job = t
@@ -358,6 +398,7 @@ pub async fn plan(
         total,
         currency: books.currency.clone(),
         line_starts: shot.lines.iter().map(|l| l.at).collect(),
+        speakers: shot.lines.iter().map(|l| l.who.clone()).collect(),
     })
 }
 
@@ -728,6 +769,8 @@ pub async fn take(
 ) -> Result<Outcome> {
     let r = plan.shot;
     let take_id = project.new_take_id();
+    // What was written for the shot, and its English if that went instead, kept with the video.
+    let shot = project.shot(r)?;
     let mut jobs: Vec<Option<Job>> = vec![];
     for (i, sp) in plan.steps.iter().enumerate() {
         if sp.reused.is_some() {
@@ -740,6 +783,13 @@ pub async fn take(
         job.take = Some(take_id);
         job.step = i as u32;
         job.prompt = sp.request.prompt.clone();
+        if sp.op == Op::VideoGenerate && !shot.prompt.trim().is_empty() {
+            job.brief = Some(shot.prompt.trim().into());
+            job.english = shot.translated().map(Into::into);
+        }
+        if let StepKind::Line(l) = sp.kind {
+            job.who = plan.speakers.get(l).cloned();
+        }
         jobs.push(Some(job));
     }
 
@@ -911,6 +961,8 @@ pub struct Once<'a> {
     pub shot: Option<ShotRef>,
     /// What the person wrote, when the prompt was made from it.
     pub brief: Option<Brief<'a>>,
+    /// Who speaks, for a line's recording.
+    pub who: Option<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -934,10 +986,12 @@ pub async fn run_once(
         quote,
         shot,
         brief,
+        who,
     } = once;
     let mut job = Job::new(request.op.clone(), name, &request.model);
     job.id = project.clock.ulid();
     job.shot = shot;
+    job.who = who.map(Into::into);
     if let Some(b) = brief.filter(|b| !b.text.trim().is_empty()) {
         job.brief = Some(b.text.trim().into());
         job.english = b.english.map(Into::into);

@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -5,7 +6,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
-use crate::{Error, Project, Result, fsx, handle, slug};
+use crate::protocol::Op;
+use crate::{Error, Job, JobStatus, Project, Result, fsx, handle, slug};
 
 const STEP: u32 = 10;
 
@@ -88,6 +90,9 @@ pub struct Shot {
     /// Pictures of its own that go along after the elements' anchors.
     #[serde(default, rename = "image", skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ShotImage>,
+    /// What an element's anchor shows in this shot, e.g. "from behind", by its path.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub anchor_notes: BTreeMap<String, String>,
     /// The prompt put into English, sent instead while the prompt is still what it was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub english: Option<Translated>,
@@ -154,6 +159,9 @@ pub struct Line {
     /// Seconds into the shot it starts; without it, it follows the line before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<f64>,
+    /// The recording a take sends, by job id, while it's of this text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +375,13 @@ impl Project {
         let line = self.line(who, text, at)?;
         let mut shot = self.shot(r)?;
         match shot.lines.get_mut(i) {
+            // The same words by the same speaker: the recording still fits.
+            Some(l) if l.text == line.text && l.who == line.who => {
+                *l = Line {
+                    audio: l.audio.take(),
+                    ..line
+                }
+            }
             Some(l) => *l = line,
             None => return invalid(format!("{r} has no line {}", i + 1)),
         }
@@ -492,7 +507,103 @@ impl Project {
             who: who.to_string(),
             text: text.to_string(),
             at,
+            audio: None,
         })
+    }
+
+    /// Every recording @`who` has, oldest first, with the ones of shot `first` ahead of the rest.
+    /// Recordings from before jobs said who speaks are matched by their words.
+    pub fn recordings_by(&self, who: &str, first: Option<ShotRef>) -> Result<Vec<Job>> {
+        let who = who.trim_start_matches('@');
+        let mut shots: HashMap<ShotRef, Option<Shot>> = HashMap::new();
+        let mut out = vec![];
+        for j in self.jobs()? {
+            if j.op != Op::AudioTts
+                || j.status != JobStatus::Done
+                || j.discarded
+                || j.outputs.is_empty()
+            {
+                continue;
+            }
+            let by = match (&j.who, j.shot) {
+                (Some(w), _) => Some(w.clone()),
+                (None, Some(r)) => shots
+                    .entry(r)
+                    .or_insert_with(|| self.shot(r).ok())
+                    .as_ref()
+                    .and_then(|s| {
+                        s.lines
+                            .iter()
+                            .find(|l| Some(&l.text) == j.prompt.as_ref())
+                            .map(|l| l.who.clone())
+                    }),
+                (None, None) => None,
+            };
+            if by.as_deref() == Some(who) {
+                out.push(j);
+            }
+        }
+        out.sort_by_key(|j| (j.shot != first || first.is_none(), j.shot, j.id));
+        Ok(out)
+    }
+
+    /// The recording line `i` sends with a take, if one's picked and still kept.
+    pub fn line_audio(&self, r: ShotRef, i: usize) -> Result<Option<Job>> {
+        let shot = self.shot(r)?;
+        let Some(id) = shot.lines.get(i).and_then(|l| l.audio.clone()) else {
+            return Ok(None);
+        };
+        let Ok(j) = self.job(&id) else {
+            return Ok(None);
+        };
+        let kept = j.op == Op::AudioTts
+            && j.status == JobStatus::Done
+            && !j.discarded
+            && !j.outputs.is_empty();
+        Ok(kept.then_some(j))
+    }
+
+    /// Picks the recording line `i` sends, or with None leaves it to be made with the take.
+    pub fn set_line_audio(&self, r: ShotRef, i: usize, job: Option<&Job>) -> Result<Shot> {
+        let mut shot = self.shot(r)?;
+        let Some(line) = shot.lines.get_mut(i) else {
+            return invalid(format!("{r} has no line {}", i + 1));
+        };
+        line.audio = job.map(|j| j.id.to_string());
+        // The line says what its recording says.
+        if let Some(text) = job.and_then(|j| j.prompt.clone()) {
+            line.text = text;
+        }
+        self.save_shot(r, &shot)?;
+        Ok(shot)
+    }
+
+    /// Moves line `from` to `to` (both from 0). Start times stay as they were.
+    pub fn move_line(&self, r: ShotRef, from: usize, to: usize) -> Result<Shot> {
+        let mut shot = self.shot(r)?;
+        let n = shot.lines.len();
+        if from >= n || to >= n {
+            return invalid(format!("{r} has {n} lines"));
+        }
+        let line = shot.lines.remove(from);
+        shot.lines.insert(to, line);
+        self.save_shot(r, &shot)?;
+        Ok(shot)
+    }
+
+    /// Throws a recording out: its folder goes, unless a take was made with it, which keeps it
+    /// marked as thrown out.
+    pub fn discard_recording(&self, id: &str) -> Result<()> {
+        let j = self.job(id)?;
+        if j.op != Op::AudioTts {
+            return invalid(format!("{} isn't a recording", j.id));
+        }
+        if j.take.is_none() {
+            fsx::remove_dir(&self.job_dir(j.id))?;
+        } else {
+            self.set_discarded(j.id, true)?;
+        }
+        Ok(())
     }
 
     /// The shot before `r` in film order, crossing chapter boundaries.

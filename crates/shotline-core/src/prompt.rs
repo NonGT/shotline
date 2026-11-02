@@ -47,6 +47,10 @@ pub struct Built {
     pub params: toml::Table,
     pub text: String,
     pub warnings: Vec<String>,
+    /// Worth knowing, but it can still be shot.
+    pub cautions: Vec<String>,
+    /// The storyboard frame goes as the first reference, so one fewer is left for the rest.
+    pub frame_ref: bool,
 }
 
 /// What an image is for.
@@ -120,12 +124,33 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
             "{r} has no prompt yet, `shotline shot draft {r}` can write one from the plot"
         ));
     }
+    let audio = project
+        .steps(&shot)?
+        .iter()
+        .any(|s| s.op == Op::VideoGenerate && s.audio);
+    // A storyboard frame the model can't start on, along with references or audio, goes as the
+    // first picture; it's put in first so the anchors are numbered after it.
+    let frame_ref = match (&shot.frame, &spec.ref_image) {
+        (Some(f), Some(label))
+            if shot.transition == Transition::Cut
+                && spec.frame_as_reference
+                && !spec.start_frame_with_refs =>
+        {
+            Some(Reference {
+                label: render(label, &[("n", "1")]),
+                handle: String::new(),
+                path: f.clone(),
+            })
+        }
+        _ => None,
+    };
     let (mut text, mut references) = resolve(
         project,
         spec,
         shot.sent_prompt(),
         &shot.elements,
         &shot.leave_out,
+        frame_ref.clone(),
         &mut warnings,
     )?;
     own_images(
@@ -137,10 +162,21 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
         &mut references,
         &mut warnings,
     )?;
+    let reserved = frame_ref.is_some();
+    let frame_ref = frame_ref.filter(|_| references.len() > 1 || audio);
+    if reserved && frame_ref.is_none() {
+        // Nothing else to send, so it's a start frame after all.
+        references.remove(0);
+    }
     let mut parts = vec![text];
-    add_layers(project, &references, &mut parts)?;
+    add_layers(
+        project,
+        &references[frame_ref.is_some() as usize..],
+        &mut parts,
+    )?;
 
     let layers = &cfg.prompt;
+    let mut cautions = vec![];
     let mut start_frame = None;
     if shot.transition == Transition::Continue {
         match project.previous_shot(r)? {
@@ -183,6 +219,19 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
             warnings.push(
                 "it continues from the shot before, so its storyboard frame isn't used".into(),
             );
+        } else if let Some(f) = &frame_ref {
+            cautions.push(format!(
+                "{} can't start on a frame along with {}, so the storyboard frame goes as {} \
+                 and the prompt asks to open on it; it may not open on it exactly",
+                spec.id,
+                if audio { "audio" } else { "reference images" },
+                f.label
+            ));
+            if layers.continuity
+                && let Some(t) = project.template("frame-ref")?
+            {
+                parts.push(render(&t, &[("label", &f.label)]));
+            }
         } else {
             check_start_frame(spec, &references, &mut warnings);
             start_frame = Some(StartFrame {
@@ -232,6 +281,8 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
                 "{} doesn't take audio, so the lines have to be lip synced after",
                 spec.id
             ));
+        } else if spec.audio_needs_image && references.is_empty() {
+            warnings.push(no_image_for_audio(&spec.id));
         } else if let Some(max) = spec.max_audio
             && shot.lines.len() > max
         {
@@ -267,6 +318,8 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
         params: ov.params,
         text: parts.join("\n\n"),
         warnings,
+        cautions,
+        frame_ref: frame_ref.is_some(),
     })
 }
 
@@ -301,6 +354,7 @@ pub fn build_image(
                     prompt,
                     std::slice::from_ref(&el.handle),
                     &[],
+                    None,
                     &mut warnings,
                 )?,
                 Some(files) => chosen(project, spec, Some(&el), prompt, files, &mut warnings)?,
@@ -344,6 +398,7 @@ pub fn build_image(
                         prompt,
                         &shot.elements,
                         &shot.leave_out,
+                        None,
                         &mut warnings,
                     )?;
                     own_images(
@@ -384,7 +439,7 @@ pub fn build_image(
         } => {
             let shot = project.shot(*r)?;
             let (text, references) = match refs {
-                None => resolve(project, spec, prompt, &[], &[], &mut warnings)?,
+                None => resolve(project, spec, prompt, &[], &[], None, &mut warnings)?,
                 Some(files) => chosen(project, spec, None, prompt, files, &mut warnings)?,
             };
             let aspect = aspect
@@ -431,6 +486,7 @@ fn resolve(
     prompt: &str,
     extra: &[String],
     skip: &[String],
+    first: Option<Reference>,
     warnings: &mut Vec<String>,
 ) -> Result<(String, Vec<Reference>)> {
     // Mentioned handles first, in prompt order, then the extra ones.
@@ -441,7 +497,7 @@ fn resolve(
         }
     }
 
-    let mut references = vec![];
+    let mut references: Vec<Reference> = first.into_iter().collect();
     let mut replacements = vec![];
     for h in &handles {
         let el = project.element(h)?;
@@ -610,7 +666,8 @@ fn chosen(
     Ok((text.trim().to_string(), references))
 }
 
-/// The shot's own images, labelled after the elements' anchors, with a line for each note.
+/// The shot's own images, labelled after the elements' anchors, with a line for each note,
+/// the anchors' first.
 fn own_images(
     project: &Project,
     spec: &ModelInfo,
@@ -620,7 +677,24 @@ fn own_images(
     references: &mut Vec<Reference>,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
+    let t = project.template("shot-image")?.unwrap_or_default();
+    let mut notes: Vec<String> = references
+        .iter()
+        .filter(|x| !x.handle.is_empty())
+        .filter_map(|x| {
+            let n = shot.anchor_notes.get(&x.path)?.trim();
+            (!n.is_empty()).then(|| render(&t, &[("label", &x.label), ("note", n)]))
+        })
+        .collect();
+    let add = |text: &mut String, notes: &[String]| {
+        if !notes.is_empty() {
+            *text = format!("{}\n\n{}", text.trim(), notes.join(" "))
+                .trim()
+                .to_string();
+        }
+    };
     if shot.images.is_empty() {
+        add(text, &notes);
         return Ok(());
     }
     let Some(ref_image) = &spec.ref_image else {
@@ -628,11 +702,10 @@ fn own_images(
             "{} doesn't take reference images, so {r}'s own images are left out",
             spec.id
         ));
+        add(text, &notes);
         return Ok(());
     };
     let before = references.len();
-    let t = project.template("shot-image")?.unwrap_or_default();
-    let mut notes = vec![];
     for img in &shot.images {
         if !project.root.join(&img.file).is_file() {
             warnings.push(format!("{} is gone, so it's left out", img.file));
@@ -648,11 +721,7 @@ fn own_images(
             path: img.file.clone(),
         });
     }
-    if !notes.is_empty() {
-        *text = format!("{}\n\n{}", text.trim(), notes.join(" "))
-            .trim()
-            .to_string();
-    }
+    add(text, &notes);
     // Over the limit with the elements' anchors alone is already said.
     if let Some(max) = spec.max_images
         && references.len() > max
@@ -685,6 +754,14 @@ fn add_layers(project: &Project, references: &[Reference], parts: &mut Vec<Strin
         parts.push(render(&t, &[]));
     }
     Ok(())
+}
+
+/// Why a take is refused when the video model would get the lines' audio and no picture.
+pub fn no_image_for_audio(model: &str) -> String {
+    format!(
+        "{model} takes the lines' audio only along with a reference image, and none is sent; \
+         put an anchor back, or have the lines lip synced after"
+    )
 }
 
 fn check_start_frame(spec: &ModelInfo, references: &[Reference], warnings: &mut Vec<String>) {

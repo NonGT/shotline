@@ -26,7 +26,9 @@ pub use project::{
     CONFIG_FILE, Config, Format, ImageConfig, LIP_SYNCED, Money, Project, PromptLayers, SPOKEN,
     Step, TextConfig, user_dir,
 };
-pub use prompt::{Built, BuiltImage, ImageFor, Reference, StartFrame, build, build_image};
+pub use prompt::{
+    Built, BuiltImage, ImageFor, Reference, StartFrame, build, build_image, no_image_for_audio,
+};
 pub use shot::{Chapter, Line, ModelOverride, Shot, ShotImage, ShotRef, Transition, Translated};
 pub use shotline_ledger as ledger;
 pub use shotline_protocol as protocol;

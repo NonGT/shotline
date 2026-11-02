@@ -148,6 +148,28 @@ impl Ffmpeg {
         Ok(())
     }
 
+    /// A small still from near the start of `video`, to show it by.
+    pub fn poster(&self, video: &Path, png: &Path) -> Result<()> {
+        if let Some(dir) = png.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        // Half a second in skips a black first frame; a shorter clip falls back to its first.
+        for at in ["0.5", "0"] {
+            run(
+                self.ffmpeg()
+                    .args(["-ss", at, "-i"])
+                    .arg(video)
+                    .args(["-frames:v", "1", "-vf", "scale=320:-2", "-an"])
+                    .arg(png),
+                &format!("taking a still from {}", video.display()),
+            )?;
+            if png.is_file() {
+                return Ok(());
+            }
+        }
+        Err(Error::Invalid(format!("no frames in {}", video.display())))
+    }
+
     /// Decodes `path` to RGB24 frames of exactly `width` x `height` (scaled and padded to fit)
     /// at `fps`, at most `limit` of them.
     pub fn frames(

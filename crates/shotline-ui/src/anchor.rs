@@ -89,6 +89,18 @@ pub(crate) struct Maker {
     url: String,
     fetch: Arc<Mutex<Fetch>>,
     stage: Arc<Mutex<Stage>>,
+    /// The Add an anchor dropdown shows other shots' pictures too.
+    show_all: bool,
+}
+
+/// A picture that can go along: an element's anchor, or a shot's frame or own picture.
+pub(crate) struct Pooled {
+    pub name: String,
+    pub path: PathBuf,
+    /// The two headers it's listed under.
+    pub group: (String, String),
+    /// Listed before Show all: anchors, and the pictures of the shot it's made for.
+    pub near: bool,
 }
 
 /// What the panel wants of the app.
@@ -125,6 +137,7 @@ impl Maker {
             url: String::new(),
             fetch: Arc::new(Mutex::new(Fetch::Idle)),
             stage: Arc::new(Mutex::new(Stage::Idle)),
+            show_all: false,
         }
     }
 
@@ -217,7 +230,7 @@ impl Maker {
         &mut self,
         ui: &mut egui::Ui,
         models: &[ImageModel],
-        pool: &[(String, PathBuf)],
+        pool: &[Pooled],
         thumbs: &mut Thumbs,
         host: Option<Arc<dyn Host>>,
         film: &Path,
@@ -246,7 +259,8 @@ impl Maker {
                 bottom: 10,
             })
             .show(ui, |ui| {
-                ui.set_max_width(560.0);
+                // No wider than the column it's in, e.g. a shot's References.
+                ui.set_max_width(ui.available_width().min(560.0));
                 ui.add_enabled_ui(!busy, |ui| {
                     egui::Grid::new("anchor settings")
                         .num_columns(2)
@@ -261,7 +275,7 @@ impl Maker {
                             };
                             egui::ComboBox::from_id_salt("anchor model")
                                 .selected_text(name(self.pick))
-                                .width(320.0)
+                                .width(ui.available_width().min(320.0))
                                 .show_ui(ui, |ui| {
                                     for i in 0..models.len() {
                                         ui.selectable_value(&mut self.pick, i, name(i));
@@ -395,10 +409,13 @@ impl Maker {
             egui::pos2(r.right() - 30.0, r.top() + 6.0),
             egui::vec2(24.0, 24.0),
         );
-        let close = ui
-            .put(at, |ui: &mut egui::Ui| {
-                ui.add_enabled_ui(!busy, close_button).inner
+        // Laid over the panel without moving the cursor back up, or what follows overlaps it.
+        let mut over = ui.new_child(egui::UiBuilder::new().max_rect(at));
+        let close = over
+            .add_enabled_ui(!busy, |ui| {
+                crate::icon_button(ui, "Close", crate::close_icon)
             })
+            .inner
             .on_hover_text("Close")
             .on_disabled_hover_text("still at it; it closes by itself once the image is made");
         if close.clicked() {
@@ -453,7 +470,7 @@ impl Maker {
         &mut self,
         ui: &mut egui::Ui,
         m: &ImageModel,
-        pool: &[(String, PathBuf)],
+        pool: &[Pooled],
         thumbs: &mut Thumbs,
         fetched: &Fetch,
         host: Option<Arc<dyn Host>>,
@@ -504,27 +521,68 @@ impl Maker {
         let why = format!("{} takes at most {}", m.model, m.max_refs.unwrap_or(0));
         ui.add_enabled_ui(!full, |ui| {
             ui.horizontal(|ui| {
-                let left: Vec<_> = pool
+                let left: Vec<&Pooled> = pool
                     .iter()
-                    .filter(|(_, p)| !self.refs.contains(p))
+                    .filter(|p| !self.refs.contains(&p.path))
                     .collect();
+                let far = left.iter().filter(|p| !p.near).count();
+                let rows: Vec<(String, String, &Pooled)> = left
+                    .iter()
+                    .filter(|p| p.near || self.show_all)
+                    .map(|p| (p.group.0.clone(), p.group.1.clone(), *p))
+                    .collect();
+                let (mut picked, mut more) = (None, false);
                 ui.add_enabled_ui(!left.is_empty(), |ui| {
-                    egui::ComboBox::from_id_salt("add anchor ref")
+                    let open = egui::ComboBox::from_id_salt("add anchor ref")
                         .selected_text("Add an anchor")
                         .width(150.0)
+                        .height(crate::grouped::MAX)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .show_ui(ui, |ui| {
-                            for (name, p) in left {
-                                if ui.selectable_label(false, name).clicked() {
-                                    self.refs.push(p.clone());
-                                }
+                            ui.set_width(360.0);
+                            let grown = crate::grouped::list(
+                                ui,
+                                &rows,
+                                |ui, p| {
+                                    let hover = film_rel(film, &p.path);
+                                    if crate::grouped::picture(ui, thumbs, &p.path, &p.name, &hover)
+                                    {
+                                        picked = Some(p.path.clone());
+                                    }
+                                },
+                                |ui| {
+                                    if !self.show_all && far > 0 {
+                                        more = ui
+                                            .add(
+                                                crate::grouped::item(
+                                                    false,
+                                                    format!("Show all ({far} from other shots)"),
+                                                )
+                                                .min_size(egui::vec2(ui.available_width(), 0.0)),
+                                            )
+                                            .clicked();
+                                    }
+                                },
+                            );
+                            crate::grouped::remeasure_later(ui, grown);
+                            if picked.is_some() {
+                                ui.close();
                             }
-                        })
-                        .response
-                        .on_disabled_hover_text(&why)
-                        .widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Add an anchor")
                         });
+                    crate::grouped::remeasure(ui.ctx());
+                    if open.inner.is_none() {
+                        self.show_all = false;
+                    }
+                    open.response.on_disabled_hover_text(&why).widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Add an anchor")
+                    });
                 });
+                if more {
+                    self.show_all = true;
+                }
+                if let Some(p) = picked {
+                    self.refs.push(p);
+                }
                 if ui
                     .button("Add file…")
                     .on_disabled_hover_text(&why)
@@ -542,7 +600,8 @@ impl Maker {
                     !running,
                     egui::TextEdit::singleline(&mut self.url)
                         .hint_text(RichText::new("or an image's web address").color(theme::DUST))
-                        .desired_width(380.0),
+                        // Room for Fetch beside it.
+                        .desired_width((ui.available_width() - 64.0).min(380.0)),
                 );
                 field.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Image address")
@@ -587,22 +646,7 @@ impl Maker {
     }
 }
 
-/// A small ✕ that lights up on hover like any other button.
-fn close_button(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Close"));
-    if ui.is_rect_visible(rect) {
-        let v = ui.style().interact(&r);
-        if r.hovered() || r.is_pointer_button_down_on() {
-            ui.painter()
-                .rect_filled(rect, v.corner_radius, v.weak_bg_fill);
-        }
-        let s = rect.shrink(7.0);
-        let stroke = egui::Stroke::new(1.5, v.fg_stroke.color);
-        ui.painter()
-            .line_segment([s.left_top(), s.right_bottom()], stroke);
-        ui.painter()
-            .line_segment([s.right_top(), s.left_bottom()], stroke);
-    }
-    r
+/// A path as the film names it, or as it is when it's outside the film.
+fn film_rel(film: &Path, p: &Path) -> String {
+    p.strip_prefix(film).unwrap_or(p).display().to_string()
 }

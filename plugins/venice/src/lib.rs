@@ -73,6 +73,8 @@ pub fn models() -> Vec<ModelInfo> {
         start_frame: true,
         start_frame_with_refs: false,
         audio_input: true,
+        audio_needs_image: true,
+        frame_as_reference: true,
         ..ModelInfo::default()
     }];
     for id in TEXTS {

@@ -375,6 +375,25 @@ pub struct Line {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct Say {
+    shot: String,
+    /// The line, from 1
+    line: usize,
+    /// Only list what's recorded of it
+    #[serde(default)]
+    ls: bool,
+    /// Send recording n (from ls) with the takes instead of making one
+    #[serde(rename = "use")]
+    pick: Option<usize>,
+    /// Record it fresh with each take again
+    #[serde(default)]
+    fresh: bool,
+    /// Spend the money. Only after the user agreed to the price.
+    #[serde(default)]
+    confirm: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct Chapter {
     /// Only this chapter
     chapter: Option<String>,
@@ -766,6 +785,31 @@ impl Server {
         let mut args = a(["shot", "line", &p.shot, &p.who, &p.text]);
         opt(&mut args, "--at", p.at);
         self.cli(args, None, &ctx).await
+    }
+
+    /// Record one line on its own, to hear it before a take; takes then send it instead of
+    /// recording it again. SPENDS MONEY when recording. Without confirm it only shows the price.
+    #[tool]
+    async fn shot_say(
+        &self,
+        Parameters(p): Parameters<Say>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Reply {
+        let mut args = a(["shot", "say", &p.shot, &p.line.to_string()]);
+        if p.ls {
+            args.push("--ls".into());
+            return self.cli(args, None, &ctx).await;
+        }
+        if p.fresh {
+            args.push("--fresh".into());
+            return self.cli(args, None, &ctx).await;
+        }
+        if let Some(n) = p.pick {
+            args.push("--use".into());
+            args.push(n.to_string());
+            return self.cli(args, None, &ctx).await;
+        }
+        self.spend(args, p.confirm, &ctx).await
     }
 
     /// List shots, all or one chapter's.

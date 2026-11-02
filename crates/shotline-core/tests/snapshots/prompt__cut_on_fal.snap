@@ -35,4 +35,6 @@ Built {
     warnings: [
         "@deep-forest has no anchor images, the prompt uses its name",
     ],
+    cautions: [],
+    frame_ref: false,
 }

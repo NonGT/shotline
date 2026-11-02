@@ -128,6 +128,9 @@ async fn a_good_take() {
     assert_eq!(out.job.outputs, ["out.mp4"]);
     assert_eq!(out.job.cost.as_ref().unwrap().amount, 0.4);
     assert!(f.p.job_dir(out.job.id).join("out.mp4").is_file());
+    // What was written for the shot goes along with the video; it wasn't translated.
+    assert_eq!(out.job.brief.as_deref(), Some("@paka walks"));
+    assert_eq!(out.job.english, None);
     assert_eq!(out.take.to_string(), "01-010#1");
     assert!(matches!(events[0], Event::Reserved { .. }));
     assert!(events.iter().any(|e| matches!(e, Event::Submitted { .. })));
@@ -321,6 +324,16 @@ async fn a_recipe_feeds_each_step_into_the_next() {
     let plan = f.plan(R).await.unwrap();
     let what: Vec<_> = plan.steps.iter().map(|s| s.what.as_str()).collect();
     assert_eq!(what, ["line 1 by @paka", "video", "video.lipsync"]);
+    // The line's audio says who speaks and the words, for models that only copy the voice.
+    let said = plan.steps[1]
+        .request
+        .references
+        .iter()
+        .find_map(|r| r.said.clone());
+    assert_eq!(
+        said.map(|s| (s.who, s.text)),
+        Some(("Paka".into(), "we go on before dark".into()))
+    );
     // 20 chars of speech, 4s of video, 4s of lip sync
     assert!(
         (plan.total - (0.02 + 0.4 + 0.2)).abs() < 1e-9,

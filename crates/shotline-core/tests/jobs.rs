@@ -128,3 +128,22 @@ fn select_only_done_takes() {
     assert_eq!(p.shot(r).unwrap().selected_take, Some(t.id.to_string()));
     assert_eq!(p.selected_take(r).unwrap().unwrap().id, t.id);
 }
+
+#[test]
+fn removed_takes_keep_the_others_numbers() {
+    let (_d, p, r) = project();
+    take(&p, r, 1, JobStatus::Done);
+    take(&p, r, 2, JobStatus::Done);
+    take(&p, r, 1, JobStatus::Running);
+    p.select_take(r, "2").unwrap();
+
+    let gone = p.remove_take(r, "2").unwrap();
+    assert_eq!(p.shot(r).unwrap().selected_take, None);
+    let left: Vec<usize> = p.takes(r).unwrap().iter().map(|t| t.number).collect();
+    assert_eq!(left, [1, 3]);
+    // Kept on disk, as the ledger points at it.
+    assert!(p.job_dir(gone.jobs[0].id).join("job.toml").is_file());
+
+    let e = p.remove_take(r, "3").unwrap_err().to_string();
+    assert!(e.contains("still running"), "{e}");
+}

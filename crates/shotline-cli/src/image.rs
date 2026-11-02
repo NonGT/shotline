@@ -57,6 +57,7 @@ fn request(p: &Project, what: ImageFor, m: &Make) -> Result<(String, Request)> {
             .map(|r| Reference {
                 kind: MediaKind::Image,
                 path: p.root.join(&r.path),
+                said: None,
             })
             .collect(),
         ..Request::default()

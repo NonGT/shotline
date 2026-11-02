@@ -88,6 +88,8 @@ Model fields other than `id` and `op` are optional; leave out what doesn't apply
 - `min_duration`, `max_duration` in seconds; `whole_seconds` if fractions aren't allowed.
 - `resolutions`, `aspects`: allowed values, as the API spells them.
 - `start_frame`, `start_frame_with_refs`, `audio_input`: what the model accepts.
+- `frame_as_reference`: where the start frame can't go, shotline may send it as the first
+  reference picture and ask in the prompt to open on it.
 - `notes`: name of a prompt template (`prompts/models/<notes>.md`) with per-model tweaks.
 - `params_schema`: JSON Schema for anything the model takes in `params`.
 - `voice_schema`: for `audio.tts`, JSON Schema for the voice `settings` (an object with
@@ -227,6 +229,9 @@ Only `op` and `model` are always there, plus `duration` (the planned length of t
 video and lip sync ops. A quote may refer to input files that don't exist yet, because later steps
 of a take are priced before earlier ones have run; don't read files in `quote`. Paths are absolute and local; uploading them, or turning
 them into data URLs, is the plugin's job. References are in the order the prompt numbers them.
+A line's recording also has `"said": {"who": "Nana", "text": "[shout] ..."}`, the speaker's name and
+the words as written. A model that plays the audio as the soundtrack can ignore it; one that takes
+audio only as a voice to copy (fal's h3) needs the words in the prompt or it makes up its own.
 `params` comes straight from the user's shot or command line; validate it.
 
 ## Errors

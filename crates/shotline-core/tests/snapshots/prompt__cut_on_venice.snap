@@ -35,4 +35,6 @@ Built {
     warnings: [
         "minimax-h3-max-reference-to-video only takes whole seconds",
     ],
+    cautions: [],
+    frame_ref: false,
 }

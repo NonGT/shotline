@@ -70,8 +70,12 @@ frame = "chapters/01-forest/shots/010.png"   # optional storyboard frame, cut sh
 [[lines]]
 who = "kan"
 text = "เราต้องไปต่อก่อนมืด"
+audio = "01JBX9Q1..."   # optional, the recording takes send (shot say); text is what it says
 
 leave_out = ["elements/cast/paka/02.png"]   # optional, anchors this shot doesn't send
+
+[anchor_notes]   # optional, what an anchor shows in this shot; the prompt gets "Image 1: from behind."
+"elements/cast/paka/01.png" = "from behind"
 
 [english]   # written by take --translate; sent instead while prompt is still `from`
 from = "@paka เดินเข้าป่า"
@@ -272,6 +276,8 @@ That gives you:
 
 ULIDs are long, so the CLI and UI also show takes by order within the shot (`01-020#3`). That number
 is worked out from the ULIDs and never stored, so it can't clash between two copies of a project.
+A removed take has its jobs marked `discarded`: its files stay because the ledger points at them,
+it drops off the list, and the others keep their numbers.
 
 ## Recipes
 
@@ -307,9 +313,24 @@ only pays for the rest.
 Free steps fit on the end, for example `op = "video.upscale"`, `plugin = "local"`,
 `model = "ffmpeg/lanczos"`, `params = { scale = 2 }`, or `video.interpolate` with `rife`.
 
+A line can be recorded on its own first to hear how it comes out (`shotline shot say 01-010 1`).
+Recordings belong to the speaker (`who` in the tts job), whether made alone or by a take, so
+every version of the words, tags and all, stays there to go back to, from any shot. The one
+picked goes in the line's `audio` and the line's text becomes what it says; a take reuses it
+instead of paying for tts again. A recording that's thrown out goes, unless a take used it; then
+it's only marked `discarded`.
+
 Lip sync takes one audio clip. A shot with several lines (or a line with `at`) gets them mixed
 into `lines.wav` in the lip sync job's folder first: each line starts at its `at` seconds, or 0.3s
 after the line before. Redoing lip sync with `--from-step` joins the same lines again for free.
+
+Venice's h3 takes the lines' audio only along with at least one reference image
+(`audio_needs_image` in its model info), so a take that would send audio alone is refused before
+anything is spent. It also won't take a start frame along with references or audio, so a cut
+shot's storyboard frame goes there as `<Picture 1>` instead, the anchors are numbered from 2, and
+the prompt asks it to open on that picture (`prompts/frame-ref.md`). It usually does, though not
+to the pixel, and the app says so in amber rather than refusing. Models that declare
+`frame_as_reference` get this; with nothing else to send, the frame stays a real start frame.
 
 ## Continuity
 
@@ -449,6 +470,7 @@ shotline shot set <shot> [--title] [--plot] [--prompt] [--frame-prompt] [--durat
                   [--leave-out anchor].. [--put-back anchor]..
 shotline shot draft <shot> [--as video|image|translate] [--write] [--plugin p] [--model m] [--yes]
 shotline shot line <shot> <who> <text> [--at s]
+shotline shot say <shot> <line> [--yes | --ls | --use n | --fresh]   n from --ls: the speaker's
 shotline shot image <shot> [--file img | --generate --prompt .. [--ref f|url].. [--aspect a]
                     [--resolution r] [--translate] | --remove n | --edit n] [--note ..]
 shotline shot ls [chapter]
@@ -500,8 +522,8 @@ frames into a texture, a second ffmpeg pipes PCM to `cpal`, and the audio clock 
 Seeking restarts ffmpeg at the new time. Takes are 5-15s at preview size, so this is cheap. When
 the sound stops moving (a gap, or the audio is shorter than the picture) the wall clock takes over
 after a quarter second. Two takes can play side by side, the second one silent. The cut plays the
-selected takes back to back as they are; colour matching and music only happen in a render. "Open"
-still hands a take to mpv or ffplay to see it full size.
+selected takes back to back as they are; colour matching and music only happen in a render. In the
+Cut tab "Open" still hands a take to mpv or ffplay to see it full size.
 
 Anchors and storyboard frames are shrunk to 512px thumbnails when first shown: generated images
 are often 2-4K, past the texture size some GPUs allow. egui ships no Thai font, so Noto Sans
@@ -549,8 +571,10 @@ in the project folder. Paid actions still quote and ask first: an element's "Mak
 "Get price" (free), then a "Make it for $0.04" button, and the CLI refuses the job if the price has
 changed since. The image becomes an anchor like one added from a file, so it can be undone.
 Models that take reference images get the element's own anchors to start with; any can be left
-out, and others added from any element, a file, or a web address (downloaded into
-`.shotline/cache/refs`). The prompt names them Image 1, Image 2… in that order. Size picks the
+out, and others added from any element, a shot's storyboard frame or own pictures, a file, or a
+web address (downloaded into `.shotline/cache/refs`). Add an anchor lists them under headers
+like the recordings: the shot it's for first, then the elements, then other shots behind Show
+all. The prompt names them Image 1, Image 2… in that order. Size picks the
 shape (and the resolution, for models that offer a choice) when it shouldn't be the film's: a
 face square, a set wide. Every job.toml keeps the prompt exactly as the model got it, and for an
 anchor what was typed into the box (`brief`). Details under a zoomed picture shows them, finding
@@ -562,15 +586,35 @@ job, priced and agreed together with the image; the English goes into the prompt
 `english` in the image's job.toml.
 
 A shot's page lists what goes to the video model under References: the anchors of the elements
-it names, then its own pictures (Add image… or Make image…, the same panel as for anchors), each
-with a note. Add an anchor sends one anchor of any element (the element goes into the shot's
-`elements` with its other anchors left out); Remove under an element's anchor leaves it out of
-this shot only. Starts sits under the plot; on a cut, the storyboard frame comes before the
+it names, then its own pictures (Add image… or Make image…, the same panel as for anchors), one a
+row, each with a note of what it shows here; its tooltip shows the sentence the prompt gets. Add
+an anchor sends one anchor of any element (the element goes into the shot's `elements` with its
+other anchors left out), including one left out before; Remove under an element's anchor leaves it
+out of this shot only. Starts sits under the plot; on a cut, the storyboard frame comes before the
 prompt with Add image…, Make frame… and Remove. Every box typed for a model (Prompt, Frame
 prompt, Make image) offers "Translate to English first" when what's in it isn't English and the
 film's text model has its key; the price then includes the translation. Make frame… opens the image panel with the frame
-prompt, the size and the references, starting from what the video gets. Under Takes it says what
+prompt, the size and the references, starting from what the video gets; it closes once the
+picture is made, or with its ✕. Lines start with Add line; a line is its start (dragged like the
+length, or left as "after" to follow the line before), who says it, and its words with Record…,
+which prices first. Once recorded, the words give way to a dropdown of everything that speaker
+has recorded: this shot's first, other shots behind Show all, under chapter and shot headers
+that stay put while the list scrolls. Each has play and delete; one another line sends says
+how many lines use it and can't be deleted, its ✕ turned into a way to that line's shot. New
+recording goes back to the words. Lines are dragged into order by their grip. Play the scene puts the picked recordings at
+their start times. Under Takes it says what
 might go wrong, shows the prompt as the model gets it, and Shoot a take… asks the price first and spends only on a second click, like `take`.
+Each take shows a still from its video (kept in `.shotline/cache/posters/`); clicking it opens the
+take in a popup, stopped on its first frame, with every step's model, cost and prompt, and a
+Compare with dropdown that plays another take beside it in the popup. Each player also decodes a
+small strip of its clip (8 frames a second) in the background, so the picture follows the slider
+while it's dragged; the sharp frame is decoded when it's let go. Its video also sits under the shot's title, stopped on the first frame until it's played (Space
+plays it when nothing's being typed), with its size, length, model and prompt beside it. A take's
+video job keeps the shot's prompt as written (`brief`) and its English (`english`) when that's what
+went; older takes show the prompt the model got. The take in the cut has a tungsten border; the
+others have Use in the cut, and finished ones Remove (undoable). References sit in the right column
+under the shot's model, Add a shot after this one at the bottom. A long
+message in the bottom bar is cut short with … and has a copy button.
 
 It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window
 was. When working on the UI, keep it open with

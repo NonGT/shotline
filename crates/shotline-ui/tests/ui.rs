@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use eframe::egui::Role;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{Description, ModelInfo, Op, Quote, VoiceInfo};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
@@ -81,6 +81,7 @@ fn harness(dir: &Path) -> Harness<'static, App> {
         .silent();
     // Tall enough for a shot's takes, under its references.
     Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1000.0, 1200.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app)
 }
@@ -118,6 +119,8 @@ fn edit_a_shot() {
     h.run();
     assert_eq!(p.shot(R).unwrap().plot, "ผกาเดินเข้าป่า ตอนเย็น");
     h.get_by_label("01-010 saved");
+    h.get_by_label("Copy the message").click();
+    h.run();
 
     h.get_by_label("from the shot before").click();
     h.run();
@@ -132,11 +135,15 @@ fn edit_a_shot() {
     h.get_by_label("by the video model").click();
     h.run();
     h.run();
+    h.get_by_label("Add line").click();
+    h.run();
+    // Nothing to record yet.
+    assert!(h.get_by_label("Record…").accesskit_node().is_disabled());
     let line = h.get_by_role_and_label(Role::TextInput, "Lines");
     line.focus();
     line.type_text("ไปกันเถอะ");
     h.run();
-    h.get_by_label("Add line").click();
+    h.key_press(egui::Key::Enter);
     h.run();
     h.run();
     let s = p.shot(R).unwrap();
@@ -144,7 +151,11 @@ fn edit_a_shot() {
         (s.lines[0].who.as_str(), s.lines[0].text.as_str()),
         ("paka", "ไปกันเถอะ")
     );
-    assert_eq!(field(&h, Role::TextInput, "Lines"), "");
+    assert!(
+        h.query_by_role_and_label(Role::TextInput, "Lines")
+            .is_none()
+    );
+    assert_eq!(field(&h, Role::TextInput, "Line 1"), "ไปกันเถอะ");
 
     h.get_by_label("Remove").click();
     h.run();
@@ -255,6 +266,29 @@ impl Host for TestHost {
     fn balance(&self, plugin: &str) -> anyhow::Result<String> {
         assert_eq!(plugin, "elevenlabs");
         Ok("3.5 USD left".into())
+    }
+
+    fn say_quote(&self, _film: &Path, shot: ShotRef, line: usize) -> anyhow::Result<String> {
+        assert_eq!((shot, line), (R, 0));
+        Ok("0.02 USD".into())
+    }
+
+    /// A recording as the CLI leaves one: a done tts job of the line's words, picked.
+    fn say(&self, film: &Path, shot: ShotRef, line: usize, at: &str) -> anyhow::Result<PathBuf> {
+        assert_eq!(at, "0.02 USD");
+        let p = Project::open(film)?;
+        let mut j = Job::new(Op::AudioTts, "fake", "fake/tts");
+        j.shot = Some(shot);
+        j.who = Some(p.shot(shot)?.lines[line].who.clone());
+        j.prompt = Some(p.shot(shot)?.lines[line].text.clone());
+        let mut j = p.create_job(j)?;
+        let out = p.job_dir(j.id).join("out.wav");
+        std::fs::write(&out, "wav")?;
+        j.status = JobStatus::Done;
+        j.outputs = vec!["out.wav".into()];
+        p.save_job(&j)?;
+        p.set_line_audio(shot, line, Some(&j))?;
+        Ok(out)
     }
 
     fn take_quote(&self, _film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String> {
@@ -382,7 +416,9 @@ fn anchors(p: &Project) -> Vec<PathBuf> {
 fn caret_after_thai_sara_am() {
     let tmp = tempfile::tempdir().unwrap();
     let app = App::new(film(tmp.path()), tmp.path().join("home")).silent();
-    let mut h = Harness::builder().build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     // ำ shapes into two glyphs; a row still needs one per char or every caret after it is off.
     let text = "ทำให้มีป้ายทะเบียน";
@@ -410,6 +446,7 @@ fn edit_the_cut_and_render() {
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1000.0, 1000.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -476,6 +513,7 @@ fn make_an_anchor_image() {
         Some(Arc::new(TestHost)),
     );
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1100.0, 1800.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -577,10 +615,13 @@ fn a_shot_s_pictures_and_a_take() {
         Some(Arc::new(TestHost)),
     );
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1200.0, 1800.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
+    // Its posters and pictures load in the background first.
+    wait(&mut h, 0.5);
     h.run();
     h.get_by_label("References");
     h.get_by_label("up to 9");
@@ -589,6 +630,10 @@ fn a_shot_s_pictures_and_a_take() {
     // A picture of the shot's own, made with a prompt.
     h.get_by_label("Make image…").click();
     h.run();
+    // The panel pushes what follows down rather than lying over it.
+    assert!(
+        h.get_by_label("Shoot a take…").rect().top() > h.get_by_label("Get price").rect().bottom()
+    );
     let prompt = h.get_by_role_and_label(Role::TextInput, "Image prompt");
     prompt.focus();
     prompt.type_text("the café");
@@ -604,7 +649,7 @@ fn a_shot_s_pictures_and_a_take() {
     assert_eq!(img.file, "chapters/01-into-the-forest/shots/010/01.png");
     h.get_by_label("Image 2");
 
-    let note = h.get_by_role_and_label(Role::TextInput, "Note 1");
+    let note = h.get_by_role_and_label(Role::MultilineTextInput, "Note on Image 2");
     note.focus();
     note.type_text("the café at night");
     h.run();
@@ -616,15 +661,47 @@ fn a_shot_s_pictures_and_a_take() {
     h.get_by_label_contains("What the model gets").click();
     h.run();
     h.get_by_label_contains("Image 2: the café at night.");
+    // An element's anchor gets a note for this shot too.
+    let note = h.get_by_role_and_label(Role::MultilineTextInput, "Note on Image 1");
+    note.focus();
+    note.type_text("from behind");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert_eq!(
+        p.shot(R).unwrap().anchor_notes["elements/cast/paka/01.png"],
+        "from behind"
+    );
+    h.get_by_label_contains("Image 1: from behind. Image 2: the café at night.");
 
     h.get_by_label("Remove Image 2").click();
     h.run();
     assert!(p.shot(R).unwrap().images.is_empty());
     assert!(!p.root.join(&img.file).exists());
     h.get_by_label("Undo").click();
+    // Put back, the picture is decoded again in the background.
+    wait(&mut h, 0.3);
     h.run();
     assert_eq!(p.shot(R).unwrap().images.len(), 1);
     assert!(p.root.join(&img.file).exists());
+
+    // The shot's own picture can go along with the next one, listed under the shot.
+    h.get_by_label("Make image…").click();
+    h.run();
+    h.get_all_by_role_and_label(Role::ComboBox, "Add an anchor")
+        .last()
+        .unwrap()
+        .click();
+    h.run();
+    h.get_by_label("01-010  Paka walks in");
+    h.get_by_label("Elements");
+    let before = h.query_all_by_label("Image 1").count();
+    h.get_by_label("Picture 1  the café at night").click();
+    h.run();
+    assert!(h.query_all_by_label("Image 1").count() > before);
+    h.get_by_label("Close").click();
+    h.run();
 
     // A take: priced, then shot on a second click.
     let before = p.takes(R).unwrap().len();
@@ -638,9 +715,9 @@ fn a_shot_s_pictures_and_a_take() {
         .query_by_label("01-010#3 done · 0.40 USD")
         .is_some()));
     assert_eq!(p.takes(R).unwrap().len(), before + 1);
-    h.get_by_label("Play #3");
+    h.get_by_label("01-010#3 poster");
 
-    // An element's anchor left out of this shot only, then put back.
+    // An element's anchor left out of this shot only, then sent again from Add an anchor.
     let anchor = p.shot(R).unwrap();
     assert!(anchor.leave_out.is_empty());
     h.get_by_label("Image 1 · @paka");
@@ -650,7 +727,12 @@ fn a_shot_s_pictures_and_a_take() {
     let left = p.shot(R).unwrap().leave_out;
     assert_eq!(left, ["elements/cast/paka/01.png"]);
     assert!(h.query_by_label("Image 1 · @paka").is_none());
-    h.get_by_label("Put back").click();
+    h.get_all_by_role_and_label(Role::ComboBox, "Add an anchor")
+        .next()
+        .unwrap()
+        .click();
+    h.run();
+    h.get_by_label("@paka 1").click();
     h.run();
     h.run();
     assert!(p.shot(R).unwrap().leave_out.is_empty());
@@ -740,6 +822,7 @@ fn translate_only_when_it_helps() {
         Some(Arc::new(TestHost)),
     );
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1100.0, 1000.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -806,6 +889,7 @@ fn keys_in_settings() {
         .with_plugins(plugins, Some(Arc::new(TestHost)))
         .testing();
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1100.0, 800.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
@@ -890,6 +974,7 @@ fn edit_elements() {
     );
     // Tall enough for the whole voice form without scrolling.
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1100.0, 1100.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -1028,7 +1113,7 @@ fn undo_and_redo() {
     assert_eq!(p.shot(R).unwrap(), edited);
     h.get_by_label("redid the change to 01-010");
 
-    h.get_by_label("Select #1").click();
+    h.get_by_label("Use in the cut #1").click();
     h.run();
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
     h.run();
@@ -1057,7 +1142,9 @@ fn keeps_history_with_git() {
         .with_viewer(None)
         .with_git(Git::find().map(|g| g.with_identity("Test", "test@example.com")))
         .silent();
-    let mut h = Harness::builder().build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     let dir = tmp.path().join("film");
 
@@ -1101,6 +1188,7 @@ fn start_a_film() {
         .with_git(git.clone())
         .testing();
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(900.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
@@ -1141,6 +1229,7 @@ fn start_a_film() {
     let shell = Shell::new(None, home, tmp.path()).testing();
     // Tall enough for the list under Linux's in-window menu bar.
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(900.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
@@ -1156,7 +1245,9 @@ fn file_and_edit_commands() {
     let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
         .with_git(None)
         .testing();
-    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
 
     // Edit > Undo takes back the last save.
@@ -1208,7 +1299,9 @@ fn menu_in_the_window() {
         .with_git(None)
         .with_window_menu()
         .testing();
-    let mut h = Harness::builder().build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();
@@ -1256,16 +1349,18 @@ fn browse_and_select_a_take() {
     h.run();
     assert_eq!(h.state().tab(), Tab::Shots);
     h.get_by_label_contains("01-010  Paka walks in").click();
+    // Its posters are tried in the background first.
+    wait(&mut h, 0.5);
     h.run();
     assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาเดินเข้าป่า");
     h.get_by_label("failed");
     h.get_by_label("content policy");
 
-    h.get_by_label("Select #1").click();
+    h.get_by_label("Use in the cut #1").click();
     h.run();
     h.get_by_label("01-010#1 selected");
-    h.get_by_label("• #1");
-    assert!(h.query_by_label("Select #1").is_none());
+    h.get_by_label("in the cut");
+    assert!(h.query_by_label("Use in the cut #1").is_none());
     let p = Project::open(&tmp.path().join("film")).unwrap();
     let shot = p
         .shot(ShotRef {
@@ -1276,9 +1371,28 @@ fn browse_and_select_a_take() {
     assert!(shot.selected_take.is_some());
 
     // Not a real video.
-    h.get_by_label("Play #1").click();
+    h.get_by_label("01-010#1 poster").click();
     h.run();
     h.get_by_label_contains("can't play 01-010#1");
+    h.get_by_label("Close").click();
+    h.run();
+
+    // Removed, the shot stops using it; the others keep their numbers; undo brings it back.
+    h.get_by_label("Remove #1").click();
+    h.run();
+    h.get_by_label("01-010#1 removed");
+    assert!(h.query_by_label("Remove #1").is_none());
+    h.get_by_label("Remove #2");
+    let p = Project::open(&tmp.path().join("film")).unwrap();
+    let r = ShotRef {
+        chapter: 1,
+        shot: 10,
+    };
+    assert_eq!(p.shot(r).unwrap().selected_take, None);
+    h.get_by_label("Undo").click();
+    h.run();
+    h.get_by_label("Remove #1");
+    assert!(p.shot(r).unwrap().selected_take.is_some());
 }
 
 /// A second of test pattern with a tone, or None without ffmpeg.
@@ -1350,35 +1464,75 @@ fn plays_compares_and_plays_the_cut() {
     j.outputs = vec!["out.mp4".into()];
     p.save_job(&j).unwrap();
     p.select_take(r, "1").unwrap();
+    // What it was asked for, as written and in English.
+    let mut first_job = takes[0].jobs[0].clone();
+    first_job.brief = Some("ผกาเดินเข้าป่า".into());
+    first_job.english = Some("Paka walks into the forest".into());
+    std::fs::write(
+        p.job_dir(first_job.id).join("job.toml"),
+        toml::to_string(&first_job).unwrap(),
+    )
+    .unwrap();
 
     let app = App::new(p, tmp.path().join("home"))
         .with_viewer(None)
         .silent();
     // Tall enough that the takes stay in view under the player.
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size([1000.0, 1800.0])
         .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();
     h.get_by_label_contains("01-010").click();
     wait(&mut h, 0.1);
-    assert!(h.query_by_label("Compare #3").is_none());
-    h.get_by_label("Play #1").click();
+    // The take in the cut is under the title, stopped; a space typed in the plot is a space.
+    assert!(wait_for(&mut h, |h| h.query_by_label("01-010#1").is_some()));
+    assert!(!h.state().is_playing());
+    h.get_by_label("160 × 90");
+    h.get_by_label("1.0 s");
+    h.get_by_label("fake · fake/video");
+    h.get_by_label("ผกาเดินเข้าป่า");
+    h.get_by_label("Paka walks into the forest");
+    let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
+    plot.focus();
+    plot.type_text(" ");
+    h.key_press(egui::Key::Space);
+    wait(&mut h, 0.1);
+    assert!(!h.state().is_playing());
+    h.key_press(egui::Key::Escape);
+    wait(&mut h, 0.1);
+    // Out of the field, space plays it and stops it.
+    h.key_press(egui::Key::Space);
     assert!(wait_for(&mut h, |h| h.state().is_playing()));
-    // The title, and the picture's alt text.
+    h.key_press(egui::Key::Space);
+    assert!(wait_for(&mut h, |h| !h.state().is_playing()));
+
+    // From a take's popup, the other takes play beside it.
+    let poster = tmp.path().join(format!(
+        "film/.shotline/cache/posters/{}.png",
+        takes[0].jobs[0].id
+    ));
+    assert!(wait_for(&mut h, |_| poster.is_file()));
+    wait(&mut h, 0.5);
+    h.get_by_label("01-010#1 poster").click();
     assert!(wait_for(&mut h, |h| h
-        .query_all_by_label("01-010#1")
+        .query_by_role_and_label(Role::ComboBox, "Compare with")
+        .is_some()));
+    h.get_by_role_and_label(Role::ComboBox, "Compare with")
+        .click();
+    wait(&mut h, 0.1);
+    h.get_by_label("01-010#3").click();
+    // Beside it in the popup: its name under its picture, and both playing.
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("01-010#3")
         .count()
         == 2));
-    h.get_by_label("Pause");
-
-    h.get_by_label("Compare #3").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("01-010#1 vs 01-010#3")
-        .is_some()));
     assert!(h.state().is_playing());
     h.get_by_label("Pause").click();
     assert!(wait_for(&mut h, |h| !h.state().is_playing()));
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
 
     h.get_by_label("Cut").click();
     wait(&mut h, 0.1);
@@ -1512,6 +1666,7 @@ fn release_what_a_dead_job_held() {
 
     let app = App::new(p.clone(), home).with_viewer(None).silent();
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1000.0, 1800.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -1586,6 +1741,7 @@ fn warn_about_stuck_jobs_on_open() {
     let open = || {
         let app = App::new(p.clone(), home.clone()).with_viewer(None).silent();
         let mut h = Harness::builder()
+            .with_max_steps(16)
             .with_size(egui::vec2(1400.0, 1800.0))
             .build_ui_state(|ui, app: &mut App| app.show(ui), app);
         h.run();
@@ -1635,6 +1791,7 @@ fn set_the_format_on_the_story_tab() {
         Some(Arc::new(TestHost)),
     );
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1100.0, 1000.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -1716,6 +1873,7 @@ fn a_shot_on_another_model() {
         Some(Arc::new(TestHost)),
     );
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1400.0, 1000.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -1781,6 +1939,7 @@ fn details_of_a_made_picture() {
         .with_viewer(None)
         .silent();
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .with_size(egui::vec2(1100.0, 1000.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -1824,6 +1983,7 @@ fn opens_where_it_was_left() {
         .silent()
         .remember_place();
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
@@ -1835,10 +1995,250 @@ fn opens_where_it_was_left() {
     let app = App::new(p, home).silent().remember_place();
     assert_eq!(app.tab(), Tab::Cut);
     let mut h = Harness::builder()
+        .with_max_steps(16)
         .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Shots").click();
     h.run();
     assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาเดินเข้าป่า");
+}
+
+#[test]
+fn a_take_in_its_popup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut j = Job::new(Op::VideoGenerate, "fake", "fake/video");
+    j.shot = Some(R);
+    j.take = Some(p.new_take_id());
+    let mut j = p.create_job(j).unwrap();
+    if clip(&p.job_dir(j.id).join("out.mp4")).is_none() {
+        return;
+    }
+    j.status = JobStatus::Done;
+    j.outputs = vec!["out.mp4".into()];
+    j.prompt = Some("Paka walks into the trees, a test pattern".into());
+    p.save_job(&j).unwrap();
+
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size([1000.0, 1800.0])
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.step();
+    h.get_by_label_contains("01-010").click();
+    h.step();
+    let poster = p.root.join(format!(".shotline/cache/posters/{}.png", j.id));
+    assert!(wait_for(&mut h, |_| poster.is_file()));
+    h.get_by_label("01-010#3 poster").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Paka walks into the trees, a test pattern")
+        .is_some()));
+    // Waits to be played.
+    assert!(!h.state().is_playing());
+    h.get_by_label("Play");
+    h.get_by_label("Close").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Paka walks into the trees, a test pattern")
+        .is_none()));
+}
+
+#[test]
+fn a_line_recorded_and_picked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
+    let mut s = p.shot(R).unwrap();
+    s.recipe = Some("spoken".into());
+    p.save_shot(R, &s).unwrap();
+    // Something Paka said in another shot.
+    let other = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                plot: "ผกาหันกลับมา".into(),
+                ..Shot::default()
+            },
+        )
+        .unwrap();
+    p.add_line(other, "paka", "ใครน่ะ", None).unwrap();
+    TestHost.say(&p.root, other, 0, "0.02 USD").unwrap();
+
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    h.get_by_label("Record…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Record it for 0.02 USD")
+        .is_some()));
+    h.get_by_label("Record it for 0.02 USD").click();
+    // Recorded, the words give way to the dropdown, on what was just made.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::ComboBox, "Line 1")
+        .is_some()));
+    h.run();
+    let first = p.shot(R).unwrap().lines[0].audio.clone();
+    assert!(first.is_some());
+
+    // New recording goes back to the words, to say them another way.
+    h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
+    h.run();
+    h.get_by_label("New recording").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().lines[0].audio, None);
+    let words = h.get_by_role_and_label(Role::TextInput, "Line 1");
+    words.focus();
+    words.type_text(" [whispers]");
+    h.run();
+    h.get_by_label("Record…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Record it for 0.02 USD")
+        .is_some()));
+    h.get_by_label("Record it for 0.02 USD").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::ComboBox, "Line 1")
+        .is_some()));
+    h.run();
+    assert_eq!(p.shot(R).unwrap().lines[0].text, "ไปกันเถอะ [whispers]");
+
+    // Both are there to go back to; the other shot's after Show all.
+    h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
+    h.run();
+    h.get_by_label("Play ไปกันเถอะ");
+    assert!(h.query_by_label("ใครน่ะ").is_none());
+    h.get_by_label("Show all (1 from other shots)").click();
+    h.run();
+    h.get_by_label("ใครน่ะ");
+    h.get_by_label("ไปกันเถอะ").click();
+    h.run();
+    h.run();
+    let s = p.shot(R).unwrap();
+    assert_eq!(
+        (s.lines[0].audio.clone(), s.lines[0].text.as_str()),
+        (first.clone(), "ไปกันเถอะ")
+    );
+
+    // Deleted, it's gone, and the line goes back to its words once the list is closed.
+    h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
+    h.run();
+    h.get_by_label("Delete ไปกันเถอะ").click();
+    h.run();
+    h.run();
+    assert!(h.query_by_label("Play ไปกันเถอะ").is_none());
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert_eq!(field(&h, Role::TextInput, "Line 1"), "ไปกันเถอะ");
+    h.get_by_label("Undo").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().lines[0].audio, first);
+    h.get_by_role_and_label(Role::ComboBox, "Line 1");
+
+    // Another shot's line sends that one, so it can't be deleted here; it's a way there.
+    h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
+    h.run();
+    h.get_by_label("Show all (1 from other shots)").click();
+    h.run();
+    h.get_by_label("1 other line");
+    h.get_by_label("Delete ไปกันเถอะ");
+    assert!(h.query_by_label("Delete ใครน่ะ").is_none());
+    h.get_by_label(&format!("Go to {other}")).click();
+    h.run();
+    h.run();
+    assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาหันกลับมา");
+
+    // A new line can take one recorded before, words and all, from ▼ beside Record….
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    h.get_by_label("Add line").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Pick a recording")
+        .click();
+    h.run();
+    assert!(h.query_by_label("New recording").is_none());
+    h.get_by_label("ไปกันเถอะ [whispers]").click();
+    h.run();
+    h.run();
+    let s = p.shot(R).unwrap();
+    assert_eq!(s.lines.len(), 2);
+    assert_eq!(s.lines[1].text, "ไปกันเถอะ [whispers]");
+    assert!(s.lines[1].audio.is_some() && s.lines[1].audio != s.lines[0].audio);
+    h.get_by_role_and_label(Role::ComboBox, "Line 2");
+}
+
+#[test]
+fn lines_dragged_into_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.add_line(R, "paka", "หนึ่ง", Some(1.0)).unwrap();
+    p.add_line(R, "paka", "สอง", None).unwrap();
+    let mut s = p.shot(R).unwrap();
+    s.recipe = Some("spoken".into());
+    p.save_shot(R, &s).unwrap();
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let starts: Vec<_> = h
+        .get_all_by_role_and_label(Role::SpinButton, "Starts")
+        .collect();
+    assert_eq!(starts[0].value().as_deref(), Some("1 s"));
+    assert_eq!(starts[1].value().as_deref(), Some("after"));
+    let from = h.get_by_label("Move line 2").rect().center();
+    let to = h.get_by_label("Move line 1").rect().center() - egui::vec2(0.0, 6.0);
+    let pointer = |h: &mut Harness<App>, e: egui::Event| {
+        h.event(e);
+        h.step();
+    };
+    pointer(&mut h, egui::Event::PointerMoved(from));
+    pointer(
+        &mut h,
+        egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        },
+    );
+    for k in 1..=10 {
+        let at = from + (to - from) * (k as f32 / 10.0);
+        pointer(&mut h, egui::Event::PointerMoved(at));
+    }
+    pointer(
+        &mut h,
+        egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        },
+    );
+    h.run();
+    let s = p.shot(R).unwrap();
+    // Moved, each keeping its own start.
+    assert_eq!((s.lines[0].text.as_str(), s.lines[0].at), ("สอง", None));
+    assert_eq!(
+        (s.lines[1].text.as_str(), s.lines[1].at),
+        ("หนึ่ง", Some(1.0))
+    );
 }

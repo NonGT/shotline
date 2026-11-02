@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use shotline_core::ledger::report::By;
 use shotline_core::{
@@ -460,6 +460,23 @@ enum ShotCmd {
         #[arg(long)]
         at: Option<f64>,
     },
+    /// Record a line on its own to hear it, and send that recording with the shot's takes.
+    /// Without options, records a new one (after the price); `--ls` lists what's recorded.
+    Say {
+        shot: ShotRef,
+        /// The line, from 1
+        line: usize,
+        #[arg(long, conflicts_with_all = ["pick", "fresh"])]
+        ls: bool,
+        /// Send recording n (from `--ls`) instead
+        #[arg(long = "use", value_name = "N", conflicts_with = "fresh")]
+        pick: Option<usize>,
+        /// Record it fresh with each take again
+        #[arg(long)]
+        fresh: bool,
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// A picture of the shot's own sent along with its prompt, after the elements' anchors.
     /// Without options, lists them.
     Image {
@@ -578,6 +595,18 @@ impl shotline_ui::Host for Plugins {
 
     fn fetch_image(&self, film: &Path, url: &str) -> Result<PathBuf> {
         fetch::image(&Project::open(film)?, url)
+    }
+
+    fn say_quote(&self, film: &Path, shot: ShotRef, line: usize) -> Result<String> {
+        shoot::say_quote(&Project::open(film)?, shot, line)
+    }
+
+    fn say(&self, film: &Path, shot: ShotRef, line: usize, at: &str) -> Result<PathBuf> {
+        let p = Project::open(film)?;
+        match shoot::say(&p, shot, line, shoot::Go::At(at))? {
+            Some(j) => Ok(p.job_dir(j.id).join(&j.outputs[0])),
+            None => bail!("nothing was recorded"),
+        }
     }
 
     fn take_quote(&self, film: &Path, shot: ShotRef, translate: bool) -> Result<String> {
@@ -938,6 +967,49 @@ fn run(cli: Cli) -> Result<()> {
                 if s.lines.len() == 1 { "" } else { "s" }
             );
         }
+        Cmd::Shot(ShotCmd::Say {
+            shot,
+            line,
+            ls,
+            pick,
+            fresh,
+            yes,
+        }) => {
+            let p = open()?;
+            let i = line.checked_sub(1).context("lines count from 1")?;
+            let who = p
+                .shot(shot)?
+                .lines
+                .get(i)
+                .map(|l| l.who.clone())
+                .with_context(|| format!("{shot} has no line {line}"))?;
+            let all = p.recordings_by(&who, Some(shot))?;
+            let sent = p.line_audio(shot, i)?.map(|j| j.id);
+            if ls {
+                if all.is_empty() {
+                    println!("@{who} has no recordings yet");
+                }
+                for (n, j) in all.iter().enumerate() {
+                    let mark = if Some(j.id) == sent { "*" } else { " " };
+                    let from = j.shot.map(|s| s.to_string()).unwrap_or_default();
+                    let words = j.prompt.as_deref().unwrap_or("");
+                    println!("{mark} {}  {from}  {words}", n + 1);
+                }
+            } else if let Some(n) = pick {
+                let j = n
+                    .checked_sub(1)
+                    .and_then(|k| all.get(k))
+                    .with_context(|| format!("@{who} has {} recordings", all.len()))?;
+                p.set_line_audio(shot, i, Some(j))?;
+                println!("line {line} of {shot} sends recording {n}");
+            } else if fresh {
+                p.set_line_audio(shot, i, None)?;
+                println!("line {line} of {shot} is recorded fresh with each take");
+            } else if let Some(j) = shoot::say(&p, shot, i, yes.into())? {
+                let file = p.job_dir(j.id).join(&j.outputs[0]);
+                println!("recorded line {line} of {shot}: {}", p.rel(&file));
+            }
+        }
         Cmd::Shot(ShotCmd::Draft {
             shot,
             how,
@@ -967,6 +1039,9 @@ fn run(cli: Cli) -> Result<()> {
             let b = build(&p, &plugins::catalog(&p, &installed)?, shot)?;
             for w in &b.warnings {
                 eprintln!("warning: {w}");
+            }
+            for c in &b.cautions {
+                eprintln!("note: {c}");
             }
             println!(
                 "shot {} · {} {} · {}s · {} · {}",

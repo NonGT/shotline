@@ -11,6 +11,17 @@ repository = "https://github.com/NonGT/shotline"
 [workspace.dependencies]
 shotline-core = { path = "crates/shotline-core" }
 
+# Decoding a 4K anchor unoptimised takes a good part of a second.
+[profile.dev.package]
+image.opt-level = 3
+png.opt-level = 3
+zune-jpeg.opt-level = 3
+zune-core.opt-level = 3
+fdeflate.opt-level = 3
+miniz_oxide.opt-level = 3
+crc32fast.opt-level = 3
+simd-adler32.opt-level = 3
+
 [profile.release]
 lto = "thin"
 strip = true

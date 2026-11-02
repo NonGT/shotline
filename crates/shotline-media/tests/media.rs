@@ -65,6 +65,17 @@ fn last_frame() {
     assert_eq!((info.width, info.height), (160, 90));
 }
 
+#[test]
+fn poster() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let v = clip(dir.path(), "a.mp4", RED, false);
+    let png = dir.path().join("cache/a.png");
+    ff.poster(&v, &png).unwrap();
+    let info = ff.probe(&png).unwrap();
+    assert_eq!((info.width, info.height), (320, 180));
+}
+
 fn mean(frame: &[u8]) -> [f64; 3] {
     stats([frame]).0
 }
@@ -252,6 +263,17 @@ fn frame_and_sound_pipes() {
     let samples: usize = rx.iter().map(|c| c.len()).sum();
     let secs = samples as f64 / 2.0 / 48000.0;
     assert!((0.9..1.1).contains(&secs), "{secs}s of sound");
+}
+
+#[test]
+fn a_strip_to_scrub_through() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let c = clip(dir.path(), "a.mp4", RED, false);
+    let frames = ff.strip(&c, 40, 22, 8.0).unwrap();
+    assert_eq!(frames.len(), 8);
+    assert!(frames.iter().all(|f| f.rgba.len() == 40 * 22 * 4));
+    assert!(close(frames[4].pts, 0.5));
 }
 
 fn line(dir: &Path, name: &str, secs: f64) -> PathBuf {

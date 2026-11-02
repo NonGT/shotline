@@ -32,6 +32,10 @@ pub fn mkdir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(io(path))
 }
 
+pub fn remove_dir(path: &Path) -> Result<()> {
+    fs::remove_dir_all(path).map_err(io(path))
+}
+
 pub fn copy(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {
         mkdir(parent)?;

@@ -100,6 +100,7 @@ async fn errors_keep_their_shape_over_stdio() {
         .map(|_| shotline_plugin::protocol::Reference {
             kind: shotline_plugin::protocol::MediaKind::Image,
             path: "/x.png".into(),
+            said: None,
         })
         .collect();
     match p.quote(&req).await {

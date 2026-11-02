@@ -11,6 +11,10 @@ const DEFAULTS: &[(&str, &str)] = &[
         include_str!("../../../assets/prompts/continue.md"),
     ),
     ("frame", include_str!("../../../assets/prompts/frame.md")),
+    (
+        "frame-ref",
+        include_str!("../../../assets/prompts/frame-ref.md"),
+    ),
     ("anchor", include_str!("../../../assets/prompts/anchor.md")),
     (
         "shot-image",

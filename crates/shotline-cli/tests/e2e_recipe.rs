@@ -357,3 +357,42 @@ fn built_in_ways_to_speak() {
     tmp.child("film/chapters/01-one/shots/010.toml")
         .assert(predicate::str::contains("recipe").not());
 }
+
+#[test]
+fn a_line_recorded_on_its_own() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    let run = |args: &[&str]| shotline(&tmp).args(args).assert().success();
+    run(&["shot", "line", "01-010", "paka", "ไปกัน"]);
+    run(&[
+        "element",
+        "voice",
+        "paka",
+        "--plugin",
+        "fake",
+        "--model",
+        "fake/tts",
+        "--voice-id",
+        "v1",
+    ]);
+    run(&["shot", "say", "01-010", "1", "--ls"]).stdout("@paka has no recordings yet\n");
+    run(&["shot", "say", "01-010", "1", "--yes"])
+        .stdout(predicate::str::contains("recorded line 1 of 01-010: jobs/"));
+    run(&["shot", "say", "01-010", "1", "--yes"]);
+    run(&["shot", "say", "01-010", "1", "--ls"]).stdout("  1  01-010  ไปกัน\n* 2  01-010  ไปกัน\n");
+    run(&["shot", "say", "01-010", "1", "--use", "1"]);
+    run(&["shot", "say", "01-010", "1", "--ls"])
+        .stdout(predicate::str::is_match(r"(?m)^\* 1 ").unwrap());
+
+    // The take sends it rather than making it again.
+    run(&["take", "01-010", "--yes"]).stdout(predicate::str::contains(
+        "line 1 by @paka · fake fake/tts (reused)",
+    ));
+
+    // Back to recording it with each take.
+    run(&["shot", "say", "01-010", "1", "--fresh"]);
+    run(&["take", "01-010", "--yes"]).stdout(predicate::str::contains("(reused)").not());
+    // What the take recorded is Paka's to pick too.
+    run(&["shot", "say", "01-010", "1", "--ls"])
+        .stdout(predicate::str::is_match(r"(?m)^  3  01-010  ไปกัน$").unwrap());
+}

@@ -147,6 +147,12 @@ pub struct Job {
     pub created: jiff::Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<jiff::Timestamp>,
+    /// Who speaks, for a line's recording (a cast handle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub who: Option<String>,
+    /// A recording thrown out but kept, since a take still uses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub discarded: bool,
 }
 
 impl Job {
@@ -172,6 +178,8 @@ impl Job {
             cost: None,
             created: jiff::Timestamp::UNIX_EPOCH,
             finished: None,
+            who: None,
+            discarded: false,
         }
     }
 }
@@ -195,6 +203,13 @@ impl Take {
 
     pub fn status(&self) -> JobStatus {
         self.jobs.last().map_or(JobStatus::Pending, |j| j.status)
+    }
+
+    /// Thrown out. Its recordings don't count: lines may still send them.
+    pub fn removed(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|j| j.discarded && j.op != Op::AudioTts)
     }
 
     /// Total per unit across all steps.
@@ -254,6 +269,13 @@ impl Project {
             job.finished = Some(self.clock.now());
         }
         fsx::write_toml(&self.job_dir(job.id).join("job.toml"), &job)
+    }
+
+    /// Marks a finished job thrown out, or back. The one change a finished job takes.
+    pub fn set_discarded(&self, id: Ulid, discarded: bool) -> Result<()> {
+        let mut job = self.load_job(id)?;
+        job.discarded = discarded;
+        fsx::write_toml(&self.job_dir(id).join("job.toml"), &job)
     }
 
     fn load_job(&self, id: Ulid) -> Result<Job> {
@@ -348,6 +370,8 @@ impl Project {
             t.number = i + 1;
             t.jobs.sort_by_key(|j| (j.step, j.id));
         }
+        // Numbered first, so the others keep theirs.
+        takes.retain(|t| !t.removed());
         Ok(takes)
     }
 
@@ -383,6 +407,24 @@ impl Project {
         let mut s = self.shot(shot)?;
         s.selected_take = Some(take.id.to_string());
         self.save_shot(shot, &s)?;
+        Ok(take)
+    }
+
+    /// Throws a finished take out. Its files stay (it's in the ledger) and the others keep their
+    /// numbers; the shot stops using it if it did.
+    pub fn remove_take(&self, shot: ShotRef, spec: &str) -> Result<Take> {
+        let take = self.take(shot, spec)?;
+        if !take.status().is_finished() {
+            return invalid(format!("{take} is still {}", take.status()));
+        }
+        for j in take.jobs.iter().filter(|j| j.op != Op::AudioTts) {
+            self.set_discarded(j.id, true)?;
+        }
+        let mut s = self.shot(shot)?;
+        if s.selected_take.as_deref() == Some(take.id.to_string().as_str()) {
+            s.selected_take = None;
+            self.save_shot(shot, &s)?;
+        }
         Ok(take)
     }
 

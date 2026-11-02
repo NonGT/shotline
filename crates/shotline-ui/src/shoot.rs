@@ -87,6 +87,8 @@ impl App {
                     .find(|m| m.id == b.model)
                     .and_then(|m| m.max_images)
             {
+                // The storyboard frame takes one.
+                let max = max.saturating_sub(b.frame_ref as usize);
                 ui.label(
                     RichText::new(format!("up to {max}"))
                         .small()
@@ -116,71 +118,100 @@ impl App {
         let mut zoom = None;
         let mut remove = None;
         let mut leave = None;
-        ui.horizontal_wrapped(|ui| {
-            for a in &anchors {
-                ui.vertical(|ui| {
-                    let path = self.project.root.join(&a.path);
-                    if self.thumbs.show(ui, &path, 110.0, &a.path) {
-                        zoom = Some(path);
-                    }
-                    ui.label(
-                        RichText::new(format!("{} · @{}", a.label, a.handle))
-                            .small()
-                            .color(theme::GRAPHITE),
-                    )
-                    .on_hover_text(format!("from @{}; change it in Elements", a.handle));
-                    let rm = remove_button(ui)
-                        .on_hover_text(format!("don't send it with {r}; @{} keeps it", a.handle));
-                    rm.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::Role::Button,
-                            true,
-                            format!("Leave out {}", a.label),
-                        )
-                    });
-                    if rm.clicked() {
-                        leave = Some(a.path.clone());
-                    }
-                });
+        // One picture a row, its note beside it with room to say what it shows.
+        const TILE: f32 = 76.0;
+        // "<Picture 2>" reads as "Picture 2".
+        let plain = |l: &str| l.trim_matches(|c| c == '<' || c == '>').to_string();
+        let total = anchors.len() + s.images.len();
+        for k in 0..total {
+            if k > 0 {
+                ui.add_space(8.0);
             }
-            for (i, img) in s.images.iter().enumerate() {
-                ui.vertical(|ui| {
-                    ui.set_width(180.0);
-                    let path = self.project.root.join(&img.file);
-                    if self.thumbs.show(ui, &path, 110.0, &img.file) {
-                        zoom = Some(path);
+            ui.horizontal_top(|ui| {
+                let anchor = anchors.get(k);
+                let i = k.saturating_sub(anchors.len());
+                let (file, name, from) = match anchor {
+                    Some(a) => (a.path.clone(), a.label.clone(), Some(&a.handle)),
+                    None => {
+                        let f = s.images[i].file.clone();
+                        let name = label(&f).unwrap_or_else(|| format!("{}", i + 1));
+                        (f, name, None)
                     }
-                    let name = label(&img.file).unwrap_or_else(|| format!("{}", i + 1));
-                    ui.label(RichText::new(&name).small().color(theme::GRAPHITE));
-                    if let Some(note) = self.form.image_notes.get_mut(i) {
+                };
+                let path = self.project.root.join(&file);
+                if self.thumbs.tile(ui, &path, TILE, &file) {
+                    zoom = Some(path);
+                }
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    ui.horizontal(|ui| {
+                        let text = match from {
+                            Some(h) => format!("{} · @{h}", plain(&name)),
+                            None => plain(&name),
+                        };
+                        let hover = match from {
+                            Some(h) => format!("{file}, from @{h}; change it in Elements"),
+                            None => file.clone(),
+                        };
+                        ui.label(RichText::new(text).small().color(theme::GRAPHITE))
+                            .on_hover_text(hover);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (hover, label) = match from {
+                                Some(h) => (
+                                    format!("don't send it with {r}; @{h} keeps it"),
+                                    format!("Leave out {name}"),
+                                ),
+                                None => (format!("take {file} off {r}"), format!("Remove {name}")),
+                            };
+                            let rm = remove_button(ui).on_hover_text(hover);
+                            rm.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
+                            });
+                            if rm.clicked() {
+                                match from {
+                                    Some(_) => leave = Some(file.clone()),
+                                    None => remove = Some(i),
+                                }
+                            }
+                        });
+                    });
+                    let note = match from {
+                        Some(_) => Some(self.form.anchor_notes.entry(file.clone()).or_default()),
+                        None => self.form.image_notes.get_mut(i),
+                    };
+                    if let Some(note) = note {
+                        let said = note.trim();
+                        let hover = if said.is_empty() {
+                            format!(
+                                "what it shows in this shot; goes in the prompt as \"{name}: …\""
+                            )
+                        } else {
+                            format!("the prompt gets \"{name}: {said}.\"")
+                        };
+                        let hint = if from.is_some() {
+                            "what it shows here, e.g. from behind"
+                        } else {
+                            "what it shows, e.g. the café at night"
+                        };
                         ui.add(
-                            egui::TextEdit::singleline(note)
-                                .hint_text(RichText::new("what it shows").color(theme::DUST))
-                                .desired_width(170.0),
+                            egui::TextEdit::multiline(note)
+                                .hint_text(RichText::new(hint).color(theme::DUST))
+                                .desired_rows(2)
+                                .desired_width(ui.available_width()),
                         )
-                        .on_hover_text(format!("the prompt gets \"{name}: <this>.\""))
+                        .on_hover_text(hover)
                         .widget_info(|| {
                             egui::WidgetInfo::labeled(
-                                egui::Role::TextInput,
+                                egui::Role::MultilineTextInput,
                                 true,
-                                format!("Note {}", i + 1),
+                                format!("Note on {name}"),
                             )
                         });
                     }
-                    let rm = remove_button(ui).on_hover_text(format!("take {} off {r}", img.file));
-                    rm.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::Role::Button,
-                            true,
-                            format!("Remove {name}"),
-                        )
-                    });
-                    if rm.clicked() {
-                        remove = Some(i);
-                    }
                 });
-            }
-        });
+            });
+        }
+        ui.add_space(8.0);
         if let Some(p) = zoom {
             self.zoom = Some(p);
         }
@@ -190,53 +221,63 @@ impl App {
         if let Some(a) = leave {
             acts.push(Action::LeaveOut(r, a, true));
         }
-        if !s.leave_out.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.weak("Left out:");
-                for a in &s.leave_out {
-                    ui.label(RichText::new(a).small().color(theme::GRAPHITE));
-                    if ui
-                        .small_button("Put back")
-                        .on_hover_text(format!("send it with {r} again"))
-                        .clicked()
-                    {
-                        acts.push(Action::LeaveOut(r, a.clone(), false));
-                    }
-                }
-            });
-        }
         let models = self.image_models();
         let me = anchor::For::Shot(r);
         let making = self.maker.as_ref().is_some_and(|m| m.target == me);
         let sent: Vec<&str> = anchors.iter().map(|a| a.path.as_str()).collect();
-        let left: Vec<(String, String, String)> = self
+        let left: Vec<(String, String, (String, String, std::path::PathBuf))> = self
             .film
             .elements
             .iter()
             .flat_map(|(el, all)| {
-                all.iter().enumerate().map(|(i, a)| {
+                let group = format!("@{}  {}", el.handle, el.name);
+                all.iter().enumerate().map(move |(i, a)| {
                     (
-                        format!("@{} {}", el.handle, i + 1),
-                        el.handle.clone(),
-                        self.project.rel(a),
+                        "Elements".to_string(),
+                        group.clone(),
+                        (
+                            format!("@{} {}", el.handle, i + 1),
+                            el.handle.clone(),
+                            a.clone(),
+                        ),
                     )
                 })
             })
-            .filter(|(_, _, a)| !sent.contains(&a.as_str()))
+            .filter(|(_, _, (_, _, a))| !sent.contains(&self.project.rel(a).as_str()))
             .collect();
-        ui.horizontal(|ui| {
+        // Wrapped: the column is narrow.
+        ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(!left.is_empty(), |ui| {
-                egui::ComboBox::from_id_salt(("send anchor", r.to_string()))
+                let mut picked = None;
+                let thumbs = &mut self.thumbs;
+                let open = egui::ComboBox::from_id_salt(("send anchor", r.to_string()))
                     .selected_text("Add an anchor")
                     .width(170.0)
+                    .height(crate::grouped::MAX)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                     .show_ui(ui, |ui| {
-                        for (name, handle, a) in &left {
-                            if ui.selectable_label(false, name).clicked() {
-                                acts.push(Action::SendAnchor(r, handle.clone(), a.clone()));
-                            }
+                        ui.set_width(320.0);
+                        let grown = crate::grouped::list(
+                            ui,
+                            &left,
+                            |ui, (name, handle, a)| {
+                                let hover = self.project.rel(a);
+                                if crate::grouped::picture(ui, thumbs, a, name, &hover) {
+                                    picked = Some((handle.clone(), hover));
+                                }
+                            },
+                            |_| {},
+                        );
+                        crate::grouped::remeasure_later(ui, grown);
+                        if picked.is_some() {
+                            ui.close();
                         }
-                    })
-                    .response
+                    });
+                crate::grouped::remeasure(ui.ctx());
+                if let Some((handle, a)) = picked {
+                    acts.push(Action::SendAnchor(r, handle, a));
+                }
+                open.response
                     .on_hover_text("an element's anchor image, sent with this shot only")
                     .on_disabled_hover_text("every anchor is sent already")
                     .widget_info(|| {
@@ -291,6 +332,9 @@ impl App {
                 let mut said = std::collections::HashSet::new();
                 for w in b.warnings.iter().filter(|w| said.insert(*w)) {
                     ui.label(RichText::new(w).color(theme::FLAG));
+                }
+                for c in &b.cautions {
+                    ui.label(RichText::new(c).color(theme::TUNGSTEN));
                 }
                 egui::CollapsingHeader::new(
                     RichText::new("What the model gets").color(theme::GRAPHITE),
@@ -373,7 +417,13 @@ impl App {
                 if ui
                     .add_enabled(
                         host && elsewhere.is_none(),
-                        egui::Button::new("Shoot a take…"),
+                        egui::Button::new(
+                            RichText::new("Shoot a take…")
+                                .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
+                                .color(theme::TUNGSTEN_LIT),
+                        )
+                        .stroke(egui::Stroke::new(1.5, theme::TUNGSTEN))
+                        .min_size(egui::vec2(140.0, 32.0)),
                     )
                     .on_hover_text("asks the price first; nothing is spent yet")
                     .on_disabled_hover_text(match elsewhere {

@@ -1,7 +1,7 @@
 use serde_json::json;
 use shotline_builtin::fal::{self, Fal, RefMap};
 use shotline_plugin::conformance::{self, Options};
-use shotline_plugin::protocol::{ErrorKind, MediaKind, Op, Reference, Request, State};
+use shotline_plugin::protocol::{ErrorKind, MediaKind, Op, Reference, Request, Said, State};
 use shotline_plugin::{Error, Plugin};
 use wiremock::matchers::{body_partial_json, header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -15,6 +15,7 @@ fn h3(dir: &std::path::Path) -> Request {
         Reference {
             kind: MediaKind::Image,
             path: p,
+            said: None,
         }
     };
     let audio = dir.join("line.mp3");
@@ -31,6 +32,7 @@ fn h3(dir: &std::path::Path) -> Request {
             Reference {
                 kind: MediaKind::Audio,
                 path: audio,
+                said: None,
             },
             img("b.jpg"),
         ],
@@ -74,6 +76,37 @@ fn input_fields_are_top_level() {
         Err(Error::Plugin(e)) => assert_eq!(e.kind, ErrorKind::Unsupported),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn lines_say_whose_voice_and_which_words() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = h3(dir.path());
+    let (body, _) = fal::input(&req).unwrap();
+    assert_eq!(body["prompt"], "Image 1 talks to Image 2");
+
+    req.references[1].said = Some(Said {
+        who: "Nana".into(),
+        text: "[shout] อ้าวมะลิ ทำไมมายืนตากฝนอยู่ตรงนี้ล่ะ".into(),
+    });
+    let a = dir.path().join("line2.mp3");
+    std::fs::write(&a, b"mp3").unwrap();
+    req.references.push(Reference {
+        kind: MediaKind::Audio,
+        path: a,
+        said: Some(Said {
+            who: "Mali".into(),
+            text: "ฝนตก [softly] แล้วไง".into(),
+        }),
+    });
+    let (body, _) = fal::input(&req).unwrap();
+    assert_eq!(
+        body["prompt"],
+        "Image 1 talks to Image 2\n\
+         Nana (shout), in the voice of Audio 1: \"อ้าวมะลิ ทำไมมายืนตากฝนอยู่ตรงนี้ล่ะ\"\n\
+         Mali (softly), in the voice of Audio 2: \"ฝนตก แล้วไง\"\n\
+         Only these lines are spoken, word for word; nothing else in this prompt is said aloud."
+    );
 }
 
 #[test]
@@ -271,6 +304,7 @@ async fn images_with_references_go_to_edit() {
     req.references.push(Reference {
         kind: MediaKind::Image,
         path: anchor,
+        said: None,
     });
     assert_eq!(fal::endpoint(&req), "fal-ai/nano-banana/edit");
     let (body, _) = fal::input(&req).unwrap();

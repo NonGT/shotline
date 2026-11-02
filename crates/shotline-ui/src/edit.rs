@@ -29,11 +29,15 @@ pub(crate) struct Form {
     pub model: Option<(String, String)>,
     /// What each of the shot's own images shows.
     pub image_notes: Vec<String>,
+    /// What each element anchor it sends shows here, by path.
+    pub anchor_notes: std::collections::BTreeMap<String, String>,
     /// Instead of the film's.
     pub resolution: Option<String>,
     pub lines: Vec<LineForm>,
     /// The line being added.
     pub new: LineForm,
+    /// The row for a new line is showing.
+    pub adding: bool,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -191,7 +195,14 @@ pub(crate) enum Action {
     AddLine(ShotRef, LineForm),
     SetLine(ShotRef, usize, LineForm),
     RemoveLine(ShotRef, usize),
+    /// The recording a line sends, by job id, or None to make it with each take.
+    PickRecording(ShotRef, usize, Option<String>),
+    /// A recording thrown out, by job id; lines of the shot that sent it go back to their words.
+    DeleteRecording(ShotRef, String),
+    MoveLine(ShotRef, usize, usize),
     Select(Take),
+    /// Off the list; its files stay, as the ledger points at them.
+    RemoveTake(Take),
     Story(String),
     Style(String),
     Format(Format),
@@ -207,6 +218,8 @@ pub(crate) enum Action {
     AddShotImage(ShotRef, PathBuf),
     RemoveShotImage(ShotRef, usize),
     ShotImageNote(ShotRef, usize, String),
+    /// What an element's anchor shows in this shot, by its path.
+    AnchorNote(ShotRef, String, String),
     /// A storyboard frame copied in, or None to take it away.
     SetFrame(ShotRef, Option<PathBuf>),
     /// An element's anchor left out of the shot (true) or put back.
@@ -227,13 +240,17 @@ impl Action {
             | Action::AddLine(r, _)
             | Action::SetLine(r, ..)
             | Action::RemoveLine(r, _)
+            | Action::PickRecording(r, ..)
+            | Action::DeleteRecording(r, _)
+            | Action::MoveLine(r, ..)
             | Action::AddShotImage(r, _)
             | Action::RemoveShotImage(r, _)
             | Action::ShotImageNote(r, ..)
+            | Action::AnchorNote(r, ..)
             | Action::SetFrame(r, _)
             | Action::LeaveOut(r, ..)
             | Action::SendAnchor(r, ..) => r.to_string(),
-            Action::Select(t) => t.shot.to_string(),
+            Action::Select(t) | Action::RemoveTake(t) => t.shot.to_string(),
             Action::Story(_) => "the story".into(),
             Action::Style(_) => "the style".into(),
             Action::Format(_) => "the format".into(),
@@ -255,8 +272,11 @@ impl Action {
             | Action::AddLine(r, _)
             | Action::SetLine(r, ..)
             | Action::RemoveLine(r, _)
+            | Action::PickRecording(r, ..)
+            | Action::MoveLine(r, ..)
             | Action::AddShotImage(r, _)
             | Action::ShotImageNote(r, ..)
+            | Action::AnchorNote(r, ..)
             | Action::LeaveOut(r, ..)
             | Action::SendAnchor(r, ..) => p.shot_path(*r).into_iter().collect(),
             Action::SetFrame(r, _) => {
@@ -277,7 +297,24 @@ impl Action {
                 }
                 out
             }
+            Action::DeleteRecording(r, id) => {
+                let mut out: Vec<PathBuf> = p.shot_path(*r).into_iter().collect();
+                if let Ok(j) = p.job(id) {
+                    let dir = p.job_dir(j.id);
+                    if j.take.is_none() {
+                        tree(&dir, &mut out);
+                    } else {
+                        out.push(dir.join("job.toml"));
+                    }
+                }
+                out
+            }
             Action::Select(t) => p.shot_path(t.shot).into_iter().collect(),
+            Action::RemoveTake(t) => p
+                .shot_path(t.shot)
+                .into_iter()
+                .chain(t.jobs.iter().map(|j| p.job_dir(j.id).join("job.toml")))
+                .collect(),
             Action::Story(_) => vec![p.root.join("story.md")],
             Action::Style(_) => vec![p.root.join("style.md")],
             Action::Format(_) => vec![p.root.join(CONFIG_FILE)],
@@ -430,8 +467,10 @@ impl Form {
             model: video_model(s),
             resolution: s.model.as_ref().and_then(|m| m.resolution.clone()),
             image_notes: s.images.iter().map(|i| i.note.clone()).collect(),
+            anchor_notes: s.anchor_notes.clone(),
             lines: s.lines.iter().map(LineForm::of).collect(),
             new: LineForm::default(),
+            adding: false,
         }
     }
 
@@ -472,6 +511,12 @@ impl Form {
                 out.push(Action::ShotImageNote(r, i, n.clone()));
             }
         }
+        for (path, n) in &self.anchor_notes {
+            let was = s.anchor_notes.get(path).map_or("", |n| n.as_str());
+            if n.trim() != was {
+                out.push(Action::AnchorNote(r, path.clone(), n.clone()));
+            }
+        }
         for (i, (f, l)) in self.lines.iter().zip(&s.lines).enumerate() {
             if *f != LineForm::of(l) {
                 out.push(Action::SetLine(r, i, f.clone()));
@@ -484,11 +529,13 @@ impl Form {
 impl App {
     pub(crate) fn fill_form(&mut self) {
         let new = std::mem::take(&mut self.form.new);
+        let adding = self.form.adding;
         self.form = match self.open() {
             Some((r, s)) => {
                 let mut f = Form::of(r, &s, self.project.config.duration);
                 if self.form.shot == Some(r) {
                     f.new = new;
+                    f.adding = adding;
                 }
                 f
             }
@@ -577,6 +624,7 @@ impl App {
                     if added {
                         self.form.new.text.clear();
                         self.form.new.at.clear();
+                        self.form.adding = false;
                     }
                     self.reload();
                 }
@@ -664,6 +712,34 @@ impl App {
                 p.set_line(r, i, &l.who, &l.text, l.at()?)?;
                 format!("{r} saved").into()
             }
+            Action::PickRecording(r, i, id) => {
+                let job = match id {
+                    Some(id) => Some(p.job(&id)?),
+                    None => None,
+                };
+                p.set_line_audio(r, i, job.as_ref())?;
+                match job {
+                    Some(_) => format!("line {} of {r} sends the recording picked", i + 1),
+                    None => format!("line {} of {r} is recorded with each take", i + 1),
+                }
+                .into()
+            }
+            Action::DeleteRecording(r, id) => {
+                let j = p.job(&id)?;
+                p.discard_recording(&id)?;
+                let mut s = p.shot(r)?;
+                for l in &mut s.lines {
+                    if l.audio.as_deref() == Some(j.id.to_string().as_str()) {
+                        l.audio = None;
+                    }
+                }
+                p.save_shot(r, &s)?;
+                format!("recording \"{}\" deleted", j.prompt.unwrap_or_default()).into()
+            }
+            Action::MoveLine(r, from, to) => {
+                p.move_line(r, from, to)?;
+                format!("line {} of {r} moved to {}", from + 1, to + 1).into()
+            }
             Action::RemoveLine(r, i) => {
                 p.remove_line(r, i)?;
                 format!("line {} of {r} removed", i + 1).into()
@@ -671,6 +747,10 @@ impl App {
             Action::Select(t) => {
                 let t = p.select_take(t.shot, &t.number.to_string())?;
                 format!("{t} selected").into()
+            }
+            Action::RemoveTake(t) => {
+                let t = p.remove_take(t.shot, &t.number.to_string())?;
+                format!("{t} removed").into()
             }
             Action::Story(t) => {
                 std::fs::write(p.root.join("story.md"), t)?;
@@ -738,6 +818,15 @@ impl App {
             Action::RemoveShotImage(r, i) => {
                 let img = p.remove_shot_image(r, i)?;
                 format!("{} taken off {r}", img.file).into()
+            }
+            Action::AnchorNote(r, path, note) => {
+                let mut s = p.shot(r)?;
+                match note.trim() {
+                    "" => s.anchor_notes.remove(&path),
+                    n => s.anchor_notes.insert(path.clone(), n.to_string()),
+                };
+                p.save_shot(r, &s)?;
+                format!("note on {path} saved").into()
             }
             Action::ShotImageNote(r, i, note) => {
                 p.set_shot_image_note(r, i, &note)?;

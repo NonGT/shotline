@@ -9,11 +9,17 @@ use std::time::Instant;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use eframe::egui;
-use shotline_media::play::{Clock, FramePipe, PcmPipe, preview_size};
+use shotline_media::play::{Clock, Frame, FramePipe, PcmPipe, preview_size};
 use shotline_media::{Ffmpeg, Info};
 
 /// Longest side of the preview, in pixels.
 const PREVIEW: u32 = 720;
+/// The strip shown while the slider is dragged: small, and this many frames a second.
+const STRIP: u32 = 240;
+const STRIP_FPS: f64 = 8.0;
+
+/// Each clip's strip, filled in the background; empty until it's there.
+type Strips = Arc<Mutex<Vec<(u32, u32, Vec<Frame>)>>>;
 
 #[derive(Default)]
 struct Shared {
@@ -122,6 +128,19 @@ impl Audio {
     }
 }
 
+/// Plays a sound on its own, e.g. a recorded line; it stops when what's returned is dropped.
+pub fn listen(ff: &Ffmpeg, audio: &Audio, path: &std::path::Path) -> anyhow::Result<PcmPipe> {
+    let (pipe, rx) = ff.pcm_pipe(path, 0.0, audio.rate, audio.channels)?;
+    audio.attach(Some(rx));
+    audio.set_playing(true);
+    Ok(pipe)
+}
+
+pub fn hush(audio: &Audio) {
+    audio.set_playing(false);
+    audio.attach(None);
+}
+
 struct Clip {
     path: PathBuf,
     info: Info,
@@ -143,6 +162,11 @@ pub struct Player {
     last: Option<Instant>,
     tex: Option<egui::TextureHandle>,
     pub error: Option<String>,
+    strips: Strips,
+    /// Where the slider is while it's dragged.
+    scrubbing: Option<f64>,
+    /// Sought, and its first frame not shown yet.
+    waiting: bool,
 }
 
 impl Player {
@@ -160,6 +184,23 @@ impl Player {
             at += d;
         }
         anyhow::ensure!(!clips.is_empty(), "nothing to play");
+        let strips: Strips = Arc::default();
+        {
+            let (ff, strips) = (ff.clone(), strips.clone());
+            let wanted: Vec<(PathBuf, u32, u32)> = clips
+                .iter()
+                .map(|c| {
+                    let (w, h) = preview_size(c.info.width, c.info.height, STRIP);
+                    (c.path.clone(), w, h)
+                })
+                .collect();
+            std::thread::spawn(move || {
+                for (path, w, h) in wanted {
+                    let frames = ff.strip(&path, w, h, STRIP_FPS).unwrap_or_default();
+                    strips.lock().unwrap().push((w, h, frames));
+                }
+            });
+        }
         Ok(Player {
             ff: ff.clone(),
             clips,
@@ -172,6 +213,9 @@ impl Player {
             last: None,
             tex: None,
             error: None,
+            strips,
+            scrubbing: None,
+            waiting: false,
         })
     }
 
@@ -180,7 +224,36 @@ impl Player {
     }
 
     pub fn position(&self) -> f64 {
-        self.clips[self.index].at + self.clock.now()
+        self.scrubbing
+            .unwrap_or_else(|| self.clips[self.index].at + self.clock.now())
+    }
+
+    /// Shows the strip's frame nearest `t` right away, while the slider is dragged; `seek`
+    /// brings the sharp one once it's let go.
+    pub fn scrub(&mut self, ctx: &egui::Context, t: f64) {
+        let t = t.clamp(0.0, self.duration());
+        self.scrubbing = Some(t);
+        let i = self.clips.iter().rposition(|c| c.at <= t).unwrap_or(0);
+        let local = t - self.clips[i].at;
+        let strips = self.strips.lock().unwrap();
+        let Some((w, h, frames)) = strips.get(i) else {
+            return;
+        };
+        let n = ((local * STRIP_FPS).round() as usize).min(frames.len().saturating_sub(1));
+        let Some(f) = frames.get(n) else {
+            return;
+        };
+        let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], &f.rgba);
+        match &mut self.tex {
+            Some(tex) => tex.set(image, Default::default()),
+            None => self.tex = Some(ctx.load_texture(&self.label, image, Default::default())),
+        }
+    }
+
+    /// The first clip's picture, in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        let i = &self.clips[0].info;
+        (i.width, i.height)
     }
 
     pub fn aspect(&self) -> f32 {
@@ -191,6 +264,8 @@ impl Player {
     /// Restarts decoding at `t` seconds into the playlist.
     pub fn seek(&mut self, t: f64, audio: Option<&Audio>) {
         let t = t.clamp(0.0, self.duration());
+        self.scrubbing = None;
+        self.waiting = true;
         self.index = self
             .clips
             .iter()
@@ -245,6 +320,10 @@ impl Player {
         if self.frames.is_none() && self.error.is_none() {
             self.seek(0.0, audio);
         }
+        if self.scrubbing.is_some() {
+            self.last = None;
+            return true;
+        }
         let t = if playing {
             let dt = self.last.map_or(0.0, |l| (now - l).as_secs_f64());
             self.clock.tick(dt, self.audible(audio))
@@ -256,6 +335,7 @@ impl Player {
             return false;
         };
         if let Some(f) = frames.at(t) {
+            self.waiting = false;
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [frames.width as usize, frames.height as usize],
                 &f.rgba,
@@ -297,6 +377,11 @@ pub struct Deck {
     /// The cut doesn't loop; single takes and comparisons do, to watch them again.
     looping: bool,
     title: String,
+    /// Without its title and close button, for a popup that has its own.
+    bare: bool,
+    max_height: f32,
+    /// Answers Space; off for one under a popup.
+    pub keys: bool,
 }
 
 fn clock(t: f64) -> String {
@@ -311,7 +396,18 @@ impl Deck {
             playing: true,
             looping,
             title: title.into(),
+            bare: false,
+            max_height: 420.0,
+            keys: true,
         }
+    }
+
+    /// Stopped on the first frame, no title, up to `max_height` tall: for a popup.
+    pub fn in_popup(mut self, max_height: f32) -> Deck {
+        self.playing = false;
+        self.bare = true;
+        self.max_height = max_height;
+        self
     }
 
     /// Adds a silent player next to the others and starts everything from the top.
@@ -326,6 +422,12 @@ impl Deck {
             .join(" vs ");
         self.seek(0.0, audio);
         self.playing = true;
+    }
+
+    /// Back to the first player alone.
+    pub fn alone(&mut self) {
+        self.players.truncate(1);
+        self.title = self.players[0].label.clone();
     }
 
     pub fn is_playing(&self) -> bool {
@@ -348,8 +450,10 @@ impl Deck {
     /// Returns false when the deck should be closed.
     pub fn show(&mut self, ui: &mut egui::Ui, audio: Option<&Audio>) -> bool {
         let now = Instant::now();
+        // Quiet while the slider is dragged.
+        let scrubbing = self.players.iter().any(|p| p.scrubbing.is_some());
         if let Some(a) = audio {
-            a.set_playing(self.playing);
+            a.set_playing(self.playing && !scrubbing);
         }
         let mut running = false;
         for p in &mut self.players {
@@ -363,14 +467,16 @@ impl Deck {
             }
         }
         let mut open = true;
-        ui.horizontal(|ui| {
-            ui.strong(&self.title);
-            if ui.button("Close player").clicked() {
-                open = false;
-            }
-        });
+        if !self.bare {
+            ui.horizontal(|ui| {
+                ui.strong(&self.title);
+                if ui.button("Close player").clicked() {
+                    open = false;
+                }
+            });
+        }
         let height = (ui.available_width() / self.players.len() as f32 / self.players[0].aspect())
-            .min(420.0);
+            .min(self.max_height);
         ui.horizontal(|ui| {
             for p in &self.players {
                 ui.vertical(|ui| {
@@ -388,8 +494,17 @@ impl Deck {
         let (mut t, total) = (first.position(), first.duration());
         ui.horizontal(|ui| {
             let label = if self.playing { "Pause" } else { "Play" };
-            if ui.button(label).clicked() || ui.input(|i| i.key_pressed(egui::Key::Space)) {
+            // Space is a space while something's being typed.
+            let key = self.keys
+                && ui.memory(|m| m.focused().is_none())
+                && ui.input(|i| i.key_pressed(egui::Key::Space));
+            if ui.button(label).clicked() || key {
                 self.playing = !self.playing;
+                if self.playing {
+                    // Sound attaches to a pipe when it's started.
+                    let t = self.players[0].position();
+                    self.seek(t, audio);
+                }
             }
             let text = format!("{} / {}", clock(t), clock(total));
             ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(100.0);
@@ -398,14 +513,19 @@ impl Deck {
                     .show_value(false)
                     .text(text),
             );
+            if slider.dragged() && slider.changed() {
+                for p in &mut self.players {
+                    p.scrub(ui.ctx(), t);
+                }
+            }
             if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                 self.seek(t, audio);
             }
         });
         if self.playing {
             ui.ctx().request_repaint();
-        } else if self.players.iter().any(|p| p.tex.is_none()) {
-            // Still waiting for the first frame.
+        } else if self.players.iter().any(|p| p.tex.is_none() || p.waiting) {
+            // Still waiting for the first frame, or the first after a seek.
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(15));
         }

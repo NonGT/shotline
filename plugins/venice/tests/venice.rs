@@ -24,10 +24,12 @@ fn req(dir: &std::path::Path) -> Request {
             Reference {
                 kind: MediaKind::Audio,
                 path: wav,
+                said: None,
             },
             Reference {
                 kind: MediaKind::Image,
                 path: img,
+                said: None,
             },
         ],
         ..Request::default()
@@ -294,6 +296,7 @@ async fn images() {
         Reference {
             kind: MediaKind::Image,
             path: img.clone(),
+            said: None,
         };
         2
     ];

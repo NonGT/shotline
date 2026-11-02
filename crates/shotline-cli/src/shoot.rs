@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result, bail};
 use shotline_core::ledger::{Books, money, pricing};
 use shotline_core::protocol::{MediaKind, Op, Quote, Rate, Reference, Request, State};
 use shotline_core::{
-    DraftFor, Job, Project, ShotRef, Translated, UserConfig, build_draft, finish_draft,
+    DraftFor, Job, JobStatus, Project, ShotRef, Translated, UserConfig, build_draft, finish_draft,
     looks_english, user_dir,
 };
 use shotline_engine::{Event, Options, Plan, Plugins, price};
@@ -118,6 +118,9 @@ pub fn quote(p: &Project, target: &str) -> Result<()> {
         let plan = rt.block_on(shotline_engine::plan(p, &catalog, &b, &opened, *r, None))?;
         for w in &plan.built.warnings {
             eprintln!("warning: {r}: {w}");
+        }
+        for c in &plan.built.cautions {
+            eprintln!("note: {r}: {c}");
         }
         if let [only] = plan.steps.as_slice() {
             println!(
@@ -476,6 +479,9 @@ pub fn take(
     for w in &plan.built.warnings {
         eprintln!("warning: {w}");
     }
+    for c in &plan.built.cautions {
+        eprintln!("note: {c}");
+    }
     println!(
         "{r} · {} {} · {}s · {} · {} · {} reference images{}",
         plan.built.plugin,
@@ -588,6 +594,7 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
         req.references.push(Reference {
             kind: guess_kind(&path),
             path,
+            said: None,
         });
     }
     for (k, v) in &a.params {
@@ -681,6 +688,20 @@ pub fn spend_once(
     brief: Option<shotline_engine::Brief>,
     go: Go,
 ) -> Result<Option<Job>> {
+    spend(p, plugin_name, req, shot, what, brief, None, go)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spend(
+    p: &Project,
+    plugin_name: &str,
+    req: &Request,
+    shot: Option<ShotRef>,
+    what: &str,
+    brief: Option<shotline_engine::Brief>,
+    who: Option<&str>,
+    go: Go,
+) -> Result<Option<Job>> {
     // rt bound first so it drops last, after the plugins.
     let Priced {
         rt,
@@ -716,6 +737,7 @@ pub fn spend_once(
                 quote: &quote,
                 shot,
                 brief,
+                who,
             },
             &opts,
             printer(name.clone()),
@@ -727,4 +749,40 @@ pub fn spend_once(
         None => Ok(Some(job)),
         Some(e) => bail!("job {} {}: {e} ({})", job.id, job.status, job_cost(&job)),
     }
+}
+
+/// What recording line `i` (from 0) of `r` on its own asks for: the shot's recipe's tts step if
+/// it has one, else the speaker's voice as set.
+fn say_request(p: &Project, r: ShotRef, i: usize) -> Result<(String, Request)> {
+    let shot = p.shot(r)?;
+    let line = shot
+        .lines
+        .get(i)
+        .with_context(|| format!("{r} has no line {}", i + 1))?;
+    let steps = p.steps(&shot)?;
+    let step = steps.iter().find(|s| s.op == Op::AudioTts);
+    shotline_engine::line_request(p, step, line)
+}
+
+pub fn say_quote(p: &Project, r: ShotRef, i: usize) -> Result<String> {
+    let (plugin, req) = say_request(p, r, i)?;
+    quote_once(p, &plugin, &req)
+}
+
+/// Records line `i` on its own and picks it for the shot's takes. None if it wasn't agreed to.
+pub fn say(p: &Project, r: ShotRef, i: usize, go: Go) -> Result<Option<Job>> {
+    let (plugin, req) = say_request(p, r, i)?;
+    let what = format!("line {} of {r}", i + 1);
+    let who = p.shot(r)?.lines[i].who.clone();
+    let Some(job) = spend(p, &plugin, &req, Some(r), &what, None, Some(&who), go)? else {
+        return Ok(None);
+    };
+    if job.status != JobStatus::Done {
+        bail!(
+            "{what} wasn't recorded: {}",
+            job.error.as_deref().unwrap_or("no reason given")
+        );
+    }
+    p.set_line_audio(r, i, Some(&job))?;
+    Ok(Some(job))
 }

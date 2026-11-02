@@ -22,6 +22,9 @@ resolutions = ["480P", "768P", "1080P"]
 aspects = ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"]
 start_frame = true
 start_frame_with_refs = false
+audio_input = true
+audio_needs_image = true
+frame_as_reference = true
 "#;
 
 /// Two cast members with anchors, one set without, one chapter.
@@ -125,6 +128,99 @@ fn continue_on_venice_warns() {
     let b = build(&p, r).unwrap();
     assert_eq!(b.start_frame, None);
     insta::assert_debug_snapshot!(b.warnings);
+}
+
+#[test]
+fn venice_wont_take_the_lines_alone() {
+    let (_d, p) = film();
+    let r = add(&p, "The rain falls.", |s| {
+        s.model = venice();
+        s.recipe = Some("spoken".into());
+        s.lines = vec![shotline_core::Line {
+            who: "paka".into(),
+            text: "Hello".into(),
+            at: None,
+            audio: None,
+        }];
+    });
+    let b = build(&p, r).unwrap();
+    assert!(
+        b.warnings
+            .iter()
+            .any(|w| w.contains("takes the lines' audio only along with a reference image")),
+        "{:?}",
+        b.warnings
+    );
+}
+
+#[test]
+fn venice_opens_on_the_frame_as_picture_1() {
+    let (dir, p) = film();
+    let frame = "chapters/01-into-the-forest/shots/010.png";
+    let line = shotline_core::Line {
+        who: "paka".into(),
+        text: "Hello".into(),
+        at: None,
+        audio: None,
+    };
+    let with = |s: &mut Shot| {
+        s.model = venice();
+        s.frame = Some(frame.into());
+        s.leave_out = vec![
+            "elements/cast/paka/01.png".into(),
+            "elements/cast/paka/02.png".into(),
+        ];
+    };
+    // With the lines and no anchors, the frame is the picture the audio goes along with.
+    let r = add(&p, "@paka waves.", |s| {
+        with(s);
+        s.recipe = Some("spoken".into());
+        s.lines = vec![line.clone()];
+    });
+    fs::write(dir.path().join(frame), b"png").unwrap();
+    let b = build(&p, r).unwrap();
+    assert_eq!(b.start_frame, None);
+    assert!(b.frame_ref);
+    assert_eq!(
+        (
+            b.references[0].label.as_str(),
+            b.references[0].path.as_str()
+        ),
+        ("<Picture 1>", frame)
+    );
+    assert!(
+        !b.warnings.iter().any(|w| w.contains("reference image")),
+        "{:?}",
+        b.warnings
+    );
+    assert!(
+        b.cautions[0].contains("may not open on it exactly"),
+        "{:?}",
+        b.cautions
+    );
+    assert!(
+        b.text.contains("The video opens exactly on <Picture 1>"),
+        "{}",
+        b.text
+    );
+
+    // With anchors, they're numbered after it.
+    let r = add(&p, "@kan waves.", |s| {
+        with(s);
+    });
+    let b = build(&p, r).unwrap();
+    assert_eq!(b.start_frame, None);
+    assert!(b.text.starts_with("<Picture 2> waves."), "{}", b.text);
+    assert_eq!(b.references.len(), 2);
+
+    // Alone, it's a start frame as ever.
+    let r = add(&p, "The rain falls.", |s| {
+        with(s);
+    });
+    let b = build(&p, r).unwrap();
+    assert!(!b.frame_ref);
+    assert!(b.references.is_empty());
+    assert_eq!(b.start_frame.unwrap().path, frame);
 }
 
 #[test]
@@ -420,4 +516,28 @@ fn anchor_size_can_differ_from_the_film() {
         "{:?}",
         b.warnings
     );
+}
+
+#[test]
+fn an_anchor_says_what_it_shows_here() {
+    let (_d, p) = film();
+    let r = add(&p, "@paka waves.", |s| {
+        s.anchor_notes
+            .insert("elements/cast/paka/02.png".into(), " from behind ".into());
+        s.anchor_notes
+            .insert("elements/cast/paka/01.png".into(), "  ".into());
+    });
+    let b = build(&p, r).unwrap();
+    let two = b
+        .references
+        .iter()
+        .find(|x| x.path == "elements/cast/paka/02.png")
+        .unwrap();
+    assert!(
+        b.text.contains(&format!("{}: from behind.", two.label)),
+        "{}",
+        b.text
+    );
+    // Saved and read back.
+    assert_eq!(p.shot(r).unwrap().anchor_notes.len(), 2);
 }

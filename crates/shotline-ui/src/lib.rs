@@ -7,6 +7,7 @@ mod cost;
 mod cut;
 mod edit;
 mod git;
+mod grouped;
 mod keys;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
@@ -14,6 +15,7 @@ mod player;
 mod shoot;
 mod start;
 mod theme;
+mod voice;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -29,7 +31,7 @@ use shotline_core::{
 };
 use shotline_media::Ffmpeg;
 
-use edit::{Action, ElementForm, Form, History, LineForm, NewElement, Texts};
+use edit::{Action, ElementForm, Form, History, NewElement, Texts};
 use git::{Dialog, Repo};
 use player::{Audio, Deck, Player};
 pub use start::{MenuCommand, Shell};
@@ -100,6 +102,10 @@ pub trait Host: Send + Sync {
     ) -> anyhow::Result<Vec<shotline_core::ledger::reconcile::Check>>;
     /// Spends, if the price is still `at`, and returns the image, not yet an anchor.
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf>;
+    /// What recording line `line` (from 0) on its own would cost. Free.
+    fn say_quote(&self, film: &Path, shot: ShotRef, line: usize) -> anyhow::Result<String>;
+    /// Records the line, if the price is still `at`, and picks it for the shot's takes.
+    fn say(&self, film: &Path, shot: ShotRef, line: usize, at: &str) -> anyhow::Result<PathBuf>;
     /// What a take of the shot would cost, e.g. "0.40 USD". Free.
     /// `translate` puts the prompt into English first, if it isn't and that isn't done yet.
     fn take_quote(&self, film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String>;
@@ -152,6 +158,12 @@ pub struct App {
     /// Opening the sound device is tried once, on first play.
     audio_tried: bool,
     deck: Option<Deck>,
+    /// A take open in its own popup, with a player when it could be opened.
+    watching: Option<(Take, Option<Deck>)>,
+    /// The open shot's selected take under its title, by take id; None in it when it can't play.
+    in_cut: Option<(String, Option<Deck>)>,
+    /// Posters of takes still being taken from their videos.
+    posters: Arc<Mutex<HashSet<PathBuf>>>,
     film: Film,
     tab: Tab,
     shot: Option<ShotRef>,
@@ -185,6 +197,18 @@ pub struct App {
     /// Ticked: a shot's prompt goes into English before its next take.
     translate_prompt: bool,
     shoot: Arc<Mutex<shoot::Shoot>>,
+    say: Arc<Mutex<voice::Say>>,
+    /// What each speaker in the open shot has recorded.
+    voices: HashMap<String, Vec<shotline_core::Job>>,
+    /// The line whose recordings dropdown is open.
+    voice_open: Option<(ShotRef, usize)>,
+    /// That dropdown shows other shots' recordings too.
+    show_all: bool,
+    line_drag: Option<voice::LineDrag>,
+    drags: u64,
+    /// Where each line's row was last laid out, to tell where a dragged one lands.
+    line_rects: Vec<egui::Rect>,
+    hearing: Option<voice::Hearing>,
     /// timeline.toml as edited, saved once nothing has focus.
     timeline_form: Timeline,
     render: Arc<Mutex<cut::Render>>,
@@ -214,15 +238,21 @@ fn read(path: &Path) -> String {
 /// Anchors and frames are often 2-4K, past what some GPUs take as one texture, so they're shrunk
 /// once when first shown. Big ones are decoded off the UI thread; that takes a moment.
 #[derive(Default)]
-struct Thumbs {
+pub(crate) struct Thumbs {
     done: HashMap<(PathBuf, u32), Option<egui::TextureHandle>>,
     decoding: Arc<Mutex<HashMap<(PathBuf, u32), Decoded>>>,
+    /// When each file was last changed as it was decoded, to tell which to decode again.
+    stamps: HashMap<PathBuf, Option<std::time::SystemTime>>,
+}
+
+fn stamp(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// None while the thread is still at it, then what it made of the file.
 type Decoded = Option<Option<egui::ColorImage>>;
 
-enum Big {
+pub(crate) enum Big {
     Ready(egui::TextureHandle),
     Decoding,
     Failed,
@@ -242,10 +272,29 @@ fn decode(path: &Path, px: u32) -> Option<egui::ColorImage> {
     Some(egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }
 
-const THUMB: u32 = 512;
+pub(crate) const THUMB: u32 = 512;
 const BIG: u32 = 2048;
 
 impl Thumbs {
+    /// Drops the pictures whose files changed (or went) since they were decoded. Decoding is
+    /// slow, so the rest are kept across reloads.
+    fn forget_changed(&mut self) {
+        let changed: Vec<PathBuf> = self
+            .stamps
+            .iter()
+            .filter(|(p, s)| stamp(p) != **s)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in changed {
+            self.stamps.remove(&p);
+            self.done.retain(|(q, _), _| *q != p);
+        }
+    }
+
+    fn noted(&mut self, path: &Path) {
+        self.stamps.insert(path.to_path_buf(), stamp(path));
+    }
+
     fn texture(
         &mut self,
         ui: &egui::Ui,
@@ -253,6 +302,9 @@ impl Thumbs {
         px: u32,
         name: &str,
     ) -> Option<egui::TextureHandle> {
+        if !self.done.contains_key(&(path.to_path_buf(), px)) {
+            self.noted(path);
+        }
         self.done
             .entry((path.to_path_buf(), px))
             .or_insert_with(|| {
@@ -263,7 +315,7 @@ impl Thumbs {
     }
 
     /// Like `texture`, but decoded on another thread, asking for a repaint when it's there.
-    fn texture_later(&mut self, ui: &egui::Ui, path: &Path, px: u32, name: &str) -> Big {
+    pub(crate) fn texture_later(&mut self, ui: &egui::Ui, path: &Path, px: u32, name: &str) -> Big {
         let key = (path.to_path_buf(), px);
         if let Some(t) = self.done.get(&key) {
             return t.clone().map_or(Big::Failed, Big::Ready);
@@ -271,6 +323,7 @@ impl Thumbs {
         let mut decoding = self.decoding.lock().unwrap();
         match decoding.get_mut(&key) {
             None => {
+                self.stamps.insert(key.0.clone(), stamp(&key.0));
                 decoding.insert(key.clone(), None);
                 let (all, ctx) = (self.decoding.clone(), ui.ctx().clone());
                 std::thread::spawn(move || {
@@ -291,6 +344,44 @@ impl Thumbs {
                 t.map_or(Big::Failed, Big::Ready)
             }
         }
+    }
+
+    /// A square thumbnail, the picture whole and centred on black, so tall and wide ones line
+    /// up. Clicking it asks for the picture full size.
+    pub(crate) fn tile(&mut self, ui: &mut egui::Ui, path: &Path, side: f32, name: &str) -> bool {
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+        ui.painter().rect_filled(rect, 2.0, egui::Color32::BLACK);
+        match self.texture_later(ui, path, THUMB, name) {
+            Big::Decoding => {
+                egui::Spinner::new().size(16.0).paint_at(
+                    ui,
+                    egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0)),
+                );
+            }
+            Big::Ready(t) => {
+                let size = t.size_vec2();
+                let k = (side / size.x).min(side / size.y);
+                ui.painter().image(
+                    t.id(),
+                    egui::Rect::from_center_size(rect.center(), size * k),
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+            Big::Failed => {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "can't show it",
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    theme::DUST,
+                );
+            }
+        }
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, name));
+        r.on_hover_cursor(egui::CursorIcon::ZoomIn)
+            .on_hover_text("click to see it bigger")
+            .clicked()
     }
 
     /// A thumbnail; clicking it asks for the picture full size.
@@ -315,6 +406,17 @@ impl Thumbs {
 }
 
 impl App {
+    /// The sound output, opened the first time it's wanted.
+    fn audio(&mut self) -> Option<&Audio> {
+        if !self.audio_tried {
+            self.audio_tried = true;
+            self.audio = Audio::open();
+        }
+        self.audio.as_ref()
+    }
+}
+
+impl App {
     /// `user_dir` is where the user's config and cross-film ledger live, normally `user_dir()`.
     pub fn new(project: Project, user_dir: PathBuf) -> App {
         let mut app = App {
@@ -325,6 +427,9 @@ impl App {
             audio: None,
             audio_tried: false,
             deck: None,
+            watching: None,
+            in_cut: None,
+            posters: Arc::default(),
             film: Film::default(),
             tab: Tab::Shots,
             shot: None,
@@ -349,6 +454,14 @@ impl App {
             built: None,
             translate_prompt: false,
             shoot: Arc::default(),
+            say: Arc::default(),
+            voices: HashMap::new(),
+            voice_open: None,
+            show_all: false,
+            line_drag: None,
+            drags: 0,
+            line_rects: vec![],
+            hearing: None,
             timeline_form: Timeline::default(),
             render: Arc::default(),
             cost_view: cost::View::default(),
@@ -503,13 +616,58 @@ impl App {
     }
 
     /// Every element's anchors, named like "@paka 2", to pick references from.
-    fn anchor_pool(&self) -> Vec<(String, PathBuf)> {
-        let mut pool = vec![];
-        for (el, anchors) in &self.film.elements {
-            for (i, a) in anchors.iter().enumerate() {
-                pool.push((format!("@{} {}", el.handle, i + 1), a.clone()));
+    /// What the image panel can send along: the elements' anchors, and the pictures made for
+    /// shots, the panel's own shot's first.
+    fn anchor_pool(&self) -> Vec<anchor::Pooled> {
+        let here = self.maker.as_ref().and_then(|m| match m.target {
+            anchor::For::Shot(r) | anchor::For::Frame(r) => Some(r),
+            anchor::For::Element(_) => None,
+        });
+        let names = self.shot_names();
+        let mut shots = vec![];
+        for (_, list) in &self.film.chapters {
+            for (r, s) in list {
+                let group = names.get(r).cloned().unwrap_or_default();
+                let near = Some(*r) == here;
+                let mut add = |name: String, file: &str| {
+                    let path = self.project.root.join(file);
+                    if path.is_file() {
+                        shots.push(anchor::Pooled {
+                            name,
+                            path,
+                            group: group.clone(),
+                            near,
+                        });
+                    }
+                };
+                if let Some(f) = &s.frame {
+                    add("Storyboard frame".into(), f);
+                }
+                for (i, img) in s.images.iter().enumerate() {
+                    let mut name = format!("Picture {}", i + 1);
+                    if !img.note.trim().is_empty() {
+                        name.push_str(&format!("  {}", img.note.trim()));
+                    }
+                    add(name, &img.file);
+                }
             }
         }
+        // Stable, so shots stay in film order within each part.
+        shots.sort_by_key(|p| !p.near);
+        let split = shots.iter().take_while(|p| p.near).count();
+        let rest = shots.split_off(split);
+        let mut pool = shots;
+        for (el, anchors) in &self.film.elements {
+            for (i, a) in anchors.iter().enumerate() {
+                pool.push(anchor::Pooled {
+                    name: format!("@{} {}", el.handle, i + 1),
+                    path: a.clone(),
+                    group: ("Elements".into(), format!("@{}  {}", el.handle, el.name)),
+                    near: true,
+                });
+            }
+        }
+        pool.extend(rest);
         pool
     }
 
@@ -574,10 +732,20 @@ impl App {
 
     pub fn is_playing(&self) -> bool {
         self.deck.as_ref().is_some_and(Deck::is_playing)
+            || self
+                .in_cut
+                .as_ref()
+                .and_then(|(_, d)| d.as_ref())
+                .is_some_and(Deck::is_playing)
+            || self
+                .watching
+                .as_ref()
+                .and_then(|(_, d)| d.as_ref())
+                .is_some_and(Deck::is_playing)
     }
 
     fn reload(&mut self) {
-        self.thumbs = Thumbs::default();
+        self.thumbs.forget_changed();
         self.built = None;
         self.refresh_repo();
         if let Err(e) = self.load() {
@@ -655,7 +823,7 @@ impl App {
             Some(r) => self.project.takes(r)?,
             None => vec![],
         };
-        Ok(())
+        self.load_recordings()
     }
 
     fn error(&mut self, msg: String) {
@@ -690,14 +858,12 @@ impl App {
     }
 
     fn player(&mut self, label: &str, files: &[PathBuf]) -> Option<Player> {
-        let Some(ff) = &self.ff else {
+        if self.ff.is_none() {
             self.error("can't play without ffmpeg; install it or set SHOTLINE_FFMPEG".into());
             return None;
-        };
-        if !self.audio_tried {
-            self.audio_tried = true;
-            self.audio = Audio::open();
         }
+        self.audio();
+        let ff = self.ff.as_ref()?;
         match Player::new(ff, label, files) {
             Ok(p) => Some(p),
             Err(e) => {
@@ -714,14 +880,6 @@ impl App {
         self.deck = None;
         if let Some(p) = self.player(label, files) {
             self.deck = Some(Deck::new(label, p, looping));
-        }
-    }
-
-    fn compare(&mut self, label: &str, file: PathBuf) {
-        if let Some(p) = self.player(label, &[file])
-            && let Some(d) = &mut self.deck
-        {
-            d.compare(p, self.audio.as_ref());
         }
     }
 
@@ -742,6 +900,7 @@ impl App {
         }
         self.add_made_anchor();
         self.shoot_finished();
+        self.said();
         let tab = self.tab;
         egui::Panel::top("bar")
             .frame(
@@ -788,8 +947,6 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_height(36.0);
-                    let color = if err { theme::FLAG } else { theme::GRAPHITE };
-                    ui.label(RichText::new(msg).color(color));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let cmd = if ui.ctx().os() == egui::os::OperatingSystem::Mac {
                             "Cmd"
@@ -806,12 +963,40 @@ impl App {
                         if history_button(ui, "Undo", undo, &format!("{cmd}+Z")) {
                             self.undo();
                         }
+                        ui.add_space(12.0);
+                        // What's left, for the message: cut short with … when it doesn't fit.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            if msg.is_empty() {
+                                return;
+                            }
+                            let color = if err { theme::FLAG } else { theme::GRAPHITE };
+                            ui.scope(|ui| {
+                                ui.set_max_width(ui.available_width() - 30.0);
+                                ui.add(
+                                    egui::Label::new(RichText::new(&msg).color(color)).truncate(),
+                                )
+                                .on_hover_text(&msg);
+                            });
+                            if icon_button(ui, "Copy the message", copy_icon)
+                                .on_hover_text("Copy")
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(msg.clone());
+                            }
+                        });
                     });
                 });
             });
         if self.tab != tab
             && !matches!(self.tab, Tab::Shots | Tab::Cut)
             && let Some(d) = &mut self.deck
+        {
+            d.pause(self.audio.as_ref());
+        }
+        // Only on the Shots tab; it doesn't go on playing out of sight.
+        if self.tab != Tab::Shots
+            && let Some((_, Some(d))) = &mut self.in_cut
+            && d.is_playing()
         {
             d.pause(self.audio.as_ref());
         }
@@ -824,6 +1009,7 @@ impl App {
         }
         self.git_dialog(ui);
         self.zoomed(ui);
+        self.watched(ui);
         // Files change outside the app too, from the CLI or the co-director.
         let now = ui.input(|i| i.time);
         if now - self.repo_at > 5.0 {
@@ -865,7 +1051,9 @@ impl App {
         // Room for the bottom row, and for the details under it when they're open.
         let details = self.zoom_details.as_ref().is_some_and(|(p, _)| *p == path);
         let max = room - egui::vec2(0.0, if details { 330.0 } else { 40.0 });
+        let max = max - egui::vec2(0.0, 28.0);
         let modal = egui::Modal::new(egui::Id::unique("zoom")).show(ui.ctx(), |ui| {
+            let bar = title_bar(ui, &name);
             match self.thumbs.texture_later(ui, &path, BIG, &name) {
                 Big::Ready(t) => {
                     let img = ui.add(
@@ -903,9 +1091,7 @@ impl App {
                 egui::vec2(width, ui.spacing().interact_size.y),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.label(RichText::new(&name).color(theme::DUST));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        close |= ui.button("Close").clicked();
                         let open = self.zoom_details.as_ref().is_some_and(|(p, _)| *p == path);
                         let label = if open { "Hide details" } else { "Details" };
                         if ui
@@ -934,6 +1120,7 @@ impl App {
                     picture_details(ui, job.as_ref(), &self.project);
                 });
             }
+            close |= close_corner(ui, bar);
         });
         if close || modal.should_close() {
             self.zoom = None;
@@ -1416,7 +1603,11 @@ impl App {
             title_row(ui, &r.to_string(), &mut self.form.title, "Add a title", 0.0);
         });
         ui.add_space(14.0);
-        let side = 300.0;
+        if self.in_cut_player(ui, s) {
+            ui.add_space(14.0);
+        }
+        // Wide enough for References and its image panel.
+        let side = 360.0;
         ui.horizontal_top(|ui| {
             let w = (ui.available_width() - side - 32.0).clamp(280.0, 620.0);
             ui.vertical(|ui| {
@@ -1427,23 +1618,30 @@ impl App {
             ui.vertical(|ui| {
                 ui.set_width(side);
                 self.facts(ui, s);
-                ui.add_space(12.0);
-                if ui.button("Add a shot after this one").clicked() {
-                    acts.push(Action::AddShot(r.chapter, Some(r.shot)));
-                }
+                ui.add_space(20.0);
+                self.references(ui, r, s, &mut acts);
             });
         });
         ui.add_space(20.0);
-        self.references(ui, r, s, &mut acts);
-        ui.add_space(12.0);
         ui.separator();
         ui.add_space(8.0);
         self.take_list(ui, r, s, &mut acts);
+        ui.add_space(20.0);
+        ui.separator();
+        ui.add_space(8.0);
+        if ui.button("Add a shot after this one").clicked() {
+            acts.push(Action::AddShot(r.chapter, Some(r.shot)));
+        }
         // These read the shot from disk, so what's typed goes first.
         if acts.iter().any(|a| {
             matches!(
                 a,
-                Action::AddShot(..) | Action::LeaveOut(..) | Action::SendAnchor(..)
+                Action::AddShot(..)
+                    | Action::LeaveOut(..)
+                    | Action::SendAnchor(..)
+                    | Action::MoveLine(..)
+                    | Action::PickRecording(..)
+                    | Action::DeleteRecording(..)
             )
         }) {
             self.flush();
@@ -1524,45 +1722,6 @@ impl App {
                 ui.set_width(ui.available_width());
                 self.lines(ui, r, s, acts);
             });
-    }
-
-    /// What's said in the shot, and when.
-    fn lines(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, acts: &mut Vec<Action>) {
-        let lines = heading(ui, "Lines").id;
-        ui.add_space(8.0);
-        let cast: Vec<String> = self
-            .film
-            .elements
-            .iter()
-            .filter(|(e, _)| e.kind == Kind::Cast)
-            .map(|(e, _)| e.handle.clone())
-            .collect();
-        if cast.is_empty() {
-            hint(
-                ui,
-                "Only cast speak, and there's no cast yet. Add some in Elements.",
-            );
-            return;
-        }
-        let f = &mut self.form;
-        if f.new.who.is_empty() {
-            f.new.who = s.lines.last().map_or(cast[0].clone(), |l| l.who.clone());
-        }
-        for (i, l) in f.lines.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                line_fields(ui, i, l, &cast, 80.0);
-                if remove_button(ui).clicked() {
-                    acts.push(Action::RemoveLine(r, i));
-                }
-            });
-        }
-        ui.horizontal(|ui| {
-            let text = line_fields(ui, usize::MAX, &mut f.new, &cast, 90.0).labelled_by(lines);
-            let enter = text.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui.button("Add line").clicked() || enter) && !f.new.text.trim().is_empty() {
-                acts.push(Action::AddLine(r, f.new.clone()));
-            }
-        });
     }
 
     /// Which recipe speaks the shot's lines.
@@ -1771,101 +1930,473 @@ impl App {
             hint(ui, "No takes yet.");
             return;
         }
-        let mut play = None;
-        let mut compare = None;
-        let mut open = None;
-        // Comparing makes sense while one take of this shot is up.
-        let single = self
-            .deck
-            .as_ref()
-            .filter(|d| d.players.len() == 1)
-            .map(|d| d.players[0].label.clone())
-            .filter(|l| l.starts_with(&format!("{r}#")));
-        egui::Grid::new("takes")
-            .num_columns(5)
-            .spacing(egui::vec2(20.0, 8.0))
-            .show(ui, |ui| {
-                for t in &self.takes {
-                    let selected = s.selected_take.as_deref() == Some(t.id.to_string().as_str());
-                    let n = t.number;
-                    if selected {
-                        ui.label(RichText::new(format!("• #{n}")).color(theme::TUNGSTEN))
-                            .on_hover_text("in the cut");
-                    } else {
-                        ui.label(RichText::new(format!("   #{n}")).color(theme::GRAPHITE));
-                    }
-                    let status = t.status();
-                    let color = match status {
-                        JobStatus::Done => theme::GRAPHITE,
-                        JobStatus::Failed => theme::FLAG,
-                        _ => theme::DUST,
-                    };
-                    ui.label(RichText::new(status.to_string()).color(color));
-                    let cost: Vec<String> = t
-                        .costs()
-                        .iter()
-                        .map(|c| format!("{} {}", money(c.amount), c.unit))
-                        .collect();
-                    ui.label(cost.join(" + "));
-                    let last = t.jobs.last();
-                    ui.weak(last.map_or(String::new(), |j| format!("{} {}", j.plugin, j.model)));
-                    match t.output().and_then(|j| {
-                        j.outputs
-                            .first()
-                            .map(|f| self.project.job_dir(j.id).join(f))
-                    }) {
-                        Some(file) => {
-                            let label = t.to_string();
+        let mut watch = None;
+        for t in &self.takes {
+            let selected = s.selected_take.as_deref() == Some(t.id.to_string().as_str());
+            let video = t.output().and_then(|j| {
+                let f = j.outputs.first()?;
+                Some((j.id, self.project.job_dir(j.id).join(f)))
+            });
+            let n = t.number;
+            let row = egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .corner_radius(4.0)
+                .fill(if selected {
+                    theme::TUNGSTEN.gamma_multiply(0.12)
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .stroke(if selected {
+                    egui::Stroke::new(1.0, theme::TUNGSTEN)
+                } else {
+                    egui::Stroke::NONE
+                })
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        match &video {
+                            Some((id, file)) => {
+                                let png = self
+                                    .project
+                                    .root
+                                    .join(".shotline/cache/posters")
+                                    .join(format!("{id}.png"));
+                                let name = format!("{t} poster");
+                                let make = (self.ff.as_ref(), &self.posters);
+                                if poster(ui, &mut self.thumbs, make, file, &png, &name).clicked() {
+                                    watch = Some(t.clone());
+                                }
+                            }
+                            None => {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(96.0, 54.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    2.0,
+                                    egui::Stroke::new(1.0, theme::LINE),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
                             ui.horizontal(|ui| {
-                                if act(ui, "Play", n).clicked() {
-                                    play = Some((label.clone(), file.clone()));
-                                }
-                                if single.as_ref().is_some_and(|l| *l != label)
-                                    && act(ui, "Compare", n).clicked()
-                                {
-                                    compare = Some((label.clone(), file.clone()));
-                                }
-                                if self.viewer.is_some()
-                                    && act(ui, "Open", n)
-                                        .on_hover_text("full size in mpv or ffplay")
-                                        .clicked()
-                                {
-                                    open = Some(file.clone());
-                                }
-                                if !selected
-                                    && act(ui, "Select", n)
-                                        .on_hover_text("use this take in the cut")
-                                        .clicked()
-                                {
-                                    acts.push(Action::Select(t.clone()));
+                                ui.label(
+                                    RichText::new(format!("#{n}"))
+                                        .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
+                                        .color(if selected {
+                                            theme::TUNGSTEN
+                                        } else {
+                                            theme::PAPER
+                                        }),
+                                );
+                                let status = t.status();
+                                if selected {
+                                    ui.label(RichText::new("in the cut").color(theme::TUNGSTEN));
+                                } else if status != JobStatus::Done {
+                                    let color = match status {
+                                        JobStatus::Failed => theme::FLAG,
+                                        _ => theme::DUST,
+                                    };
+                                    ui.label(RichText::new(status.to_string()).color(color));
                                 }
                             });
-                        }
-                        None => {
-                            let why = last.and_then(|j| j.error.clone()).unwrap_or_default();
-                            ui.weak(short(&why, 60));
-                        }
-                    }
-                    ui.end_row();
-                }
-            });
-        if let Some((label, f)) = play {
-            self.play(&label, &[f], true);
+                            let last = t.jobs.last();
+                            let cost: Vec<String> = t
+                                .costs()
+                                .iter()
+                                .map(|c| format!("{} {}", money(c.amount), c.unit))
+                                .collect();
+                            let about = last
+                                .map(|j| format!("{} {}", j.plugin, j.model))
+                                .into_iter()
+                                .chain((!cost.is_empty()).then(|| cost.join(" + ")))
+                                .collect::<Vec<_>>()
+                                .join("   ");
+                            ui.label(RichText::new(about).small().color(theme::DUST));
+                            if video.is_none()
+                                && let Some(why) = last.and_then(|j| j.error.clone())
+                            {
+                                ui.label(RichText::new(short(&why, 90)).small().color(theme::FLAG))
+                                    .on_hover_text(why);
+                            }
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if t.status().is_finished() {
+                                let rm = remove_button(ui);
+                                rm.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::Button,
+                                        true,
+                                        format!("Remove #{n}"),
+                                    )
+                                });
+                                if rm
+                                    .on_hover_text("off the list; what it cost stays in the ledger")
+                                    .clicked()
+                                {
+                                    acts.push(Action::RemoveTake(t.clone()));
+                                }
+                            }
+                            if video.is_some()
+                                && !selected
+                                && act(ui, "Use in the cut", n)
+                                    .on_hover_text("the take this shot plays in the cut")
+                                    .clicked()
+                            {
+                                acts.push(Action::Select(t.clone()));
+                            }
+                        });
+                    });
+                })
+                .response;
+            if !selected && row.hovered() {
+                ui.painter()
+                    .rect_filled(row.rect, 4.0, egui::Color32::from_white_alpha(6));
+            }
+            ui.add_space(4.0);
         }
-        if let Some((label, f)) = compare {
-            self.compare(&label, f);
-        }
-        if let Some(f) = open {
-            self.open_file(&f);
+        if let Some(t) = watch {
+            self.watch(ui, t);
         }
     }
 
     pub fn tab(&self) -> Tab {
         self.tab
     }
+
+    /// The selected take's video, stopped on its first frame until it's played. False when the
+    /// shot has none.
+    fn in_cut_player(&mut self, ui: &mut egui::Ui, s: &Shot) -> bool {
+        let take = s
+            .selected_take
+            .as_ref()
+            .and_then(|id| self.takes.iter().find(|t| t.id.to_string() == *id))
+            .cloned();
+        let Some(take) = take else {
+            if let Some((_, Some(d))) = &mut self.in_cut {
+                d.pause(self.audio.as_ref());
+            }
+            self.in_cut = None;
+            return false;
+        };
+        if self.in_cut.as_ref().map(|(id, _)| id.as_str()) != Some(take.id.to_string().as_str()) {
+            if let Some((_, Some(d))) = &mut self.in_cut {
+                d.pause(self.audio.as_ref());
+            }
+            let file = take
+                .output()
+                .and_then(|j| Some(self.project.job_dir(j.id).join(j.outputs.first()?)));
+            // Tried once, quietly: one that can't play isn't shown, and its popup says why.
+            let label = take.to_string();
+            let deck = match (file, &self.ff) {
+                (Some(f), Some(ff)) => Player::new(ff, &label, &[f]).ok(),
+                _ => None,
+            }
+            .map(|p| Deck::new(&label, p, true).in_popup(320.0));
+            if deck.is_some() {
+                self.audio();
+            }
+            self.in_cut = Some((take.id.to_string(), deck));
+        }
+        // The popup, or another player that's on, has the sound.
+        let audio = if self.watching.is_some() || self.deck.as_ref().is_some_and(Deck::is_playing) {
+            None
+        } else {
+            self.audio.as_ref()
+        };
+        let popup = self.watching.is_some() || self.deck.is_some();
+        let Some((_, Some(d))) = &mut self.in_cut else {
+            return false;
+        };
+        d.keys = !popup;
+        // As wide as the picture, so the slider lines up under it.
+        let wide = (d.players[0].aspect() * 320.0).max(320.0);
+        let (size, length) = (d.players[0].size(), d.players[0].duration());
+        ui.horizontal_top(|ui| {
+            let left = ui
+                .vertical(|ui| {
+                    ui.set_width(ui.available_width().min(wide));
+                    d.show(ui, audio);
+                })
+                .response
+                .rect;
+            ui.add_space(24.0);
+            ui.vertical(|ui| in_cut_details(ui, &take, size, length, left.bottom()));
+        });
+        true
+    }
+
+    /// Opens a take in its popup, stopped on its first frame.
+    fn watch(&mut self, ui: &egui::Ui, t: Take) {
+        // One sound device: the page's players give it up.
+        if let Some(d) = &mut self.deck {
+            d.pause(self.audio.as_ref());
+        }
+        if let Some((_, Some(d))) = &mut self.in_cut {
+            d.pause(self.audio.as_ref());
+        }
+        self.deck = None;
+        let file = t
+            .output()
+            .and_then(|j| Some(self.project.job_dir(j.id).join(j.outputs.first()?)));
+        let tall = ui.ctx().content_rect().height() * 0.55;
+        let deck = file
+            .and_then(|f| self.player(&t.to_string(), &[f]))
+            .map(|p| Deck::new(&t.to_string(), p, true).in_popup(tall));
+        self.watching = Some((t, deck));
+    }
+
+    fn watched(&mut self, ui: &mut egui::Ui) {
+        let Some((take, deck)) = &mut self.watching else {
+            return;
+        };
+        let wide = (ui.ctx().content_rect().width() * 0.6).clamp(360.0, 900.0);
+        let mut close = false;
+        let others: Vec<Take> = self
+            .takes
+            .iter()
+            .filter(|o| o.shot == take.shot && o.id != take.id && o.output().is_some())
+            .cloned()
+            .collect();
+        // Which take plays beside this one, if any.
+        let beside = deck
+            .as_ref()
+            .and_then(|d| d.players.get(1))
+            .map(|p| p.label.clone());
+        let mut pick: Option<Option<Take>> = None;
+        let modal = egui::Modal::new(egui::Id::unique("take")).show(ui.ctx(), |ui| {
+            ui.set_width(wide);
+            let bar = title_bar(ui, &take.to_string());
+            match deck {
+                Some(d) => close |= !d.show(ui, self.audio.as_ref()),
+                None => hint(ui, "can't play it"),
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if deck.is_some() && !others.is_empty() {
+                    let shown = beside
+                        .as_deref()
+                        .map_or("Compare with…".to_string(), |l| format!("beside {l}"));
+                    egui::ComboBox::from_id_salt("compare")
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            if beside.is_some() && ui.selectable_label(false, "Nothing").clicked() {
+                                pick = Some(None);
+                            }
+                            for o in &others {
+                                let l = o.to_string();
+                                if ui
+                                    .selectable_label(beside.as_deref() == Some(l.as_str()), &l)
+                                    .clicked()
+                                {
+                                    pick = Some(Some(o.clone()));
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("plays another take beside this one, in time with it")
+                        .widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Compare with")
+                        });
+                }
+            });
+            ui.add_space(6.0);
+            take_details(ui, take, &self.project);
+            close |= close_corner(ui, bar);
+        });
+        match pick {
+            Some(None) => {
+                if let Some((_, Some(d))) = &mut self.watching {
+                    d.alone();
+                }
+            }
+            Some(Some(o)) => {
+                let file = o
+                    .output()
+                    .and_then(|j| Some(self.project.job_dir(j.id).join(j.outputs.first()?)));
+                if let Some(f) = file
+                    && let Some(p) = self.player(&o.to_string(), &[f])
+                    && let Some((_, Some(d))) = &mut self.watching
+                {
+                    d.compare(p, self.audio.as_ref());
+                }
+            }
+            None => {}
+        }
+        if close || modal.should_close() {
+            if let Some((_, Some(d))) = &mut self.watching {
+                d.pause(self.audio.as_ref());
+            }
+            self.watching = None;
+        }
+    }
 }
 
-fn short(s: &str, n: usize) -> String {
+/// A take's still, taken from its video the first time it's shown. Clicking it opens the take.
+fn poster(
+    ui: &mut egui::Ui,
+    thumbs: &mut Thumbs,
+    (ff, making): (Option<&Ffmpeg>, &Arc<Mutex<HashSet<PathBuf>>>),
+    video: &Path,
+    png: &Path,
+    name: &str,
+) -> egui::Response {
+    let size = egui::vec2(96.0, 54.0);
+    let texture = if png.is_file() {
+        thumbs.texture(ui, png, THUMB, name)
+    } else {
+        if let Some(ff) = ff
+            && making.lock().unwrap().insert(png.to_path_buf())
+        {
+            let (ff, video, png) = (ff.clone(), video.to_path_buf(), png.to_path_buf());
+            let (making, ctx) = (making.clone(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let _ = ff.poster(&video, &png);
+                // Left in, a failed one isn't tried again every frame.
+                if png.is_file() {
+                    making.lock().unwrap().remove(&png);
+                }
+                ctx.request_repaint();
+            });
+        }
+        None
+    };
+    let r = match texture {
+        Some(t) => ui.add(
+            egui::Image::new(&t)
+                .max_size(size)
+                .corner_radius(2.0)
+                .alt_text(name)
+                .sense(egui::Sense::click()),
+        ),
+        None => {
+            let (rect, r) = ui.allocate_exact_size(size, egui::Sense::click());
+            ui.painter().rect_filled(rect, 2.0, theme::RACK);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, name));
+            r
+        }
+    };
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("click to watch it, with what went into it")
+}
+
+/// Beside the take in the cut: its size, length and model, and what it was asked for, as written
+/// and in English when that's what went.
+/// Ends level with `bottom`, the foot of the player; a long prompt scrolls.
+fn in_cut_details(ui: &mut egui::Ui, t: &Take, (w, h): (u32, u32), length: f64, bottom: f32) {
+    let video = t
+        .jobs
+        .iter()
+        .rev()
+        .find(|j| j.op == Op::VideoGenerate)
+        .or(t.jobs.last());
+    let row = |ui: &mut egui::Ui, k: &str, v: String| {
+        let l = ui.label(RichText::new(k).color(theme::DUST));
+        ui.label(RichText::new(v).color(theme::PAPER))
+            .labelled_by(l.id);
+        ui.end_row();
+    };
+    ui.label(
+        RichText::new(format!("#{} in the cut", t.number))
+            .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
+            .color(theme::TUNGSTEN),
+    );
+    ui.add_space(6.0);
+    egui::Grid::new("in cut")
+        .num_columns(2)
+        .spacing(egui::vec2(16.0, 6.0))
+        .show(ui, |ui| {
+            row(ui, "Size", format!("{w} × {h}"));
+            row(ui, "Length", format!("{length:.1} s"));
+            if let Some(j) = video {
+                row(ui, "Model", format!("{} · {}", j.plugin, j.model));
+            }
+        });
+    let Some(j) = video else {
+        return;
+    };
+    let block = |ui: &mut egui::Ui, title: &str, text: &str| {
+        ui.add_space(10.0);
+        caption(ui, title);
+        ui.add(egui::Label::new(text).selectable(true).wrap());
+    };
+    let room = (bottom - ui.cursor().top()).max(60.0);
+    egui::ScrollArea::vertical()
+        .id_salt("in cut prompt")
+        .max_height(room)
+        .auto_shrink([false, true])
+        .show(ui, |ui| match (&j.brief, &j.english) {
+            (Some(b), Some(e)) => {
+                block(ui, "Prompt", b);
+                block(ui, "In English", e);
+            }
+            (Some(b), None) => block(ui, "Prompt", b),
+            // Takes from before the prompt was kept as written.
+            _ => {
+                if let Some(p) = &j.prompt {
+                    block(ui, "Prompt the model got", p);
+                }
+            }
+        });
+}
+
+/// Every step of a take: what ran, what it cost and what it was sent.
+fn take_details(ui: &mut egui::Ui, t: &Take, p: &Project) {
+    egui::ScrollArea::vertical()
+        .max_height(240.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (i, j) in t.jobs.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(10.0);
+                }
+                let when = j
+                    .created
+                    .to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%b %-d %H:%M");
+                let cost = j
+                    .cost
+                    .as_ref()
+                    .map(|c| format!(" · {} {}", money(c.amount), c.unit))
+                    .unwrap_or_default();
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} · {} · {when}{cost}",
+                        j.op, j.plugin, j.model
+                    ))
+                    .color(theme::GRAPHITE),
+                );
+                if let Some(e) = &j.error {
+                    ui.add(egui::Label::new(RichText::new(e).color(theme::FLAG)).wrap());
+                }
+                if j.op == Op::AudioTts {
+                    if let Some(text) = &j.prompt {
+                        caption(ui, "Line");
+                        ui.add(egui::Label::new(text.as_str()).selectable(true).wrap());
+                    }
+                    continue;
+                }
+                if !j.inputs.is_empty() {
+                    let with: Vec<String> =
+                        j.inputs.iter().map(|i| p.rel(&p.root.join(i))).collect();
+                    hint(ui, &format!("With {}", with.join(", ")));
+                }
+                if let Some(e) = &j.english {
+                    caption(ui, "In English");
+                    ui.add(egui::Label::new(e.as_str()).selectable(true).wrap());
+                }
+                if let Some(text) = &j.prompt {
+                    caption(ui, "Prompt the model got");
+                    ui.add(egui::Label::new(text.as_str()).selectable(true).wrap());
+                }
+            }
+        });
+}
+
+pub(crate) fn short(s: &str, n: usize) -> String {
     let line = s.lines().next().unwrap_or("");
     if line.chars().count() <= n {
         line.to_string()
@@ -2007,8 +2538,76 @@ fn title_row(
 }
 
 /// The small label over a part of a shot.
+/// A small button drawn as an icon, lit on hover like any other button.
+pub(crate) fn icon_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, egui::Stroke),
+) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
+    if ui.is_rect_visible(rect) {
+        let v = ui.style().interact(&r);
+        if r.hovered() || r.is_pointer_button_down_on() {
+            ui.painter()
+                .rect_filled(rect, v.corner_radius, v.weak_bg_fill);
+        }
+        draw(
+            ui.painter(),
+            rect.shrink(7.0),
+            egui::Stroke::new(1.5, v.fg_stroke.color),
+        );
+    }
+    r
+}
+
+/// A popup's top bar: its name, and once the popup's width is known, the ✕ at the right. Call
+/// `title_bar` first and `close_corner` last, with what it returned.
+fn title_bar(ui: &mut egui::Ui, name: &str) -> egui::Rect {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().min(1.0), 24.0),
+        egui::Sense::hover(),
+    );
+    ui.painter().text(
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::TextStyle::Body.resolve(ui.style()),
+        theme::GRAPHITE,
+    );
+    ui.add_space(4.0);
+    rect
+}
+
+fn close_corner(ui: &mut egui::Ui, bar: egui::Rect) -> bool {
+    let at = egui::Rect::from_min_size(
+        egui::pos2(ui.min_rect().right() - 24.0, bar.top()),
+        egui::vec2(24.0, 24.0),
+    );
+    let mut over = ui.new_child(egui::UiBuilder::new().max_rect(at));
+    icon_button(&mut over, "Close", close_icon)
+        .on_hover_text("Close")
+        .clicked()
+}
+
+pub(crate) fn close_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    p.line_segment([s.left_top(), s.right_bottom()], stroke);
+    p.line_segment([s.right_top(), s.left_bottom()], stroke);
+}
+
+/// Two sheets, one over the other.
+fn copy_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let s = s.expand(1.0);
+    let back = egui::Rect::from_min_size(s.min, s.size() * 0.72);
+    let front = egui::Rect::from_min_max(s.max - s.size() * 0.72, s.max);
+    p.rect_stroke(back, 1.5, stroke, egui::StrokeKind::Middle);
+    p.rect_filled(front, 1.5, theme::RACK);
+    p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
+}
+
 /// The title of a framed section.
-fn heading(ui: &mut egui::Ui, text: &str) -> egui::Response {
+pub(crate) fn heading(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(
         RichText::new(text)
             .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
@@ -2048,42 +2647,8 @@ fn explained_field(
     .labelled_by(cap)
 }
 
-/// When a line starts, who says it and what. Returns the text box.
-fn line_fields(
-    ui: &mut egui::Ui,
-    i: usize,
-    l: &mut LineForm,
-    cast: &[String],
-    after: f32,
-) -> egui::Response {
-    ui.add(
-        egui::TextEdit::singleline(&mut l.at)
-            .hint_text(RichText::new("starts (s)").color(theme::DUST))
-            .desired_width(84.0),
-    )
-    .on_hover_text(
-        "When it starts, in seconds into the shot, e.g. 2.5. Left empty, it follows the line \
-         before.",
-    );
-    egui::ComboBox::from_id_salt(("who", i))
-        .selected_text(format!("@{}", l.who))
-        .width(96.0)
-        .show_ui(ui, |ui| {
-            for c in cast {
-                ui.selectable_value(&mut l.who, c.clone(), format!("@{c}"));
-            }
-        })
-        .response
-        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Who says it"));
-    ui.add(
-        egui::TextEdit::singleline(&mut l.text)
-            .hint_text(RichText::new("What they say").color(theme::DUST))
-            .desired_width(ui.available_width() - after),
-    )
-}
-
 /// What to do about something missing.
-fn hint(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).color(theme::DUST));
 }
 
@@ -2340,12 +2905,17 @@ fn top_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 // No fill of its own, so it lights up on hover like every other button.
-fn remove_button(ui: &mut egui::Ui) -> egui::Response {
+pub(crate) fn remove_button(ui: &mut egui::Ui) -> egui::Response {
     ui.button(RichText::new("Remove").small().color(theme::FLAG))
 }
 
 /// The one button that spends money: tungsten, and still lit on hover and press.
 pub(crate) fn spend_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    spend(ui, egui::Button::new(text))
+}
+
+/// A button in tungsten: this one spends.
+pub(crate) fn spend(ui: &mut egui::Ui, b: egui::Button) -> egui::Response {
     ui.scope(|ui| {
         let w = &mut ui.visuals_mut().widgets;
         for (state, fill) in [
@@ -2357,7 +2927,7 @@ pub(crate) fn spend_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
             state.bg_fill = fill;
             state.fg_stroke.color = theme::RACK;
         }
-        ui.button(text)
+        ui.add(b)
     })
     .inner
 }

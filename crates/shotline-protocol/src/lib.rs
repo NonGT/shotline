@@ -126,6 +126,13 @@ pub struct ModelInfo {
     pub start_frame_with_refs: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub audio_input: bool,
+    /// Audio only goes along with at least one reference image.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub audio_needs_image: bool,
+    /// Where the start frame can't go (with references, or alone with audio), it can be sent as
+    /// the first reference picture instead, with the prompt saying to open on it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub frame_as_reference: bool,
     /// Name of a prompts/models/<notes>.md template with per-model tweaks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -154,6 +161,18 @@ pub enum MediaKind {
 pub struct Reference {
     pub kind: MediaKind,
     pub path: PathBuf,
+    /// For a line's recording: who says it and the words, for models that take audio as a voice
+    /// to copy rather than as the soundtrack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said: Option<Said>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Said {
+    /// The speaker's name as the prompt has it.
+    pub who: String,
+    /// As written, delivery tags like "[shout]" included.
+    pub text: String,
 }
 
 /// Input to `quote` and `run`. Which fields matter depends on the operation.
