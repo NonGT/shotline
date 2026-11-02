@@ -124,6 +124,14 @@ fn edit_a_shot() {
     h.run();
     assert_eq!(p.shot(R).unwrap().transition, Transition::Continue);
 
+    // Lines show once they're to be spoken.
+    assert!(h.query_by_label("Add line").is_none());
+    h.get_by_role_and_label(Role::ComboBox, "Lines spoken")
+        .click();
+    h.run();
+    h.get_by_label("by the video model").click();
+    h.run();
+    h.run();
     let line = h.get_by_role_and_label(Role::TextInput, "Lines");
     line.focus();
     line.type_text("ไปกันเถอะ");
@@ -517,6 +525,13 @@ fn make_an_anchor_image() {
     assert!(wait_for(&mut h, |_| !anchors(&p).is_empty()));
     h.run();
     assert_eq!(anchors(&p).len(), 1);
+    // Done with, so it closes.
+    assert!(h.query_by_label("Get price").is_none());
+    h.get_by_label("Make image…").click();
+    h.run();
+    h.get_by_label("Close").click();
+    h.run();
+    assert!(h.query_by_label("Get price").is_none());
     // Undone like an image added from a file.
     h.get_by_label("Undo").click();
     h.run();

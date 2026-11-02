@@ -400,6 +400,7 @@ impl App {
         };
         match act {
             Ok(a) => {
+                self.maker = None;
                 self.flush();
                 self.apply(vec![a]);
             }
@@ -459,6 +460,7 @@ impl App {
                 m.make(ui.ctx(), host, &self.project.root, ask, cost);
             }
             (anchor::Wants::Zoom(p), _) => self.zoom = Some(p),
+            (anchor::Wants::Close, _) => self.maker = None,
             _ => {}
         }
     }
@@ -1504,7 +1506,30 @@ impl App {
             );
         }
         ui.add_space(14.0);
-        let lines = caption(ui, "Lines").id;
+        self.spoken(ui);
+        if self.form.recipe.is_none() {
+            match s.lines.len() {
+                0 => {}
+                1 => hint(ui, "It has a line, kept but not spoken."),
+                n => hint(ui, &format!("It has {n} lines, kept but not spoken.")),
+            }
+            return;
+        }
+        ui.add_space(8.0);
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(4.0)
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                self.lines(ui, r, s, acts);
+            });
+    }
+
+    /// What's said in the shot, and when.
+    fn lines(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, acts: &mut Vec<Action>) {
+        let lines = heading(ui, "Lines").id;
+        ui.add_space(8.0);
         let cast: Vec<String> = self
             .film
             .elements
@@ -1540,6 +1565,50 @@ impl App {
         });
     }
 
+    /// Which recipe speaks the shot's lines.
+    fn spoken(&mut self, ui: &mut egui::Ui) {
+        let l = caption(ui, "Lines spoken");
+        let f = &mut self.form;
+        ui.horizontal(|ui| {
+            // The film's own recipes too, unless they stand in for these.
+            let mut picks: Vec<(Option<String>, String)> = vec![
+                (None, "no".into()),
+                (Some(SPOKEN.into()), "by the video model".into()),
+                (Some(LIP_SYNCED.into()), "lip synced after".into()),
+            ];
+            for rc in self.project.config.recipes.keys() {
+                if rc != SPOKEN && rc != LIP_SYNCED {
+                    picks.push((Some(rc.clone()), format!("recipe {rc}")));
+                }
+            }
+            if let Some(rc) = &f.recipe
+                && !picks.iter().any(|(p, _)| p.as_ref() == Some(rc))
+            {
+                picks.push((Some(rc.clone()), format!("recipe {rc}")));
+            }
+            let now = picks
+                .iter()
+                .find(|(p, _)| *p == f.recipe)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_default();
+            egui::ComboBox::from_id_salt("recipe")
+                .selected_text(now)
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for (p, name) in picks {
+                        ui.selectable_value(&mut f.recipe, p, name);
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "by the video model: each line is made with the speaker's voice and sent \
+                     along for the video model to lip sync. Lip synced after: the video is \
+                     made as usual, then lip synced with WaveSpeed.",
+                )
+                .labelled_by(l.id);
+        });
+    }
+
     /// The shot's settings.
     fn facts(&mut self, ui: &mut egui::Ui, s: &Shot) {
         let models = self.video_models();
@@ -1558,44 +1627,6 @@ impl App {
                         .max_decimals(2)
                         .suffix(" s"),
                 );
-                ui.end_row();
-                let l = ui.weak("Lines spoken");
-                // The film's own recipes too, unless they stand in for these.
-                let mut picks: Vec<(Option<String>, String)> = vec![
-                    (None, "no".into()),
-                    (Some(SPOKEN.into()), "by the video model".into()),
-                    (Some(LIP_SYNCED.into()), "lip synced after".into()),
-                ];
-                for rc in self.project.config.recipes.keys() {
-                    if rc != SPOKEN && rc != LIP_SYNCED {
-                        picks.push((Some(rc.clone()), format!("recipe {rc}")));
-                    }
-                }
-                if let Some(rc) = &f.recipe
-                    && !picks.iter().any(|(p, _)| p.as_ref() == Some(rc))
-                {
-                    picks.push((Some(rc.clone()), format!("recipe {rc}")));
-                }
-                let now = picks
-                    .iter()
-                    .find(|(p, _)| *p == f.recipe)
-                    .map(|(_, n)| n.clone())
-                    .unwrap_or_default();
-                egui::ComboBox::from_id_salt("recipe")
-                    .selected_text(now)
-                    .width(150.0)
-                    .show_ui(ui, |ui| {
-                        for (p, name) in picks {
-                            ui.selectable_value(&mut f.recipe, p, name);
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "by the video model: each line is made with the speaker's voice and sent \
-                         along for the video model to lip sync. Lip synced after: the video is \
-                         made as usual, then lip synced with WaveSpeed.",
-                    )
-                    .labelled_by(l.id);
                 ui.end_row();
                 flags = shot_model(ui, f, &models, &film, s);
             });
@@ -1642,12 +1673,7 @@ impl App {
 
     /// The storyboard frame: a still the video starts on, and what it's made from.
     fn frame(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
-        ui.label(
-            RichText::new("Storyboard frame")
-                .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
-                .color(theme::PAPER),
-        )
-        .on_hover_text(
+        heading(ui, "Storyboard frame").on_hover_text(
             "The first frame of the video, to settle the framing on a cheap still before paying \
              for video. Optional.",
         );
@@ -1981,6 +2007,15 @@ fn title_row(
 }
 
 /// The small label over a part of a shot.
+/// The title of a framed section.
+fn heading(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.label(
+        RichText::new(text)
+            .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
+            .color(theme::PAPER),
+    )
+}
+
 fn caption(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(RichText::new(text).small().color(theme::DUST))
 }

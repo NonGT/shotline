@@ -98,6 +98,7 @@ pub(crate) enum Wants {
     Price(AnchorAsk),
     Make(AnchorAsk, String),
     Zoom(PathBuf),
+    Close,
 }
 
 impl Maker {
@@ -233,11 +234,17 @@ impl Maker {
         let busy = matches!(stage, Stage::Pricing | Stage::Making);
         let frame = matches!(self.target, For::Frame(_));
         // The page's own colour: on RAISED, buttons (RAISED too) would lose their edges.
-        egui::Frame::new()
+        // Room on the right for the close button.
+        let panel = egui::Frame::new()
             .fill(theme::BAY)
             .stroke(egui::Stroke::new(1.0, theme::LINE))
             .corner_radius(4.0)
-            .inner_margin(10.0)
+            .inner_margin(egui::Margin {
+                left: 10,
+                right: 34,
+                top: 10,
+                bottom: 10,
+            })
             .show(ui, |ui| {
                 ui.set_max_width(560.0);
                 ui.add_enabled_ui(!busy, |ui| {
@@ -383,6 +390,20 @@ impl Maker {
                     }
                 });
             });
+        let r = panel.response.rect;
+        let at = egui::Rect::from_min_size(
+            egui::pos2(r.right() - 30.0, r.top() + 6.0),
+            egui::vec2(24.0, 24.0),
+        );
+        let close = ui
+            .put(at, |ui: &mut egui::Ui| {
+                ui.add_enabled_ui(!busy, close_button).inner
+            })
+            .on_hover_text("Close")
+            .on_disabled_hover_text("still at it; it closes by itself once the image is made");
+        if close.clicked() {
+            wants = Wants::Close;
+        }
         wants
     }
 
@@ -564,4 +585,24 @@ impl Maker {
         }
         zoom
     }
+}
+
+/// A small ✕ that lights up on hover like any other button.
+fn close_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), "Close"));
+    if ui.is_rect_visible(rect) {
+        let v = ui.style().interact(&r);
+        if r.hovered() || r.is_pointer_button_down_on() {
+            ui.painter()
+                .rect_filled(rect, v.corner_radius, v.weak_bg_fill);
+        }
+        let s = rect.shrink(7.0);
+        let stroke = egui::Stroke::new(1.5, v.fg_stroke.color);
+        ui.painter()
+            .line_segment([s.left_top(), s.right_bottom()], stroke);
+        ui.painter()
+            .line_segment([s.right_top(), s.left_bottom()], stroke);
+    }
+    r
 }

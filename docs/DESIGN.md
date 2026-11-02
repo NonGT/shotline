@@ -281,7 +281,7 @@ video.generate, so its lines aren't spoken.
 Two come with every film, and a recipe of the same name in shotline.toml takes their place:
 `spoken` (tts, then video.generate with `audio = true`, the video model lip syncs) and
 `lip-synced` (tts, video.generate, then video.lipsync on wavespeed sync/lipsync-3). The app's
-"Lines spoken" row picks between them, none, and the film's own.
+"Lines spoken" dropdown above a shot's lines picks between them, none, and the film's own.
 
 ```toml
 [[recipe.talking]]
