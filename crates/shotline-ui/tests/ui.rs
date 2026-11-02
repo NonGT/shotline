@@ -1521,7 +1521,7 @@ fn plays_compares_and_plays_the_cut() {
         .is_some()));
     h.get_by_role_and_label(Role::ComboBox, "Compare with")
         .click();
-    wait(&mut h, 0.1);
+    assert!(wait_for(&mut h, |h| h.query_by_label("01-010#3").is_some()));
     h.get_by_label("01-010#3").click();
     // Beside it in the popup: its name under its picture, and both playing.
     assert!(wait_for(&mut h, |h| h
