@@ -305,6 +305,7 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
         warnings.push(format!("{} only takes whole seconds", spec.id));
     }
     check_size(spec, Some(&resolution), &aspect, &mut warnings);
+    let params = cfg.params_for(&plugin, &model, &ov.params);
 
     Ok(Built {
         shot: r,
@@ -315,7 +316,7 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
         duration,
         references,
         start_frame,
-        params: ov.params,
+        params,
         text: parts.join("\n\n"),
         warnings,
         cautions,

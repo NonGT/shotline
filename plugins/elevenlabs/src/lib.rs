@@ -39,6 +39,24 @@ pub fn models() -> Vec<ModelInfo> {
             id: (*id).into(),
             op: Op::AudioTts,
             voice_schema: Some(voice_schema(id)),
+            params_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "language_code": {
+                        "type": "string", "title": "Language",
+                        "description": "ISO 639-1, e.g. th, to hold the model to one language"
+                    },
+                    "apply_text_normalization": {
+                        "type": "string", "enum": ["auto", "on", "off"], "default": "auto",
+                        "title": "Spell out numbers",
+                        "description": "reads numbers, dates and the like as words"
+                    },
+                    "apply_language_text_normalization": {
+                        "type": "boolean", "default": false, "title": "Language normalization",
+                        "description": "helps pronunciation in some languages; slower"
+                    }
+                }
+            })),
             ..ModelInfo::default()
         })
         .collect()

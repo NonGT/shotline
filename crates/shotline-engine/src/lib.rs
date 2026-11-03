@@ -76,6 +76,16 @@ pub struct Plan {
     speakers: Vec<String>,
 }
 
+/// The film's options for a model, under the step's or shot's own, ready to send.
+pub fn film_params(
+    project: &Project,
+    plugin: &str,
+    model: &str,
+    over: &toml::Table,
+) -> serde_json::Map<String, serde_json::Value> {
+    to_json(&project.config.params_for(plugin, model, over))
+}
+
 fn to_json(t: &toml::Table) -> serde_json::Map<String, serde_json::Value> {
     match serde_json::to_value(t) {
         Ok(serde_json::Value::Object(m)) => m,
@@ -159,6 +169,12 @@ pub fn line_request(
             el.handle
         );
     };
+    let params = film_params(
+        project,
+        &plugin,
+        &model,
+        &step.map(|s| s.params.clone()).unwrap_or_default(),
+    );
     let mut v = json!({"settings": serde_json::to_value(&voice.settings)?});
     if let Some(id) = &voice.voice_id {
         v["voice_id"] = json!(id);
@@ -173,7 +189,7 @@ pub fn line_request(
             model,
             prompt: Some(line.text.clone()),
             voice: Some(v),
-            params: step.map(|s| to_json(&s.params)).unwrap_or_default(),
+            params,
             ..Request::default()
         },
     ))
@@ -299,9 +315,9 @@ pub async fn plan(
                 };
                 let mut req = Request {
                     op: op.clone(),
+                    params: film_params(project, &plugin, &model, &step.params),
                     model,
                     duration: Some(built.duration),
-                    params,
                     ..Request::default()
                 };
                 req.inputs

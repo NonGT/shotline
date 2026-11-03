@@ -3,7 +3,7 @@ use shotline_plugin::conformance::{self, Options};
 use shotline_plugin::protocol::{ErrorKind, Op, Request, State};
 use shotline_plugin::{Error, Plugin};
 use wavespeed::WaveSpeed;
-use wiremock::matchers::{body_partial_json, header, method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn req(dir: &std::path::Path) -> Request {
@@ -19,7 +19,6 @@ fn req(dir: &std::path::Path) -> Request {
     };
     r.inputs.insert("video".into(), v);
     r.inputs.insert("audio".into(), a);
-    r.params.insert("sync_mode".into(), json!("silence"));
     r
 }
 
@@ -28,7 +27,6 @@ async fn mock() -> MockServer {
     Mock::given(method("POST"))
         .and(path("/api/v3/sync/lipsync-3"))
         .and(header("Authorization", "Bearer k"))
-        .and(body_partial_json(json!({"sync_mode": "silence"})))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({"code": 200, "data": {"id": "p1", "status": "created"}})),

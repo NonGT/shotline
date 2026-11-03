@@ -205,3 +205,40 @@ fn format_is_set_without_touching_the_rest() {
     }
     assert_eq!(p.format(), f);
 }
+
+#[test]
+fn a_model_s_options_for_the_whole_film() {
+    let (dir, mut p) = new_project();
+    const H3: &str = "minimax/h3-max/reference-to-video";
+    p.set_param("fal", H3, "enable_safety_checker", Some(false.into()))
+        .unwrap();
+    p.set_param("fal", H3, "prompt_expansion_mode", Some("quality".into()))
+        .unwrap();
+    let text = fs::read_to_string(dir.path().join("shotline.toml")).unwrap();
+    assert!(
+        text.contains("[params.fal.\"minimax/h3-max/reference-to-video\"]"),
+        "{text}"
+    );
+    assert_eq!(p.config.name, "Forest");
+
+    // The shot's own wins.
+    let mut over = toml::Table::new();
+    over.insert("prompt_expansion_mode".into(), "disabled".into());
+    let t = p.config.params_for("fal", H3, &over);
+    assert_eq!(t["enable_safety_checker"].as_bool(), Some(false));
+    assert_eq!(t["prompt_expansion_mode"].as_str(), Some("disabled"));
+    assert!(
+        p.config
+            .params_for("venice", H3, &toml::Table::new())
+            .is_empty()
+    );
+
+    // Taken out, no empty tables stay behind.
+    p.set_param("fal", H3, "enable_safety_checker", None)
+        .unwrap();
+    p.set_param("fal", H3, "prompt_expansion_mode", None)
+        .unwrap();
+    assert!(p.config.params.is_empty());
+    let text = fs::read_to_string(dir.path().join("shotline.toml")).unwrap();
+    assert!(!text.contains("params"), "{text}");
+}

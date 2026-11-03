@@ -308,6 +308,23 @@ enum PluginCmd {
     Voices {
         name: String,
     },
+    /// Always use this program for the plugin, whatever PATH says (default: the one in use)
+    Pin {
+        name: String,
+        path: Option<PathBuf>,
+    },
+    /// Undo `pin`; PATH decides again
+    Unpin {
+        name: String,
+    },
+    /// Set one of a model's options for the whole film; without a value, take it out
+    Option {
+        plugin: String,
+        model: String,
+        key: String,
+        /// JSON (true, 3, "x") or plain text
+        value: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -559,6 +576,18 @@ struct Plugins;
 
 #[cfg(feature = "ui")]
 impl shotline_ui::Host for Plugins {
+    fn plugins(&self) -> (Vec<shotline_ui::PluginInfo>, Vec<String>) {
+        plugins::infos(&plugins::load())
+    }
+
+    fn pin(&self, name: &str, exec: &Path) -> Result<String> {
+        plugins::pin(&plugins::load(), name, Some(exec))
+    }
+
+    fn unpin(&self, name: &str) -> Result<String> {
+        plugins::unpin(name)
+    }
+
     fn voices(&self, plugin: &str) -> Result<Vec<shotline_core::protocol::VoiceInfo>> {
         plugins::voices(&plugins::load(), plugin)
     }
@@ -1196,6 +1225,22 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Plugin(PluginCmd::Voices { ref name }) => {
             plugins::print_voices(&plugins::load(), name)?
+        }
+        Cmd::Plugin(PluginCmd::Pin { ref name, ref path }) => {
+            println!("{}", plugins::pin(&plugins::load(), name, path.as_deref())?)
+        }
+        Cmd::Plugin(PluginCmd::Unpin { ref name }) => println!("{}", plugins::unpin(name)?),
+        Cmd::Plugin(PluginCmd::Option {
+            ref plugin,
+            ref model,
+            ref key,
+            ref value,
+        }) => {
+            let mut p = open()?;
+            println!(
+                "{}",
+                plugins::set_option(&mut p, plugin, model, key, value.as_deref())?
+            )
         }
         Cmd::Timeline { ref cmd } => {
             let p = open()?;

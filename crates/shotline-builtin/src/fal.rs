@@ -42,6 +42,7 @@ pub fn models() -> Vec<ModelInfo> {
         ref_image: Some("image {n}".into()),
         resolutions: resolutions.iter().map(|r| r.to_string()).collect(),
         aspects: IMAGE_ASPECTS.map(String::from).to_vec(),
+        params_schema: Some(image_options()),
         ..ModelInfo::default()
     };
     let mut models = vec![ModelInfo {
@@ -59,12 +60,46 @@ pub fn models() -> Vec<ModelInfo> {
         start_frame: true,
         start_frame_with_refs: true,
         audio_input: true,
+        params_schema: Some(h3_options()),
         ..ModelInfo::default()
     }];
     // fal prices pro per image without saying whether 2K or 4K cost more, so only 1K for now.
     models.push(image("fal-ai/nano-banana", &[]));
     models.push(image("fal-ai/nano-banana-pro", &["1K"]));
     models
+}
+
+/// What h3 lets you turn on and off. Fields shotline fills itself aren't here.
+fn h3_options() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "enable_safety_checker": {
+                "type": "boolean", "default": true, "title": "Safety checker",
+                "description": "fal's content check on the video"
+            },
+            "prompt_expansion_mode": {
+                "type": "string", "enum": ["disabled", "balanced", "quality"],
+                "default": "disabled", "title": "Prompt rewriting",
+                "description": "balanced and quality let the model rewrite the prompt first; \
+                                shotline sends disabled unless told otherwise"
+            }
+        }
+    })
+}
+
+/// Options that don't change the price; web search and more images per call would.
+fn image_options() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "safety_tolerance": {
+                "type": "string", "enum": ["1", "2", "3", "4", "5", "6"], "default": "4",
+                "title": "Safety tolerance",
+                "description": "1 blocks the most, 6 the least"
+            }
+        }
+    })
 }
 
 fn is_image(model: &str) -> bool {

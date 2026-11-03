@@ -54,6 +54,10 @@ Keys are never stored in the project, only read from the environment or `~/.conf
 The app's Settings lists the keys each installed plugin needs, writes them to that file (mode 600)
 and checks one works by asking the plugin for its balance, which is free.
 
+Plugins… (next to Settings in the menu) lists each plugin, where its program is, the copies on
+PATH that aren't used with a button to use one instead, the keys it's missing, and each model's
+options for the open film. Changes go into shotline.toml and can be undone.
+
 ## Shots
 
 ```toml
@@ -194,7 +198,16 @@ my Python experiments can be wrapped as they are. shotline starts it on demand a
 for the session.
 
 Found in `~/.config/shotline/plugins/<name>/` (with a `shotline-plugin.toml` naming the executable
-and protocol version) or as `shotline-plugin-<name>` on PATH.
+and protocol version) or as `shotline-plugin-<name>` on PATH. The first one on PATH wins; the rest
+are listed as not used, and `plugin pin` keeps one in the plugins folder so it wins over PATH.
+
+A model's options (`params_schema`) can be set for the whole film in shotline.toml, under the
+plugin and model. A shot's `[model.params]` or a recipe step's `params` win over them:
+
+```toml
+[params.fal."minimax/h3-max/reference-to-video"]
+enable_safety_checker = false
+```
 
 ```
 describe  -> name, version, protocol version, env vars it needs, and for each model:
@@ -260,7 +273,6 @@ model = "sync/lipsync-3"
 shot = "01-020"
 take = "01JBX9Q3T7K2M8V5N4R6P1W0YZ"
 inputs = ["01JBX9Q1...", "01JBX9Q2..."]   # other jobs, or project files
-params = { sync_mode = "silence" }
 status = "done"
 cost = { amount = 0.38, unit = "USD" }
 ```
@@ -301,7 +313,6 @@ audio = true                  # send the lines' audio along
 op = "video.lipsync"
 plugin = "wavespeed"
 model = "sync/lipsync-3"
-params = { sync_mode = "silence" }
 ```
 
 Before a take runs, every step is quoted and listed with the total, then it waits for a yes. All
@@ -456,6 +467,8 @@ shotline format [--aspect a] [--resolution r] [--duration s] [--plugin p] [--mod
 shotline story | style [--set text]
 shotline doctor
 shotline plugin ls | doctor <name> | balance [name] | voices <name>
+shotline plugin pin <name> [path] | unpin <name>
+shotline plugin option <plugin> <model> <key> [value]   # film-wide; no value takes it out
 shotline element add <kind> <name> [--handle h] [--desc ...]
 shotline element anchor <handle> (--file img | --generate [--prompt ..] [--ref file|url].. [--no-anchors] [--aspect a] [--resolution r] [--translate] [--plugin p] [--model m] [--yes])
 shotline element draft <handle> [--write] [--plugin p] [--model m] [--yes]

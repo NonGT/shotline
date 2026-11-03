@@ -1,7 +1,8 @@
 //! Finding external plugins and their descriptions.
 //!
 //! A plugin is either a folder `<home>/plugins/<name>/` with a `shotline-plugin.toml`, or an
-//! executable called `shotline-plugin-<name>` on PATH. A folder wins over PATH for the same name.
+//! executable called `shotline-plugin-<name>` on PATH. A folder wins over PATH for the same name,
+//! and an earlier PATH entry over a later one; the ones passed over are kept in `skipped`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -37,6 +38,8 @@ pub struct Found {
     pub exec: PathBuf,
     pub args: Vec<String>,
     pub source: Source,
+    /// Programs on PATH with the same name that aren't used.
+    pub skipped: Vec<PathBuf>,
 }
 
 /// Plugins found, plus problems with ones that couldn't be used.
@@ -75,6 +78,7 @@ pub fn discover(home: &Path, path_var: Option<&OsStr>) -> (Vec<Found>, Vec<Strin
             name: m.name,
             args: m.args,
             source: Source::Dir(dir),
+            skipped: vec![],
         });
     }
 
@@ -89,7 +93,11 @@ pub fn discover(home: &Path, path_var: Option<&OsStr>) -> (Vec<Found>, Vec<Strin
                 let Some(name) = plugin_name(&exec) else {
                     continue;
                 };
-                if found.iter().any(|f| f.name == name) {
+                if let Some(f) = found.iter_mut().find(|f| f.name == name) {
+                    // The same file twice on PATH isn't another copy.
+                    if f.exec != exec && !f.skipped.contains(&exec) {
+                        f.skipped.push(exec);
+                    }
                     continue;
                 }
                 found.push(Found {
@@ -97,6 +105,7 @@ pub fn discover(home: &Path, path_var: Option<&OsStr>) -> (Vec<Found>, Vec<Strin
                     exec,
                     args: vec![],
                     source: Source::Path,
+                    skipped: vec![],
                 });
             }
         }
@@ -104,8 +113,71 @@ pub fn discover(home: &Path, path_var: Option<&OsStr>) -> (Vec<Found>, Vec<Strin
     (found, problems)
 }
 
+/// A file that can be run; on Windows that's the .exe the name check asks for. Leaves out what
+/// sits next to programs, like cargo's `.d` files.
+fn runnable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    path.is_file()
+}
+
+/// Makes `<home>/plugins/<name>/` point at `exec`, so that one is used whatever PATH says.
+/// Only the manifest is written; the program stays where it is.
+pub fn pin(home: &Path, name: &str, exec: &Path) -> Result<PathBuf, String> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        return Err(format!("{name:?} isn't a plugin name"));
+    }
+    let exec = std::path::absolute(exec).map_err(|e| e.to_string())?;
+    if !exec.is_file() {
+        return Err(format!("{} isn't a file", exec.display()));
+    }
+    let dir = home.join("plugins").join(name);
+    if dir.exists() && !pinned(&dir) {
+        return Err(format!(
+            "{} is a plugin folder of its own; take it away first",
+            dir.display()
+        ));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut m = toml::Table::new();
+    m.insert("name".into(), name.into());
+    m.insert("exec".into(), exec.display().to_string().into());
+    m.insert("protocol".into(), i64::from(PROTOCOL_VERSION).into());
+    let text = toml::to_string(&m).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(MANIFEST), text).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Takes away a folder `pin` made; PATH decides again.
+pub fn unpin(home: &Path, name: &str) -> Result<(), String> {
+    let dir = home.join("plugins").join(name);
+    if !pinned(&dir) {
+        return Err(format!("{name} isn't pinned"));
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+}
+
+/// A folder holding only a manifest that points elsewhere, as `pin` makes them.
+pub fn pinned(dir: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let names: Vec<_> = rd.filter_map(|e| e.ok().map(|e| e.file_name())).collect();
+    if names.len() != 1 || names[0] != MANIFEST {
+        return false;
+    }
+    std::fs::read_to_string(dir.join(MANIFEST))
+        .ok()
+        .and_then(|t| toml::from_str::<Manifest>(&t).ok())
+        .is_some_and(|m| m.exec.is_absolute())
+}
+
 fn plugin_name(path: &Path) -> Option<String> {
-    if !path.is_file() {
+    if !runnable(path) {
         return None;
     }
     let file = path.file_name()?.to_str()?;
@@ -243,6 +315,16 @@ pub fn open(entry: &Entry, dotenv: &Path) -> Result<ProcessPlugin, String> {
 mod tests {
     use super::*;
 
+    /// An empty file that can be run.
+    fn program(p: &Path) {
+        std::fs::write(p, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
     #[test]
     fn dotenv() {
         let dir = tempfile::tempdir().unwrap();
@@ -274,8 +356,10 @@ mod tests {
         .unwrap();
         let exe = if cfg!(windows) { ".exe" } else { "" };
         for n in ["venice", "eleven"] {
-            std::fs::write(bin.path().join(format!("shotline-plugin-{n}{exe}")), "").unwrap();
+            program(&bin.path().join(format!("shotline-plugin-{n}{exe}")));
         }
+        // What cargo leaves next to a program isn't one.
+        std::fs::write(bin.path().join("shotline-plugin-venice.d"), "").unwrap();
         std::fs::write(bin.path().join("unrelated"), "").unwrap();
 
         let (found, problems) = discover(home.path(), Some(bin.path().as_os_str()));
@@ -286,5 +370,48 @@ mod tests {
         assert_eq!(found[1].source, Source::Path);
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("protocol 99"));
+        // The folder wins; the PATH copy is passed over and said so.
+        let on_path = bin.path().join(format!("shotline-plugin-venice{exe}"));
+        assert_eq!(found[0].skipped, [on_path]);
+    }
+
+    #[test]
+    fn earlier_on_path_wins_and_pinning_overrides_it() {
+        let home = tempfile::tempdir().unwrap();
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let exe = if cfg!(windows) { ".exe" } else { "" };
+        let file = format!("shotline-plugin-venice{exe}");
+        for d in [&a, &b] {
+            program(&d.path().join(&file));
+        }
+        let path = std::env::join_paths([a.path(), b.path(), a.path()]).unwrap();
+        let (found, _) = discover(home.path(), Some(&path));
+        assert_eq!(found[0].exec, a.path().join(&file));
+        assert_eq!(found[0].skipped, [b.path().join(&file)]);
+
+        let dir = pin(home.path(), "venice", &b.path().join(&file)).unwrap();
+        assert!(pinned(&dir));
+        let (found, _) = discover(home.path(), Some(&path));
+        assert_eq!(found[0].source, Source::Dir(dir.clone()));
+        assert_eq!(found[0].exec, b.path().join(&file));
+
+        unpin(home.path(), "venice").unwrap();
+        assert!(!dir.exists());
+        assert_eq!(
+            discover(home.path(), Some(&path)).0[0].exec,
+            a.path().join(&file)
+        );
+
+        // A folder someone made by hand is theirs.
+        let own = home.path().join("plugins/mine");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(
+            own.join(MANIFEST),
+            "name = \"mine\"\nexec = \"run.sh\"\nprotocol = 1\n",
+        )
+        .unwrap();
+        assert!(pin(home.path(), "mine", &a.path().join(&file)).is_err());
+        assert!(unpin(home.path(), "mine").is_err());
+        assert!(own.join(MANIFEST).is_file());
     }
 }

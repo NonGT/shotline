@@ -28,6 +28,7 @@ pub enum MenuCommand {
     Paste,
     SelectAll,
     Settings,
+    Plugins,
     Quit,
 }
 
@@ -47,6 +48,7 @@ pub struct Shell {
     dialog: Option<Form>,
     /// Settings, while open.
     keys_page: Option<Keys>,
+    plugins_page: Option<crate::plugins::Plugins>,
     /// Edit commands for egui, sent with the next frame.
     edits: Vec<MenuCommand>,
     /// The text box last typed in, which a click on the window menu takes focus from.
@@ -100,6 +102,7 @@ impl Shell {
             screen: Screen::Start(Form::new(here)),
             dialog: None,
             keys_page: None,
+            plugins_page: None,
             edits: vec![],
             typing: None,
             window_menu: cfg!(not(any(target_os = "macos", target_os = "windows"))),
@@ -188,6 +191,9 @@ impl Shell {
             MenuCommand::Settings => {
                 self.keys_page = Some(Keys::new(&self.user_dir, &self.plugins));
             }
+            MenuCommand::Plugins => {
+                self.plugins_page = Some(crate::plugins::Plugins::new(self.host.as_ref()));
+            }
             MenuCommand::Cut
             | MenuCommand::Copy
             | MenuCommand::Paste
@@ -250,6 +256,7 @@ impl Shell {
         {
             self.command(MenuCommand::Settings);
         }
+        self.plugins_window(ui);
         if let Some(k) = &mut self.keys_page {
             let (open, changed) = k.show(ui, self.host.clone());
             if changed && let Screen::Film(app) = &self.screen {
@@ -264,6 +271,53 @@ impl Shell {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.titled = title;
+        }
+    }
+
+    fn plugins_window(&mut self, ui: &mut egui::Ui) {
+        let Some(page) = &mut self.plugins_page else {
+            return;
+        };
+        let film = match &self.screen {
+            Screen::Film(app) => Some(app.project.config.clone()),
+            Screen::Start(_) => None,
+        };
+        let (open, asks) = page.show(ui, self.host.clone(), film.as_ref());
+        if std::mem::take(&mut page.changed) {
+            self.plugins = page.descriptions();
+            if let Screen::Film(app) = &mut self.screen {
+                app.set_plugins(self.plugins.clone(), self.host.clone());
+            }
+        }
+        if !open {
+            self.plugins_page = None;
+        }
+        let mut keys = false;
+        let mut acts = vec![];
+        for a in asks {
+            match a {
+                crate::plugins::Ask::Keys => keys = true,
+                crate::plugins::Ask::Param {
+                    plugin,
+                    model,
+                    key,
+                    value,
+                } => acts.push(crate::edit::Action::Param {
+                    plugin,
+                    model,
+                    key,
+                    value,
+                }),
+            }
+        }
+        if let Screen::Film(app) = &mut self.screen
+            && !acts.is_empty()
+        {
+            app.apply(acts);
+        }
+        if keys {
+            self.plugins_page = None;
+            self.command(MenuCommand::Settings);
         }
     }
 
@@ -343,6 +397,7 @@ impl Shell {
                         item(ui, "Select All", "Ctrl+A", true, MenuCommand::SelectAll);
                         ui.separator();
                         item(ui, "Settings...", "Ctrl+,", true, MenuCommand::Settings);
+                        item(ui, "Plugins...", "", true, MenuCommand::Plugins);
                     });
                 });
             });

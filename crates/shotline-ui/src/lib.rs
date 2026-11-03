@@ -12,6 +12,7 @@ mod keys;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
 mod player;
+mod plugins;
 mod shoot;
 mod start;
 mod theme;
@@ -83,6 +84,12 @@ struct Film {
 
 /// What the app asks of installed plugins. The CLI provides it; the app calls it off the UI thread.
 pub trait Host: Send + Sync {
+    /// The installed plugins, and problems with ones that couldn't be used.
+    fn plugins(&self) -> (Vec<PluginInfo>, Vec<String>);
+    /// Saves `exec` as the plugin's program in the user's plugins folder. Returns a line about it.
+    fn pin(&self, name: &str, exec: &Path) -> anyhow::Result<String>;
+    /// Takes that away again; PATH decides.
+    fn unpin(&self, name: &str) -> anyhow::Result<String>;
     fn voices(&self, plugin: &str) -> anyhow::Result<Vec<VoiceInfo>>;
     /// What's left on the account, said in a line. It costs nothing, so it checks a key.
     fn balance(&self, plugin: &str) -> anyhow::Result<String>;
@@ -119,6 +126,30 @@ pub trait Host: Send + Sync {
         translate: bool,
         on: &mut dyn FnMut(String),
     ) -> anyhow::Result<String>;
+}
+
+/// One installed plugin as the Plugins window shows it.
+#[derive(Clone, Debug)]
+pub struct PluginInfo {
+    pub name: String,
+    pub runs: Runs,
+    /// Programs of the same name on PATH that aren't used.
+    pub skipped: Vec<PathBuf>,
+    pub description: Result<Description, String>,
+    /// Keys it needs that aren't set.
+    pub missing: Vec<String>,
+}
+
+/// Where a plugin's program comes from.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Runs {
+    Builtin,
+    /// Found on PATH.
+    Path(PathBuf),
+    /// Kept in the user's plugins folder, pointing at this program.
+    Pinned(PathBuf),
+    /// A plugin folder of its own.
+    Folder(PathBuf),
 }
 
 /// A new image made by an image model: an element's anchor, or a picture for a shot.

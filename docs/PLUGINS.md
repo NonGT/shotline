@@ -20,8 +20,11 @@ args = []                   # optional
 protocol = 1
 ```
 
-A folder wins over PATH when both have the same name. `shotline plugin ls` shows what was found and
-`shotline plugin doctor <name>` checks it.
+A folder wins over PATH when both have the same name, and an earlier PATH entry over a later one.
+`shotline plugin ls` shows what was found, and the copies that weren't used, and
+`shotline plugin doctor <name>` checks it. `shotline plugin pin <name> [path]` writes a folder whose
+manifest points at that program (or the one in use), so it's used whatever PATH says;
+`shotline plugin unpin <name>` takes it away. The app's Plugins window does the same.
 
 ## Wire format
 
@@ -91,7 +94,10 @@ Model fields other than `id` and `op` are optional; leave out what doesn't apply
 - `frame_as_reference`: where the start frame can't go, shotline may send it as the first
   reference picture and ask in the prompt to open on it.
 - `notes`: name of a prompt template (`prompts/models/<notes>.md`) with per-model tweaks.
-- `params_schema`: JSON Schema for anything the model takes in `params`.
+- `params_schema`: JSON Schema (an object with `properties`) for the options the model takes in
+  `params`. The Plugins window shows a tick box for a boolean, a list for an `enum`, and a box to type
+  in for anything else, using `title`, `description` and `default`. Leave out what shotline fills in
+  itself, and options that change the price, since the quote wouldn't know.
 - `voice_schema`: for `audio.tts`, JSON Schema for the voice `settings` (an object with
   `properties`). The app shows a slider for a number with `minimum` and `maximum`, a list for an
   `enum`, a checkbox for a boolean and a text box for the rest, with `default` and `description`

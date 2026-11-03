@@ -60,6 +60,7 @@ fn request(p: &Project, what: ImageFor, m: &Make) -> Result<(String, Request)> {
                 said: None,
             })
             .collect(),
+        params: shotline_engine::film_params(p, &b.plugin, &b.model, &toml::Table::new()),
         ..Request::default()
     };
     Ok((b.plugin, req))

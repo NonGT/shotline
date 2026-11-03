@@ -10,7 +10,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{Description, ModelInfo, Op, Quote, VoiceInfo};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
-use shotline_ui::{AnchorAsk, App, Host, MenuCommand, Shell, Tab};
+use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
 fn film(dir: &Path) -> Project {
@@ -252,7 +252,73 @@ fn edit_the_story_and_add_shots() {
 /// Plugins as the app sees them: elevenlabs has two voices and 3.5 USD left.
 struct TestHost;
 
+/// What TestHost was asked to pin.
+static PINNED: std::sync::Mutex<Vec<(String, PathBuf)>> = std::sync::Mutex::new(vec![]);
+
 impl Host for TestHost {
+    /// fal built in with h3's options; venice on PATH with an older copy further along.
+    fn plugins(&self) -> (Vec<PluginInfo>, Vec<String>) {
+        let h3 = ModelInfo {
+            id: "minimax/h3-max/reference-to-video".into(),
+            op: Op::VideoGenerate,
+            params_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "enable_safety_checker": {"type": "boolean", "default": true, "title": "Safety checker"},
+                    "prompt_expansion_mode": {
+                        "type": "string", "enum": ["disabled", "balanced", "quality"],
+                        "default": "disabled", "title": "Prompt rewriting"
+                    }
+                }
+            })),
+            ..ModelInfo::default()
+        };
+        let d = |name: &str, models| Description {
+            name: name.into(),
+            version: "1".into(),
+            protocol: 1,
+            env: vec![],
+            models,
+        };
+        let pinned = PINNED.lock().unwrap().last().cloned();
+        let venice = match pinned {
+            Some((_, e)) => (Runs::Pinned(e), vec![]),
+            None => (
+                Runs::Path("/a/shotline-plugin-venice".into()),
+                vec![PathBuf::from("/b/shotline-plugin-venice")],
+            ),
+        };
+        (
+            vec![
+                PluginInfo {
+                    name: "fal".into(),
+                    runs: Runs::Builtin,
+                    skipped: vec![],
+                    description: Ok(d("fal", vec![h3])),
+                    missing: vec!["FAL_API_KEY".into()],
+                },
+                PluginInfo {
+                    name: "venice".into(),
+                    runs: venice.0,
+                    skipped: venice.1,
+                    description: Ok(d("venice", vec![])),
+                    missing: vec![],
+                },
+            ],
+            vec![],
+        )
+    }
+
+    fn pin(&self, name: &str, exec: &Path) -> anyhow::Result<String> {
+        PINNED.lock().unwrap().push((name.into(), exec.into()));
+        Ok(format!("{name} kept"))
+    }
+
+    fn unpin(&self, name: &str) -> anyhow::Result<String> {
+        PINNED.lock().unwrap().clear();
+        Ok(format!("{name} back to PATH"))
+    }
+
     fn voices(&self, plugin: &str) -> anyhow::Result<Vec<VoiceInfo>> {
         assert_eq!(plugin, "elevenlabs");
         let v = |id: &str, name: &str| VoiceInfo {
@@ -2243,4 +2309,63 @@ fn lines_dragged_into_order() {
         (s.lines[1].text.as_str(), s.lines[1].at),
         ("หนึ่ง", Some(1.0))
     );
+}
+
+#[test]
+fn plugins_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_plugins(vec![], Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    h.state_mut().command(MenuCommand::Plugins);
+    h.run();
+    h.get_by_label("built into shotline");
+    h.get_by_label("needs FAL_API_KEY");
+    h.get_by_label("Also found, not used:");
+    h.get_by_label("/b/shotline-plugin-venice");
+
+    // An option goes into the film, and undo takes it back out.
+    const H3: &str = "minimax/h3-max/reference-to-video";
+    let safety = format!("Safety checker for {H3}");
+    h.get_by_role_and_label(Role::CheckBox, &safety).click();
+    h.run();
+    let cfg = || Project::open(&p.root).unwrap().config;
+    assert_eq!(
+        cfg().params["fal"][H3]["enable_safety_checker"].as_bool(),
+        Some(false)
+    );
+    h.get_by_role_and_label(Role::ComboBox, &format!("Prompt rewriting for {H3}"))
+        .click();
+    h.run();
+    h.get_by_label("quality").click();
+    h.run();
+    assert_eq!(
+        cfg().params["fal"][H3]["prompt_expansion_mode"].as_str(),
+        Some("quality")
+    );
+    h.state_mut().command(MenuCommand::Undo);
+    h.run();
+    assert!(!cfg().params["fal"][H3].contains_key("prompt_expansion_mode"));
+    // Back to the default by hand.
+    h.get_by_label("Use default").click();
+    h.run();
+    assert!(cfg().params.is_empty());
+
+    // The copy further along PATH, kept.
+    h.get_by_label("Use this one").click();
+    h.run();
+    assert_eq!(
+        PINNED.lock().unwrap().last().unwrap().1,
+        PathBuf::from("/b/shotline-plugin-venice")
+    );
+    h.get_by_label("kept");
+    h.get_by_label("Let PATH decide").click();
+    h.run();
+    h.get_by_label("Also found, not used:");
 }

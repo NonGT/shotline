@@ -101,8 +101,12 @@ fn kinds(f: &Film) -> Vec<LedgerKind> {
 
 #[tokio::test]
 async fn a_good_take() {
-    let f = film("", Budgets::default()).await;
+    let mut f = film("", Budgets::default()).await;
+    // The film's options for the model go along, under the shot's own.
+    f.p.set_param("fake", "fake/video", "loud", Some(true.into()))
+        .unwrap();
     let plan = f.plan(R).await.unwrap();
+    assert_eq!(plan.steps[0].request.params["loud"], true);
     assert_eq!(plan.total, 0.4);
     assert_eq!(plan.steps.len(), 1);
     assert_eq!(plan.steps[0].request.references.len(), 2);

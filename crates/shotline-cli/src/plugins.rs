@@ -110,10 +110,70 @@ fn place(p: &Available) -> String {
     match &p.origin {
         Origin::Builtin => "built in".into(),
         Origin::External(e) => match &e.found.source {
+            Source::Dir(d) if discovery::pinned(d) => {
+                format!("{} (pinned)", e.found.exec.display())
+            }
             Source::Dir(d) => d.display().to_string(),
             Source::Path => e.found.exec.display().to_string(),
         },
     }
+}
+
+fn skipped(p: &Available) -> &[std::path::PathBuf] {
+    match &p.origin {
+        Origin::External(e) => &e.found.skipped,
+        Origin::Builtin => &[],
+    }
+}
+
+/// Makes the plugin always run `path`, or the program it runs now.
+pub fn pin(installed: &Installed, name: &str, path: Option<&Path>) -> Result<String> {
+    let exec = match path {
+        Some(p) => p.to_path_buf(),
+        None => match installed
+            .plugins
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| &p.origin)
+        {
+            Some(Origin::External(e)) => e.found.exec.clone(),
+            Some(Origin::Builtin) => bail!("{name} is built in; give the program to use"),
+            None => bail!("no plugin called {name}; `shotline plugin ls` shows what's installed"),
+        },
+    };
+    let dir = discovery::pin(&user_dir(), name, &exec).map_err(anyhow::Error::msg)?;
+    Ok(format!(
+        "{name} now always runs {} ({})",
+        exec.display(),
+        dir.display()
+    ))
+}
+
+pub fn unpin(name: &str) -> Result<String> {
+    discovery::unpin(&user_dir(), name).map_err(anyhow::Error::msg)?;
+    Ok(format!("{name} is found on PATH again"))
+}
+
+/// One of a model's options for the whole film, or taken out without a value.
+pub fn set_option(
+    p: &mut Project,
+    plugin: &str,
+    model: &str,
+    key: &str,
+    value: Option<&str>,
+) -> Result<String> {
+    let v = value.map(|s| {
+        serde_json::from_str::<serde_json::Value>(s)
+            .ok()
+            .and_then(|j| toml::Value::try_from(j).ok())
+            .unwrap_or_else(|| toml::Value::String(s.to_string()))
+    });
+    let said = v.as_ref().map(|v| v.to_string());
+    p.set_param(plugin, model, key, v)?;
+    Ok(match said {
+        Some(v) => format!("{plugin} {model}: {key} = {v}"),
+        None => format!("{plugin} {model}: {key} taken out"),
+    })
 }
 
 pub fn ls(installed: &Installed) {
@@ -125,10 +185,18 @@ pub fn ls(installed: &Installed) {
             Ok(d) => {
                 println!("{} {}  {}", d.name, d.version, place(p));
                 for m in &d.models {
-                    println!("  {:<18} {}", m.op, m.id);
+                    let opts = options(m);
+                    if opts.is_empty() {
+                        println!("  {:<18} {}", m.op, m.id);
+                    } else {
+                        println!("  {:<18} {}  options: {}", m.op, m.id, opts.join(", "));
+                    }
                 }
                 print_env(&d.env, &env_file);
             }
+        }
+        for s in skipped(p) {
+            println!("  not used: {}", s.display());
         }
     }
     if !installed
@@ -141,6 +209,49 @@ pub fn ls(installed: &Installed) {
             user_dir().join("plugins").display()
         );
     }
+}
+
+/// The option names a model's params schema lists.
+fn options(m: &shotline_core::protocol::ModelInfo) -> Vec<String> {
+    m.params_schema
+        .as_ref()
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.as_object())
+        .map(|p| p.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The plugins as the app's Plugins window shows them.
+#[cfg(feature = "ui")]
+pub fn infos(installed: &Installed) -> (Vec<shotline_ui::PluginInfo>, Vec<String>) {
+    use shotline_ui::{PluginInfo, Runs};
+    let env_file = dotenv();
+    let list = installed
+        .plugins
+        .iter()
+        .map(|p| {
+            let runs = match &p.origin {
+                Origin::Builtin => Runs::Builtin,
+                Origin::External(e) => match &e.found.source {
+                    Source::Dir(d) if discovery::pinned(d) => Runs::Pinned(e.found.exec.clone()),
+                    Source::Dir(d) => Runs::Folder(d.clone()),
+                    Source::Path => Runs::Path(e.found.exec.clone()),
+                },
+            };
+            let missing = match &p.description {
+                Ok(d) => discovery::resolve_env(&d.env, &env_file).1,
+                Err(_) => vec![],
+            };
+            PluginInfo {
+                name: p.name.clone(),
+                runs,
+                skipped: skipped(p).to_vec(),
+                description: p.description.clone(),
+                missing,
+            }
+        })
+        .collect();
+    (list, installed.problems.clone())
 }
 
 fn print_env(declared: &[String], env_file: &Path) {

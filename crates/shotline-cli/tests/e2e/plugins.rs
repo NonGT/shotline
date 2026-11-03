@@ -279,3 +279,81 @@ fn gitignore_keeps_job_files_but_not_media() {
     assert!(!ignored(&job.join("job.toml")));
     assert!(!ignored(&film.join("shotline.toml")));
 }
+
+#[test]
+fn copies_further_along_path_and_pinning() {
+    let tmp = TempDir::new().unwrap();
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    let file = format!("shotline-plugin-dummy{exe}");
+    for d in ["a", "b"] {
+        let f = tmp.child(d).child(&file);
+        f.write_binary(b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let path = std::env::join_paths([tmp.path().join("a"), tmp.path().join("b")]).unwrap();
+    let ls = || {
+        let out = shotline(&tmp)
+            .env("PATH", &path)
+            .args(["plugin", "ls"])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let b = tmp.path().join("b").join(&file);
+    assert!(
+        ls().contains(&format!("not used: {}", b.display())),
+        "{}",
+        ls()
+    );
+
+    shotline(&tmp)
+        .env("PATH", &path)
+        .args(["plugin", "pin", "dummy"])
+        .arg(&b)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dummy now always runs"));
+    let out = ls();
+    assert!(out.contains(&format!("{} (pinned)", b.display())), "{out}");
+    shotline(&tmp)
+        .args(["plugin", "unpin", "dummy"])
+        .assert()
+        .success();
+    assert!(!tmp.path().join(".home/plugins/dummy").exists());
+}
+
+#[test]
+fn a_model_option_for_the_film() {
+    let tmp = TempDir::new().unwrap();
+    shotline(&tmp).args(["init", "film"]).assert().success();
+    let film = tmp.path().join("film");
+    let h3 = "minimax/h3-max/reference-to-video";
+    shotline(&tmp)
+        .current_dir(&film)
+        .args([
+            "plugin",
+            "option",
+            "fal",
+            h3,
+            "enable_safety_checker",
+            "false",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("enable_safety_checker = false"));
+    let p = Project::open(&film).unwrap();
+    assert_eq!(
+        p.config.params["fal"][h3]["enable_safety_checker"].as_bool(),
+        Some(false)
+    );
+    shotline(&tmp)
+        .current_dir(&film)
+        .args(["plugin", "option", "fal", h3, "enable_safety_checker"])
+        .assert()
+        .success();
+    assert!(Project::open(&film).unwrap().config.params.is_empty());
+}

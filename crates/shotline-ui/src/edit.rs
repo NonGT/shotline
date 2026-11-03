@@ -206,6 +206,13 @@ pub(crate) enum Action {
     Story(String),
     Style(String),
     Format(Format),
+    /// One of a model's options for the whole film; None takes it out.
+    Param {
+        plugin: String,
+        model: String,
+        key: String,
+        value: Option<toml::Value>,
+    },
     AddChapter(String),
     /// A new shot at the end of the chapter, or after the given number.
     AddShot(u32, Option<u32>),
@@ -254,6 +261,7 @@ impl Action {
             Action::Story(_) => "the story".into(),
             Action::Style(_) => "the style".into(),
             Action::Format(_) => "the format".into(),
+            Action::Param { model, key, .. } => format!("{key} for {model}"),
             Action::AddChapter(t) => format!("chapter {t}"),
             Action::AddShot(..) => "a new shot".into(),
             Action::AddElement(n) => format!("new {}", n.kind),
@@ -317,7 +325,7 @@ impl Action {
                 .collect(),
             Action::Story(_) => vec![p.root.join("story.md")],
             Action::Style(_) => vec![p.root.join("style.md")],
-            Action::Format(_) => vec![p.root.join(CONFIG_FILE)],
+            Action::Format(_) | Action::Param { .. } => vec![p.root.join(CONFIG_FILE)],
             Action::SaveElement(el) => vec![p.element_file(el.kind, &el.handle)],
             Action::RemoveAnchor(_, f) => vec![f.clone()],
             Action::Timeline(_) | Action::AddTrack(_) => vec![p.root.join(TIMELINE_FILE)],
@@ -763,6 +771,20 @@ impl App {
             Action::Format(f) => {
                 Project::open(&p.root)?.set_format(&f)?;
                 format!("shots are now made at {} {}", f.aspect, f.resolution).into()
+            }
+            Action::Param {
+                plugin,
+                model,
+                key,
+                value,
+            } => {
+                let said = value.as_ref().map(|v| v.to_string());
+                Project::open(&p.root)?.set_param(&plugin, &model, &key, value)?;
+                match said {
+                    Some(v) => format!("{model}: {key} = {v}"),
+                    None => format!("{model}: {key} back to the default"),
+                }
+                .into()
             }
             Action::AddChapter(t) => {
                 let c = p.add_chapter(t.trim())?;

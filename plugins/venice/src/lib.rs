@@ -75,6 +75,15 @@ pub fn models() -> Vec<ModelInfo> {
         audio_input: true,
         audio_needs_image: true,
         frame_as_reference: true,
+        params_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "negative_prompt": {
+                    "type": "string", "title": "Leave out",
+                    "description": "what shouldn't be in the video"
+                }
+            }
+        })),
         ..ModelInfo::default()
     }];
     for id in TEXTS {
@@ -92,10 +101,28 @@ pub fn models() -> Vec<ModelInfo> {
             max_images: Some(*max),
             resolutions: resolutions.iter().map(|r| r.to_string()).collect(),
             aspects: IMAGE_ASPECTS.map(String::from).to_vec(),
+            params_schema: Some(image_options()),
             ..ModelInfo::default()
         });
     }
     models
+}
+
+/// Options that don't change the price; enhance_prompt and quality would.
+fn image_options() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "safe_mode": {
+                "type": "boolean", "default": true, "title": "Safe mode",
+                "description": "blurs images Venice takes for adult content"
+            },
+            "hide_watermark": {
+                "type": "boolean", "default": false, "title": "Hide watermark",
+                "description": "for images made without references; Venice may still add it"
+            }
+        }
+    })
 }
 
 pub struct Venice {
@@ -453,6 +480,10 @@ pub fn image_body(req: &Request) -> Result<(&'static str, Value, Vec<usize>)> {
         "/image/multi-edit"
     };
     for (k, v) in &req.params {
+        // Only /image/generate has a watermark to hide.
+        if k == "hide_watermark" && !images.is_empty() {
+            continue;
+        }
         b.insert(k.clone(), v.clone());
     }
     Ok((path, Value::Object(b), refs))

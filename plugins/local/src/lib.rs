@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Value, json};
 use shotline_plugin::protocol::{
     Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs, PROTOCOL_VERSION,
     PluginError, Quote, Request, State, Status,
@@ -46,11 +46,29 @@ pub fn models() -> Vec<ModelInfo> {
         ModelInfo {
             id: MINTERPOLATE.into(),
             op: Op::VideoInterpolate,
+            params_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "fps": {
+                        "type": "number", "minimum": 1, "title": "Frames a second",
+                        "description": "what to make it; twice the video's when not set"
+                    }
+                }
+            })),
             ..ModelInfo::default()
         },
         ModelInfo {
             id: LANCZOS.into(),
             op: Op::VideoUpscale,
+            params_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "scale": {
+                        "type": "number", "minimum": 1, "maximum": 4, "default": 2,
+                        "title": "Scale", "description": "how many times bigger"
+                    }
+                }
+            })),
             ..ModelInfo::default()
         },
     ];
@@ -58,6 +76,15 @@ pub fn models() -> Vec<ModelInfo> {
         m.push(ModelInfo {
             id: RIFE.into(),
             op: Op::VideoInterpolate,
+            params_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "rife_model": {
+                        "type": "string", "title": "RIFE model",
+                        "description": "a model folder name for rife-ncnn-vulkan -m"
+                    }
+                }
+            })),
             ..ModelInfo::default()
         });
     }

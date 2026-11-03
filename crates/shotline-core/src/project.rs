@@ -35,6 +35,27 @@ pub struct Config {
     pub image: ImageConfig,
     /// What drafts prompts from plot.
     pub text: TextConfig,
+    /// A model's options for every request of this film, by plugin then model, e.g.
+    /// `[params.fal."minimax/h3-max/reference-to-video"] enable_safety_checker = false`.
+    /// A shot's or a recipe step's own params win.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, BTreeMap<String, toml::Table>>,
+}
+
+impl Config {
+    /// The film's options for `model`, under `over`, which wins.
+    pub fn params_for(&self, plugin: &str, model: &str, over: &toml::Table) -> toml::Table {
+        let mut t = self
+            .params
+            .get(plugin)
+            .and_then(|m| m.get(model))
+            .cloned()
+            .unwrap_or_default();
+        for (k, v) in over {
+            t.insert(k.clone(), v.clone());
+        }
+        t
+    }
 }
 
 impl Default for Config {
@@ -53,6 +74,7 @@ impl Default for Config {
             prompt: PromptLayers::default(),
             image: ImageConfig::default(),
             text: TextConfig::default(),
+            params: BTreeMap::new(),
         }
     }
 }
@@ -151,7 +173,6 @@ fn builtin_recipe(name: &str) -> Option<Vec<Step>> {
             let mut sync = step(Op::VideoLipsync, false);
             sync.plugin = Some("wavespeed".into());
             sync.model = Some("sync/lipsync-3".into());
-            sync.params.insert("sync_mode".into(), "silence".into());
             Some(vec![
                 step(Op::AudioTts, false),
                 step(Op::VideoGenerate, false),
@@ -326,6 +347,42 @@ impl Project {
         self.reread()
     }
 
+    /// Sets one of a model's options for the whole film, or with None takes it out, leaving the
+    /// rest of shotline.toml as it was.
+    pub fn set_param(
+        &mut self,
+        plugin: &str,
+        model: &str,
+        key: &str,
+        value: Option<toml::Value>,
+    ) -> Result<()> {
+        let path = self.root.join(CONFIG_FILE);
+        let mut t: toml::Table = fsx::read_toml(&path)?;
+        let all = table(&mut t, "params");
+        let mine = table(all, plugin);
+        let opts = table(mine, model);
+        match value {
+            Some(v) => {
+                opts.insert(key.into(), v);
+            }
+            None => {
+                opts.remove(key);
+            }
+        }
+        // No empty tables left behind.
+        if opts.is_empty() {
+            mine.remove(model);
+        }
+        if mine.is_empty() {
+            all.remove(plugin);
+        }
+        if all.is_empty() {
+            t.remove("params");
+        }
+        fsx::write_toml(&path, &t)?;
+        self.reread()
+    }
+
     /// Opens the project containing `start`, looking upwards.
     pub fn discover(start: &Path) -> Result<Project> {
         let mut dir = Some(start);
@@ -449,6 +506,16 @@ fn strip_comments(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The table under `key`, made if it isn't there or isn't a table.
+fn table<'a>(t: &'a mut toml::Table, key: &str) -> &'a mut toml::Table {
+    if !t.get(key).is_some_and(toml::Value::is_table) {
+        t.insert(key.into(), toml::Value::Table(toml::Table::new()));
+    }
+    t.get_mut(key)
+        .and_then(toml::Value::as_table_mut)
+        .expect("just made")
 }
 
 #[cfg(test)]

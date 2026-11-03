@@ -191,6 +191,7 @@ async fn describe_is_cached_until_the_executable_changes() {
         exec: fake_exe(),
         args: vec![],
         source: Source::Path,
+        skipped: vec![],
     };
     let first = describe_all(vec![found.clone()], cache.path()).await;
     assert_eq!(first[0].description.as_ref().unwrap().name, "fake");
