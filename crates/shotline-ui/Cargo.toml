@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+doctest = false
+
 [dependencies]
 jiff = "0.2.38"
 anyhow = "1.0.104"

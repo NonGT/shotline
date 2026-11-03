@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+doctest = false
+
+[[bin]]
+name = "shotline-plugin-fake"
+path = "src/bin/shotline-plugin-fake.rs"
+test = false
+
 [dependencies]
 async-trait = "0.1.92"
 base64 = "0.23.1"

@@ -7,6 +7,7 @@ license.workspace = true
 [[bin]]
 name = "shotline"
 path = "src/main.rs"
+test = false
 
 [features]
 default = ["ui"]
