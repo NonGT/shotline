@@ -1529,6 +1529,8 @@ fn plays_compares_and_plays_the_cut() {
         .count()
         == 2));
     assert!(h.state().is_playing());
+    // The second player moves Pause; click it where it settles.
+    wait(&mut h, 0.3);
     h.get_by_label("Pause").click();
     assert!(wait_for(&mut h, |h| !h.state().is_playing()));
     h.get_by_label("Close").click();
