@@ -423,7 +423,7 @@ impl App {
                                 .color(theme::TUNGSTEN_LIT),
                         )
                         .stroke(egui::Stroke::new(1.5, theme::TUNGSTEN))
-                        .min_size(egui::vec2(140.0, 32.0)),
+                        .min_size(egui::vec2(200.0, 38.0)),
                     )
                     .on_hover_text("asks the price first; nothing is spent yet")
                     .on_disabled_hover_text(match elsewhere {

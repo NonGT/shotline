@@ -602,8 +602,9 @@ has recorded: this shot's first, other shots behind Show all, under chapter and 
 that stay put while the list scrolls. Each has play and delete; one another line sends says
 how many lines use it and can't be deleted, its ✕ turned into a way to that line's shot. New
 recording goes back to the words. Lines are dragged into order by their grip. Play the scene puts the picked recordings at
-their start times. Under Takes it says what
-might go wrong, shows the prompt as the model gets it, and Shoot a take… asks the price first and spends only on a second click, like `take`.
+their start times. A Shoot section above Takes says what might go wrong, shows the prompt as the
+model gets it, and has Shoot a take…, which asks the price first and spends only on a
+second click, like `take`.
 Each take shows a still from its video (kept in `.shotline/cache/posters/`); clicking it opens the
 take in a popup, stopped on its first frame, with every step's model, cost and prompt, and a
 Compare with dropdown that plays another take beside it in the popup. Each player also decodes a

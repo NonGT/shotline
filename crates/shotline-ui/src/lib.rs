@@ -1625,7 +1625,15 @@ impl App {
         ui.add_space(20.0);
         ui.separator();
         ui.add_space(8.0);
-        self.take_list(ui, r, s, &mut acts);
+        section(ui, "Shoot");
+        ui.add_space(4.0);
+        self.sent(ui, r);
+        ui.add_space(20.0);
+        self.shoot_row(ui, r);
+        ui.add_space(20.0);
+        ui.separator();
+        ui.add_space(8.0);
+        self.take_list(ui, s, &mut acts);
         ui.add_space(20.0);
         ui.separator();
         ui.add_space(8.0);
@@ -1671,7 +1679,7 @@ impl App {
             "Prompt",
             Some(
                 "What the video model is sent. The references, style and other notes are added \
-                 to it; see What the model gets under Takes.",
+                 to it; see What the model gets under Shoot.",
             ),
             &mut f.prompt,
             "What the video model is sent, naming elements as @handles",
@@ -1915,16 +1923,8 @@ impl App {
         }
     }
 
-    fn take_list(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, acts: &mut Vec<Action>) {
-        ui.label(
-            RichText::new("Takes")
-                .text_style(egui::TextStyle::Heading)
-                .color(theme::PAPER),
-        );
-        ui.add_space(4.0);
-        self.sent(ui, r);
-        ui.add_space(4.0);
-        self.shoot_row(ui, r);
+    fn take_list(&mut self, ui: &mut egui::Ui, s: &Shot, acts: &mut Vec<Action>) {
+        section(ui, "Takes");
         ui.add_space(6.0);
         if self.takes.is_empty() {
             hint(ui, "No takes yet.");
@@ -2604,6 +2604,15 @@ fn copy_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
     p.rect_stroke(back, 1.5, stroke, egui::StrokeKind::Middle);
     p.rect_filled(front, 1.5, theme::RACK);
     p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
+}
+
+/// The title of a part of a page, like Takes.
+fn section(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .text_style(egui::TextStyle::Heading)
+            .color(theme::PAPER),
+    );
 }
 
 /// The title of a framed section.
