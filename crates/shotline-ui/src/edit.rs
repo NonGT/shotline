@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use shotline_core::{
-    CONFIG_FILE, Element, Format, Kind, Project, Shot, ShotRef, TIMELINE_FILE, Take, Timeline,
-    Track, Transition, Voice,
+    CONFIG_FILE, Element, Format, Kind, ModelRef, Project, Shot, ShotRef, TIMELINE_FILE, Take,
+    Task, Timeline, Track, Transition, Voice,
 };
 
 use crate::App;
@@ -218,6 +218,8 @@ pub(crate) enum Action {
         key: String,
         value: Option<toml::Value>,
     },
+    /// The film's default model for a job; None takes it out where it can be.
+    Model(Task, Option<ModelRef>),
     AddChapter(String),
     /// A new shot at the end of the chapter, or after the given number.
     AddShot(u32, Option<u32>),
@@ -269,6 +271,7 @@ impl Action {
             Action::Style(_) => "the style".into(),
             Action::Format(_) => "the format".into(),
             Action::Param { model, key, .. } => format!("{key} for {model}"),
+            Action::Model(task, _) => format!("the {} model", task_name(*task)),
             Action::AddChapter(t) => format!("chapter {t}"),
             Action::AddShot(..) => "a new shot".into(),
             Action::AddElement(n) => format!("new {}", n.kind),
@@ -333,7 +336,9 @@ impl Action {
                 .collect(),
             Action::Story(_) => vec![p.root.join("story.md")],
             Action::Style(_) => vec![p.root.join("style.md")],
-            Action::Format(_) | Action::Param { .. } => vec![p.root.join(CONFIG_FILE)],
+            Action::Format(_) | Action::Param { .. } | Action::Model(..) => {
+                vec![p.root.join(CONFIG_FILE)]
+            }
             Action::SaveElement(el) => vec![p.element_file(el.kind, &el.handle)],
             Action::RemoveAnchor(el, f) => vec![f.clone(), p.element_file(el.kind, &el.handle)],
             Action::ForgetImage(id) => p
@@ -799,6 +804,14 @@ impl App {
                 }
                 .into()
             }
+            Action::Model(task, to) => {
+                Project::open(&p.root)?.set_model(task, to.as_ref())?;
+                match to {
+                    Some(m) => format!("{} with {} · {}", task_name(task), m.plugin, m.model),
+                    None => format!("no {} model of its own", task_name(task)),
+                }
+                .into()
+            }
             Action::AddChapter(t) => {
                 let c = p.add_chapter(t.trim())?;
                 Done {
@@ -1006,6 +1019,19 @@ fn restore(step: &Step, back: bool) -> anyhow::Result<()> {
 fn video_model(s: &Shot) -> Option<(String, String)> {
     let m = s.model.as_ref()?;
     Some((m.plugin.clone()?, m.id.clone()?))
+}
+
+/// What a job is called in messages and on the Default Models page.
+pub(crate) fn task_name(t: Task) -> &'static str {
+    match t {
+        Task::Translate => "translating",
+        Task::Draft => "drafting",
+        Task::Voice => "voice",
+        Task::Image => "image",
+        Task::Video => "video",
+        Task::LipSync => "lip sync",
+        Task::Assistant => "assistant",
+    }
 }
 
 #[cfg(test)]

@@ -9,11 +9,13 @@ use eframe::egui::{self, RichText};
 use serde_json::Value;
 use shotline_core::dotenv;
 use shotline_core::protocol::ModelInfo;
+use shotline_core::{ModelRef, Task};
 
-use crate::edit::Action;
+use crate::edit::{Action, task_name};
 use crate::{Host, PluginInfo, Runs, hint, short, theme};
 
 type Params = BTreeMap<String, BTreeMap<String, toml::Table>>;
+type Models = BTreeMap<Task, Option<ModelRef>>;
 
 /// Where a key's value comes from.
 #[derive(Clone, PartialEq)]
@@ -52,8 +54,8 @@ enum Check {
 #[derive(Default)]
 pub(crate) struct Done {
     pub open: bool,
-    /// The film's model options that changed, as one step to undo.
-    pub params: Vec<Action>,
+    /// The film's default models and model options that changed, as one step to undo.
+    pub film: Vec<Action>,
     pub keys_changed: bool,
     /// Which program a plugin runs from changed, so the plugin list is read again.
     pub plugins_changed: bool,
@@ -64,6 +66,10 @@ pub(crate) struct Prefs {
     list: Vec<PluginInfo>,
     problems: Vec<String>,
     page: usize,
+    /// Default Models is open rather than a plugin's page.
+    models_page: bool,
+    /// The film's default models as opened, and as changed; None with no film open.
+    models: Option<(Models, Models)>,
     /// By plugin, in the order it lists them.
     keys: BTreeMap<String, Vec<Key>>,
     /// The film's options as opened, and as changed; None with no film open.
@@ -92,6 +98,11 @@ impl Prefs {
             list: vec![],
             problems: vec![],
             page: 0,
+            models_page: false,
+            models: film.map(|c| {
+                let m: Models = Task::ALL.iter().map(|t| (*t, c.model_set(*t))).collect();
+                (m.clone(), m)
+            }),
             keys: BTreeMap::new(),
             params: film.map(|c| (c.params.clone(), c.params.clone())),
             pins: BTreeMap::new(),
@@ -155,6 +166,7 @@ impl Prefs {
         self.keys.values().flatten().any(|k| k.change().is_some())
             || !self.pins.is_empty()
             || self.params.as_ref().is_some_and(|(was, now)| was != now)
+            || self.models.as_ref().is_some_and(|(was, now)| was != now)
     }
 
     /// Writes the keys and the kept programs; the film's options go back to the app.
@@ -182,8 +194,15 @@ impl Prefs {
                 done.plugins_changed = true;
             }
         }
+        if let Some((was, now)) = &self.models {
+            for (t, m) in now {
+                if was.get(t) != Some(m) {
+                    done.film.push(Action::Model(*t, m.clone()));
+                }
+            }
+        }
         if let Some((was, now)) = &self.params {
-            done.params = param_changes(was, now);
+            done.film.extend(param_changes(was, now));
         }
         if done.keys_changed || done.plugins_changed {
             self.read(host);
@@ -238,7 +257,9 @@ impl Prefs {
                             for p in &self.problems {
                                 ui.label(RichText::new(p).color(theme::FLAG));
                             }
-                            if self.list.is_empty() {
+                            if self.models_page {
+                                self.models_page(ui);
+                            } else if self.list.is_empty() {
                                 hint(ui, "No plugins found.");
                             } else {
                                 check = self.page(ui);
@@ -302,14 +323,8 @@ impl Prefs {
                     }
                     Ok(_) => None,
                 };
-                let mut text = RichText::new(&p.name);
-                if i == self.page {
-                    text = text.color(theme::PAPER);
-                }
-                let r = ui.add(
-                    egui::Button::selectable(i == self.page, text)
-                        .min_size(egui::vec2(170.0, 24.0)),
-                );
+                let on = i == self.page && !self.models_page;
+                let r = side_item(ui, on, &p.name);
                 let r = match &trouble {
                     Some(t) => {
                         let at = egui::pos2(r.rect.right() - 10.0, r.rect.center().y);
@@ -320,7 +335,41 @@ impl Prefs {
                 };
                 if r.clicked() {
                     self.page = i;
+                    self.models_page = false;
                 }
+            }
+            ui.add_space(12.0);
+            ui.label(RichText::new("This film").small().color(theme::DUST));
+            ui.add_space(2.0);
+            if side_item(ui, self.models_page, "Default Models").clicked() {
+                self.models_page = true;
+            }
+        });
+    }
+
+    /// Which model the film uses for each job, with how each is charged.
+    fn models_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Default Models")
+                .text_style(egui::TextStyle::Heading)
+                .color(theme::PAPER),
+        );
+        ui.add_space(8.0);
+        let Some((_, now)) = &mut self.models else {
+            hint(ui, "Each film picks its own; open one to choose them.");
+            return;
+        };
+        let about = "This film's, saved in its shotline.toml. Where a shot, a voice or a panel \
+                     picks its own, that wins; the price shown is a guide, the quote before \
+                     anything is spent is what counts.";
+        let list = &self.list;
+        group(ui, "For each job", about, |ui| {
+            for (i, t) in Task::ALL.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(10.0);
+                }
+                let pick = now.get_mut(t).expect("every task");
+                task_row(ui, list, *t, pick);
             }
         });
     }
@@ -758,4 +807,151 @@ fn control(
         // Changed from elsewhere, e.g. Use default.
         *text = saved;
     }
+}
+
+/// An entry in the list of pages.
+fn side_item(ui: &mut egui::Ui, on: bool, name: &str) -> egui::Response {
+    let mut text = RichText::new(name);
+    if on {
+        text = text.color(theme::PAPER);
+    }
+    ui.add(egui::Button::selectable(on, text).min_size(egui::vec2(170.0, 24.0)))
+}
+
+/// What a job is for, shown under its name.
+fn task_about(t: Task) -> &'static str {
+    match t {
+        Task::Translate => "puts what's typed into English, e.g. the tick box under a prompt",
+        Task::Draft => "writes a shot's prompt from its plot",
+        Task::Voice => {
+            "speaks the lines of a voice on this plugin that names no model, and is what a new \
+             voice starts on"
+        }
+        Task::Image => "anchors, a shot's pictures and storyboard frames",
+        Task::Video => "a shot's takes, unless the shot picks its own model",
+        Task::LipSync => "the lip-synced recipe, after the video is made",
+        Task::Assistant => "for an assistant in the app; not built yet, so nothing uses it",
+    }
+}
+
+/// What leaving it unset means.
+fn task_none(t: Task) -> String {
+    match t {
+        Task::Translate => "same as drafting".into(),
+        Task::Voice => "none, each voice names its own".into(),
+        Task::LipSync => format!(
+            "built in: {} · {}",
+            shotline_core::LIPSYNC.0,
+            shotline_core::LIPSYNC.1
+        ),
+        _ => "none".into(),
+    }
+}
+
+/// One job: the label on the left, the model list, and how the picked one is charged.
+fn task_row(ui: &mut egui::Ui, list: &[PluginInfo], t: Task, pick: &mut Option<ModelRef>) {
+    let name = {
+        let n = task_name(t);
+        let mut c = n.chars();
+        c.next()
+            .map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+    };
+    let models: Vec<(&PluginInfo, &ModelInfo)> = list
+        .iter()
+        .filter_map(|p| p.description.as_ref().ok().map(|d| (p, d)))
+        .flat_map(|(p, d)| {
+            d.models
+                .iter()
+                .filter(|m| m.op == t.op())
+                .map(move |m| (p, m))
+        })
+        .collect();
+    let found = pick.as_ref().and_then(|m| {
+        models
+            .iter()
+            .find(|(p, x)| p.name == m.plugin && x.id == m.model)
+    });
+    let none = t.optional() || t == Task::LipSync;
+    let shown = match (pick.as_ref(), found) {
+        (None, _) => task_none(t),
+        (Some(m), Some(_)) => format!("{} · {}", m.plugin, m.model),
+        (Some(m), None) => format!("{} · {} (not installed)", m.plugin, m.model),
+    };
+    ui.horizontal(|ui| {
+        label(ui, &name, task_about(t));
+        let r = egui::ComboBox::from_id_salt(("default model", t as u8))
+            .selected_text(&shown)
+            .width(380.0)
+            .height(420.0)
+            .show_ui(ui, |ui| {
+                ui.set_min_width(420.0);
+                if none && ui.selectable_label(pick.is_none(), task_none(t)).clicked() {
+                    *pick = None;
+                }
+                for (p, m) in &models {
+                    let on = pick
+                        .as_ref()
+                        .is_some_and(|x| x.plugin == p.name && x.model == m.id);
+                    let mut job = egui::text::LayoutJob::default();
+                    let style = ui.style();
+                    RichText::new(format!("{} · {}", p.name, m.id))
+                        .color(theme::PAPER)
+                        .append_to(
+                            &mut job,
+                            style,
+                            egui::FontSelection::Default,
+                            egui::Align::Min,
+                        );
+                    RichText::new(format!("\n{}", price_of(m)))
+                        .small()
+                        .color(theme::DUST)
+                        .append_to(
+                            &mut job,
+                            style,
+                            egui::FontSelection::Default,
+                            egui::Align::Min,
+                        );
+                    if ui.selectable_label(on, job).clicked() {
+                        *pick = Some(ModelRef::new(&p.name, &m.id));
+                    }
+                }
+                if models.is_empty() {
+                    ui.weak(format!("no installed plugin does {}", t.op()));
+                }
+            });
+        r.response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name));
+    });
+    // How it's charged, and anything in the way of using it.
+    let mut notes = vec![];
+    match found {
+        Some((p, m)) => {
+            notes.push((price_of(m).to_string(), theme::GRAPHITE));
+            if !p.missing.is_empty() {
+                notes.push((format!("needs {}", p.missing.join(", ")), theme::FLAG));
+            }
+        }
+        None if pick.is_some() => notes.push((
+            "its plugin isn't installed, so this won't work".into(),
+            theme::FLAG,
+        )),
+        None => {}
+    }
+    if notes.is_empty() {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(LABEL + ui.spacing().item_spacing.x);
+        ui.vertical(|ui| {
+            for (n, c) in notes {
+                ui.label(RichText::new(n).small().color(c));
+            }
+        });
+    });
+}
+
+fn price_of(m: &ModelInfo) -> &str {
+    m.price
+        .as_deref()
+        .unwrap_or("the plugin doesn't say; see the quote")
 }

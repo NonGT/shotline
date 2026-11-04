@@ -323,6 +323,22 @@ model = "fake/lipsync"
 }
 
 #[tokio::test]
+async fn a_voice_without_a_model_takes_the_film_s() {
+    let mut f = talking("", Budgets::default()).await;
+    let mut el = f.p.element("paka").unwrap();
+    el.voice.as_mut().unwrap().model = None;
+    f.p.save_element(&el).unwrap();
+    let line = f.p.shot(R).unwrap().lines[0].clone();
+    assert!(shotline_engine::line_request(&f.p, None, &line).is_err());
+    // Only a model on the voice's own plugin counts.
+    f.p.config.tts = Some(shotline_core::ModelRef::new("other", "x"));
+    assert!(shotline_engine::line_request(&f.p, None, &line).is_err());
+    f.p.config.tts = Some(shotline_core::ModelRef::new("fake", "fake/tts"));
+    let (plugin, req) = shotline_engine::line_request(&f.p, None, &line).unwrap();
+    assert_eq!((plugin.as_str(), req.model.as_str()), ("fake", "fake/tts"));
+}
+
+#[tokio::test]
 async fn a_recipe_feeds_each_step_into_the_next() {
     let f = talking("", Budgets::default()).await;
     let plan = f.plan(R).await.unwrap();

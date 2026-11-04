@@ -1,6 +1,6 @@
 use std::fs;
 
-use shotline_core::{Format, Kind, Project, Shot, ShotRef, Transition};
+use shotline_core::{Format, Kind, ModelRef, Project, Shot, ShotRef, Task, Transition};
 use tempfile::TempDir;
 
 fn new_project() -> (TempDir, Project) {
@@ -227,6 +227,53 @@ fn format_is_set_without_touching_the_rest() {
         assert!(p.set_format(&bad).is_err());
     }
     assert_eq!(p.format(), f);
+}
+
+#[test]
+fn default_models_for_each_job() {
+    let (dir, mut p) = new_project();
+    let cfg = |p: &Project, t| p.config.model_for(t).map(|m| (m.plugin, m.model));
+    // What a new film starts with.
+    assert_eq!(cfg(&p, Task::Translate), cfg(&p, Task::Draft));
+    assert_eq!(
+        cfg(&p, Task::LipSync),
+        Some(("wavespeed".into(), "sync/lipsync-3".into()))
+    );
+    assert_eq!(cfg(&p, Task::Voice), None);
+    assert_eq!(cfg(&p, Task::Assistant), None);
+
+    let m = |a: &str, b: &str| ModelRef::new(a, b);
+    p.set_model(Task::Video, Some(&m("venice", "h3"))).unwrap();
+    p.set_model(Task::Voice, Some(&m("elevenlabs", "eleven_v3")))
+        .unwrap();
+    p.set_model(Task::LipSync, Some(&m("other", "sync-2")))
+        .unwrap();
+    p.set_model(Task::Image, Some(&m("venice", "seedream-v4")))
+        .unwrap();
+    assert_eq!(
+        (p.config.plugin.as_str(), p.config.model.as_str()),
+        ("venice", "h3")
+    );
+    assert_eq!(p.config.image.model, "seedream-v4");
+    let text = fs::read_to_string(dir.path().join("shotline.toml")).unwrap();
+    assert!(text.contains("[tts]"), "{text}");
+
+    // The built-in lip-synced recipe uses the film's.
+    let s = Shot {
+        recipe: Some(shotline_core::LIP_SYNCED.into()),
+        ..Shot::default()
+    };
+    let sync = p.steps(&s).unwrap().pop().unwrap();
+    assert_eq!(sync.model.as_deref(), Some("sync-2"));
+
+    // Some can go back to unset; video and images can't.
+    p.set_model(Task::Voice, None).unwrap();
+    p.set_model(Task::LipSync, None).unwrap();
+    assert_eq!(cfg(&p, Task::Voice), None);
+    assert_eq!(cfg(&p, Task::LipSync).unwrap().1, "sync/lipsync-3");
+    assert!(p.set_model(Task::Video, None).is_err());
+    assert!(p.set_model(Task::Image, Some(&m("", "x"))).is_err());
+    assert_eq!(p.config.name, "Forest");
 }
 
 #[test]

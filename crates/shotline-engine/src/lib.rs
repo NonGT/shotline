@@ -163,9 +163,20 @@ pub fn line_request(
     let plugin = step
         .and_then(|s| s.plugin.clone())
         .unwrap_or(voice.plugin.clone());
-    let Some(model) = step.and_then(|s| s.model.clone()).or(voice.model.clone()) else {
+    // The film's voice model, when the voice is on that plugin and names none.
+    let film = project
+        .config
+        .tts
+        .clone()
+        .filter(|m| m.plugin == plugin)
+        .map(|m| m.model);
+    let Some(model) = step
+        .and_then(|s| s.model.clone())
+        .or(voice.model.clone())
+        .or(film)
+    else {
         bail!(
-            "@{}'s voice has no model and the recipe step names none",
+            "@{}'s voice has no model, and neither the recipe step nor the film names one",
             el.handle
         );
     };

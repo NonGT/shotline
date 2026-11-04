@@ -86,8 +86,18 @@ pub fn build_draft(
     model: Option<&str>,
 ) -> Result<BuiltDraft> {
     let cfg = &project.config;
-    let plugin = plugin.unwrap_or(&cfg.text.plugin).to_string();
-    let model = model.unwrap_or(&cfg.text.model).to_string();
+    // Putting words into English can have a model of its own.
+    let task = match what {
+        DraftFor::Shot(_, Draft::Translate) | DraftFor::Element(_) | DraftFor::Text(_) => {
+            crate::Task::Translate
+        }
+        DraftFor::Shot(..) => crate::Task::Draft,
+    };
+    let set = cfg
+        .model_for(task)
+        .expect("translating falls back to drafting");
+    let plugin = plugin.unwrap_or(&set.plugin).to_string();
+    let model = model.unwrap_or(&set.model).to_string();
     catalog.get(&plugin, &model, &Op::TextGenerate)?;
     let text = match what {
         DraftFor::Shot(r, how) => {

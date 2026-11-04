@@ -102,6 +102,8 @@ Model fields other than `id` and `op` are optional; leave out what doesn't apply
   `properties`). The app shows a slider for a number with `minimum` and `maximum`, a list for an
   `enum`, a checkbox for a boolean and a text box for the rest, with `default` and `description`
   shown until the user sets one.
+- `price`: how the model is charged, in a line, e.g. `$0.05 a second at 480P, x1.6 at 768P`.
+  Shown when picking a film's default models. A guide only; `quote` gives the real price.
 
 Operations:
 

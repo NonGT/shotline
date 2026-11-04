@@ -88,6 +88,9 @@ pub fn models() -> Vec<ModelInfo> {
             ..ModelInfo::default()
         });
     }
+    for x in &mut m {
+        x.price = Some("free, runs on this computer".into());
+    }
     m
 }
 

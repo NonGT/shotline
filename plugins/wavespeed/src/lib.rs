@@ -25,6 +25,7 @@ pub fn models() -> Vec<ModelInfo> {
     vec![ModelInfo {
         id: "sync/lipsync-3".into(),
         op: Op::VideoLipsync,
+        price: Some("per second of the video, about $0.135 a second".into()),
         ..ModelInfo::default()
     }]
 }

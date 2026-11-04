@@ -35,6 +35,18 @@ pub struct Config {
     pub image: ImageConfig,
     /// What drafts prompts from plot.
     pub text: TextConfig,
+    /// What puts typed prompts into English; the drafting model when not set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translate: Option<ModelRef>,
+    /// Speaks the lines of a voice that doesn't name its own model, with the same plugin.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tts: Option<ModelRef>,
+    /// For the built-in lip-synced recipe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lipsync: Option<ModelRef>,
+    /// Kept for the assistant; nothing uses it yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant: Option<ModelRef>,
     /// A model's options for every request of this film, by plugin then model, e.g.
     /// `[params.fal."minimax/h3-max/reference-to-video"] enable_safety_checker = false`.
     /// A shot's or a recipe step's own params win.
@@ -42,7 +54,108 @@ pub struct Config {
     pub params: BTreeMap<String, BTreeMap<String, toml::Table>>,
 }
 
+/// A plugin and one of its models.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRef {
+    pub plugin: String,
+    pub model: String,
+}
+
+impl ModelRef {
+    pub fn new(plugin: &str, model: &str) -> ModelRef {
+        ModelRef {
+            plugin: plugin.into(),
+            model: model.into(),
+        }
+    }
+}
+
+/// The jobs a film picks a default model for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Task {
+    Translate,
+    Draft,
+    Voice,
+    Image,
+    Video,
+    LipSync,
+    Assistant,
+}
+
+impl Task {
+    pub const ALL: [Task; 7] = [
+        Task::Translate,
+        Task::Draft,
+        Task::Voice,
+        Task::Image,
+        Task::Video,
+        Task::LipSync,
+        Task::Assistant,
+    ];
+
+    pub fn op(self) -> shotline_protocol::Op {
+        use shotline_protocol::Op;
+        match self {
+            Task::Translate | Task::Draft | Task::Assistant => Op::TextGenerate,
+            Task::Voice => Op::AudioTts,
+            Task::Image => Op::ImageGenerate,
+            Task::Video => Op::VideoGenerate,
+            Task::LipSync => Op::VideoLipsync,
+        }
+    }
+
+    /// Where it goes in shotline.toml; None for video, which is the film's own plugin and model.
+    fn table(self) -> Option<&'static str> {
+        match self {
+            Task::Translate => Some("translate"),
+            Task::Draft => Some("text"),
+            Task::Voice => Some("tts"),
+            Task::Image => Some("image"),
+            Task::Video => None,
+            Task::LipSync => Some("lipsync"),
+            Task::Assistant => Some("assistant"),
+        }
+    }
+
+    /// Whether it can be left unset.
+    pub fn optional(self) -> bool {
+        matches!(self, Task::Translate | Task::Voice | Task::Assistant)
+    }
+}
+
+/// Lip sync when the film doesn't pick one.
+pub const LIPSYNC: (&str, &str) = ("wavespeed", "sync/lipsync-3");
+
 impl Config {
+    /// The model set for `task`, or what it falls back to.
+    pub fn model_for(&self, task: Task) -> Option<ModelRef> {
+        match task {
+            Task::Translate => self
+                .translate
+                .clone()
+                .or_else(|| self.model_for(Task::Draft)),
+            Task::Draft => Some(ModelRef::new(&self.text.plugin, &self.text.model)),
+            Task::Voice => self.tts.clone(),
+            Task::Image => Some(ModelRef::new(&self.image.plugin, &self.image.model)),
+            Task::Video => Some(ModelRef::new(&self.plugin, &self.model)),
+            Task::LipSync => Some(
+                self.lipsync
+                    .clone()
+                    .unwrap_or_else(|| ModelRef::new(LIPSYNC.0, LIPSYNC.1)),
+            ),
+            Task::Assistant => self.assistant.clone(),
+        }
+    }
+
+    /// Only what's set for `task` itself, not what it falls back to.
+    pub fn model_set(&self, task: Task) -> Option<ModelRef> {
+        match task {
+            Task::Translate => self.translate.clone(),
+            Task::LipSync => self.lipsync.clone(),
+            t => self.model_for(t),
+        }
+    }
+
     /// The film's options for `model`, under `over`, which wins.
     pub fn params_for(&self, plugin: &str, model: &str, over: &toml::Table) -> toml::Table {
         let mut t = self
@@ -74,6 +187,10 @@ impl Default for Config {
             prompt: PromptLayers::default(),
             image: ImageConfig::default(),
             text: TextConfig::default(),
+            translate: None,
+            tts: None,
+            lipsync: None,
+            assistant: None,
             params: BTreeMap::new(),
         }
     }
@@ -155,7 +272,7 @@ pub const SPOKEN: &str = "spoken";
 /// ...or the video is made as usual and lip synced after.
 pub const LIP_SYNCED: &str = "lip-synced";
 
-fn builtin_recipe(name: &str) -> Option<Vec<Step>> {
+fn builtin_recipe(name: &str, cfg: &Config) -> Option<Vec<Step>> {
     use shotline_protocol::Op;
     let step = |op, audio| Step {
         op,
@@ -171,8 +288,9 @@ fn builtin_recipe(name: &str) -> Option<Vec<Step>> {
         ]),
         LIP_SYNCED => {
             let mut sync = step(Op::VideoLipsync, false);
-            sync.plugin = Some("wavespeed".into());
-            sync.model = Some("sync/lipsync-3".into());
+            let m = cfg.model_for(crate::Task::LipSync)?;
+            sync.plugin = Some(m.plugin);
+            sync.model = Some(m.model);
             Some(vec![
                 step(Op::AudioTts, false),
                 step(Op::VideoGenerate, false),
@@ -347,6 +465,35 @@ impl Project {
         self.reread()
     }
 
+    /// Sets the film's model for `task`, or with None takes it out (only where that's allowed),
+    /// leaving the rest of shotline.toml as it was.
+    pub fn set_model(&mut self, task: Task, to: Option<&ModelRef>) -> Result<()> {
+        if let Some(m) = to
+            && (m.plugin.trim().is_empty() || m.model.trim().is_empty())
+        {
+            return invalid("a model needs both its plugin and its name");
+        }
+        let path = self.root.join(CONFIG_FILE);
+        let mut t: toml::Table = fsx::read_toml(&path)?;
+        match (task.table(), to) {
+            (None, Some(m)) => {
+                t.insert("plugin".into(), m.plugin.trim().into());
+                t.insert("model".into(), m.model.trim().into());
+            }
+            (Some(k), Some(m)) => {
+                let x = table(&mut t, k);
+                x.insert("plugin".into(), m.plugin.trim().into());
+                x.insert("model".into(), m.model.trim().into());
+            }
+            (Some(k), None) if task.optional() || task == Task::LipSync => {
+                t.remove(k);
+            }
+            _ => return invalid(format!("{task:?} needs a model")),
+        }
+        fsx::write_toml(&path, &t)?;
+        self.reread()
+    }
+
     /// Sets one of a model's options for the whole film, or with None takes it out, leaving the
     /// rest of shotline.toml as it was.
     pub fn set_param(
@@ -409,7 +556,7 @@ impl Project {
         match self.config.recipes.get(name) {
             Some(steps) if !steps.is_empty() => Ok(steps.clone()),
             Some(_) => invalid(format!("recipe {name} has no steps")),
-            None => builtin_recipe(name).map_or_else(
+            None => builtin_recipe(name, &self.config).map_or_else(
                 || invalid(format!("no recipe called {name} in {CONFIG_FILE}")),
                 Ok,
             ),

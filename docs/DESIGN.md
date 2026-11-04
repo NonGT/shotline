@@ -168,6 +168,22 @@ model = "claude-haiku-5-5"
 
 The agent can still write prompts itself over MCP; this is for working without one.
 
+Each job can have its own default model, picked in the app under Preferences, Default Models, which
+shows how each model is charged (the plugin's `price`, a guide; the quote is still what counts):
+
+```toml
+plugin = "fal"                 # video: a shot's takes, unless the shot picks its own
+model = "minimax/h3-max/reference-to-video"
+[image]                        # anchors, shot pictures, storyboard frames
+[text]                         # drafting a shot's prompt from its plot
+[translate]                    # putting what's typed into English; [text] when not set
+[tts]                          # a voice on this plugin that names no model, and new voices
+[lipsync]                      # the lip-synced recipe; wavespeed sync/lipsync-3 when not set
+[assistant]                    # kept for an assistant in the app; nothing uses it yet
+```
+
+Each table has `plugin` and `model`.
+
 ## Operations
 
 shotline core works with a fixed set of operations it understands, so it can chain them and check
@@ -328,7 +344,8 @@ video.generate, so its lines aren't spoken.
 
 Two come with every film, and a recipe of the same name in shotline.toml takes their place:
 `spoken` (tts, then video.generate with `audio = true`, the video model lip syncs) and
-`lip-synced` (tts, video.generate, then video.lipsync on wavespeed sync/lipsync-3). The app's
+`lip-synced` (tts, video.generate, then video.lipsync on the film's `[lipsync]`, wavespeed
+sync/lipsync-3 unless set). The app's
 "Lines spoken" dropdown above a shot's lines picks between them, none, and the film's own.
 
 ```toml
@@ -626,9 +643,9 @@ anchor what was typed into the box (`brief`). Details under a zoomed picture sho
 the job by matching the picture to a job's output, so it works for anchors made from the CLI too.
 The zoomed picture can be pinched in (up to 8x) and dragged or scrolled around; a double-click
 shows it whole.
-What's typed for an anchor can be put into English with the film's text model first
+What's typed for an anchor can be put into English with the film's translating model first
 (`element anchor --generate --translate`, or the tick box under the prompt in the app, shown only
-when the text isn't English and the text model's plugin and keys are there). It's a second small
+when the text isn't English and that model's plugin and keys are there). It's a second small
 job, priced and agreed together with the image; the English goes into the prompt and is kept as
 `english` in the image's job.toml.
 
@@ -652,7 +669,7 @@ Browse existing (frame, References, an element's anchors, the image panel) lists
 made for what's open first, newest first. Picking one copies it in. Remove beside one throws it
 out (its job is marked `discarded`, the file and the ledger line stay) and can be undone. Every box typed for a model (Prompt, Frame
 prompt, Make image) offers "Translate to English first" when what's in it isn't English and the
-film's text model has its key; the price then includes the translation. Make frame… opens the image panel with the frame
+film's translating model has its key; the price then includes the translation. Make frame… opens the image panel with the frame
 prompt, the size and the references, starting from what the video gets; it closes once the
 picture is made, or with its ✕. Lines start with Add line; a line is its start (dragged like the
 length, or left as "after" to follow the line before), who says it, and its words with Record…,

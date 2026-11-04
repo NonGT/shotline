@@ -36,8 +36,9 @@ const IMAGE_ASPECTS: [&str; 10] = [
 ];
 
 pub fn models() -> Vec<ModelInfo> {
-    let image = |id: &str, resolutions: &[&str]| ModelInfo {
+    let image = |id: &str, resolutions: &[&str], price: &str| ModelInfo {
         id: id.into(),
+        price: Some(price.into()),
         op: Op::ImageGenerate,
         ref_image: Some("image {n}".into()),
         resolutions: resolutions.iter().map(|r| r.to_string()).collect(),
@@ -61,11 +62,16 @@ pub fn models() -> Vec<ModelInfo> {
         start_frame_with_refs: true,
         audio_input: true,
         params_schema: Some(h3_options()),
+        price: Some("$0.05 a second at 480P, x1.6 at 768P, x3.2 at 1080P".into()),
         ..ModelInfo::default()
     }];
     // fal prices pro per image without saying whether 2K or 4K cost more, so only 1K for now.
-    models.push(image("fal-ai/nano-banana", &[]));
-    models.push(image("fal-ai/nano-banana-pro", &["1K"]));
+    models.push(image("fal-ai/nano-banana", &[], "$0.04 an image"));
+    models.push(image(
+        "fal-ai/nano-banana-pro",
+        &["1K"],
+        "per image, more than nano-banana; fal says how much when quoting",
+    ));
     models
 }
 

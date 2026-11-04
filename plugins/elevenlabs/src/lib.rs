@@ -39,6 +39,7 @@ pub fn models() -> Vec<ModelInfo> {
             id: (*id).into(),
             op: Op::AudioTts,
             voice_schema: Some(voice_schema(id)),
+            price: Some("a credit a character, from your ElevenLabs plan".into()),
             params_schema: Some(json!({
                 "type": "object",
                 "properties": {

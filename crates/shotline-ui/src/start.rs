@@ -292,8 +292,8 @@ impl Shell {
             if done.keys_changed {
                 app.forget_voices();
             }
-            if !done.params.is_empty() {
-                app.apply(done.params);
+            if !done.film.is_empty() {
+                app.apply(done.film);
             }
         }
     }

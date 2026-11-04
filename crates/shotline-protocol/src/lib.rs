@@ -142,6 +142,10 @@ pub struct ModelInfo {
     /// JSON Schema for a voice's `settings`, for audio.tts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_schema: Option<serde_json::Value>,
+    /// How it's charged, for people choosing a model, e.g. "$0.05 a second at 480P". The quote
+    /// is still what counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {

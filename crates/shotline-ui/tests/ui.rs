@@ -271,6 +271,13 @@ impl Host for TestHost {
                     }
                 }
             })),
+            price: Some("$0.05 a second".into()),
+            ..ModelInfo::default()
+        };
+        let haiku = ModelInfo {
+            id: "claude-haiku-5-5".into(),
+            op: Op::TextGenerate,
+            price: Some("per token".into()),
             ..ModelInfo::default()
         };
         let d = |name: &str, models| Description {
@@ -301,7 +308,7 @@ impl Host for TestHost {
                     name: "venice".into(),
                     runs: venice.0,
                     skipped: venice.1,
-                    description: Ok(d("venice", vec![])),
+                    description: Ok(d("venice", vec![haiku])),
                     missing: vec![],
                 },
                 PluginInfo {
@@ -2462,6 +2469,49 @@ fn plugins_in_preferences() {
     h.get_by_role_and_label(Role::Button, "venice").click();
     h.run();
     h.get_by_label("Also found, not used");
+}
+
+#[test]
+fn default_models_in_preferences() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_plugins(vec![], Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    h.state_mut().command(MenuCommand::Preferences);
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Default Models")
+        .click();
+    h.run();
+    // How the picked one is charged, and what's in the way.
+    h.get_by_label("$0.05 a second");
+    h.get_by_label("needs FAL_API_KEY");
+    let translating = h.get_by_role_and_label(Role::ComboBox, "Translating");
+    assert_eq!(translating.value().as_deref(), Some("same as drafting"));
+
+    // Picked from the list, which shows each one's price too.
+    h.get_by_role_and_label(Role::ComboBox, "Translating")
+        .click();
+    h.run();
+    h.get_by_label("venice · claude-haiku-5-5\nper token")
+        .click();
+    h.run();
+    let cfg = || Project::open(&p.root).unwrap().config;
+    assert_eq!(cfg().translate, None);
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(
+        cfg().translate,
+        Some(shotline_core::ModelRef::new("venice", "claude-haiku-5-5"))
+    );
+    h.state_mut().command(MenuCommand::Undo);
+    h.run();
+    assert_eq!(cfg().translate, None);
 }
 
 #[test]

@@ -91,6 +91,7 @@ pub fn models() -> Vec<ModelInfo> {
         audio_input: true,
         audio_needs_image: true,
         frame_as_reference: true,
+        price: Some("by length and resolution, e.g. about $0.48 for 8 s at 480P".into()),
         params_schema: Some(json!({
             "type": "object",
             "properties": {
@@ -106,6 +107,7 @@ pub fn models() -> Vec<ModelInfo> {
         models.push(ModelInfo {
             id: id.to_string(),
             op: Op::TextGenerate,
+            price: Some("per token read and written; cents for a draft or a translation".into()),
             ..ModelInfo::default()
         });
     }
@@ -118,10 +120,22 @@ pub fn models() -> Vec<ModelInfo> {
             resolutions: resolutions.iter().map(|r| r.to_string()).collect(),
             aspects: aspects.iter().map(|a| a.to_string()).collect(),
             params_schema: Some(image_options()),
+            price: Some(image_price_note(id).into()),
             ..ModelInfo::default()
         });
     }
     models
+}
+
+/// How an image model is charged, for picking one. Venice's list has the exact prices.
+fn image_price_note(id: &str) -> &'static str {
+    match id {
+        "seedream-v4" => "about $0.05 an image",
+        "seedream-v5-pro" => {
+            "about $0.06 at 1K, $0.11 at 2K; each reference past the first adds a little"
+        }
+        _ => "per image, more at a higher resolution; references past the first can add to it",
+    }
 }
 
 /// Options that don't change the price; enhance_prompt and quality would.

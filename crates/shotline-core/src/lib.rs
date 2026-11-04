@@ -25,8 +25,8 @@ pub use model::{Catalog, ModelSpec};
 pub use money::{Measured, MeasuredRates, UserConfig};
 pub use pieces::{IMPORT, Join, Piece, SPLICE, made_from, pieces_of};
 pub use project::{
-    CONFIG_FILE, Config, Format, ImageConfig, LIP_SYNCED, Money, Project, PromptLayers, SPOKEN,
-    Step, TextConfig, user_dir,
+    CONFIG_FILE, Config, Format, ImageConfig, LIP_SYNCED, LIPSYNC, ModelRef, Money, Project,
+    PromptLayers, SPOKEN, Step, Task, TextConfig, user_dir,
 };
 pub use prompt::{
     Built, BuiltImage, ImageFor, Reference, StartFrame, build, build_image, no_image_for_audio,

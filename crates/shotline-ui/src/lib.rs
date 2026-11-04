@@ -644,9 +644,13 @@ impl App {
         })
     }
 
-    /// The film's text model as "plugin · model", when it's installed and its keys are set.
+    /// The film's translating model as "plugin · model", when it's installed and its keys are
+    /// set.
     fn translator(&self) -> Option<String> {
-        let t = &self.project.config.text;
+        let t = &self
+            .project
+            .config
+            .model_for(shotline_core::Task::Translate)?;
         let d = self.plugins.iter().find(|d| d.name == t.plugin)?;
         d.models
             .iter()
@@ -1594,6 +1598,7 @@ impl App {
             })
             .collect();
         let root = self.project.root.clone();
+        let film_tts = self.project.config.tts.clone();
         let v = &mut self.element_form.voice;
         let installed = tts.iter().find(|(p, _)| *p == v.plugin);
         let shown = match (v.plugin.as_str(), installed) {
@@ -1628,7 +1633,11 @@ impl App {
                         for (p, _) in &tts {
                             if ui.selectable_label(v.plugin == *p, p).clicked() && v.plugin != *p {
                                 v.plugin = p.clone();
-                                v.model.clear();
+                                v.model = film_tts
+                                    .as_ref()
+                                    .filter(|m| m.plugin == *p)
+                                    .map(|m| m.model.clone())
+                                    .unwrap_or_default();
                                 v.voice_id.clear();
                             }
                         }
@@ -1642,15 +1651,20 @@ impl App {
                     return;
                 }
                 ui.weak("Model");
+                // Left empty, the film's voice model is used when it's on this plugin.
+                let unset = match film_tts.as_ref().filter(|m| m.plugin == v.plugin) {
+                    Some(m) => format!("the film's, {}", m.model),
+                    None => "the plugin's default".into(),
+                };
                 egui::ComboBox::from_id_salt("voice model")
                     .selected_text(if v.model.is_empty() {
-                        "the plugin's default"
+                        unset.as_str()
                     } else {
                         v.model.as_str()
                     })
                     .width(320.0)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut v.model, String::new(), "the plugin's default");
+                        ui.selectable_value(&mut v.model, String::new(), &unset);
                         for m in models {
                             ui.selectable_value(&mut v.model, m.id.clone(), &m.id);
                         }

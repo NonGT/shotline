@@ -1,8 +1,8 @@
 use std::fs;
 
 use shotline_core::{
-    BuiltDraft, Catalog, Draft, DraftFor, Kind, Line, Project, Shot, ShotRef, build_draft,
-    finish_draft,
+    BuiltDraft, Catalog, Draft, DraftFor, Kind, Line, ModelRef, Project, Shot, ShotRef, Task,
+    build_draft, finish_draft,
 };
 use tempfile::TempDir;
 
@@ -10,6 +10,11 @@ const TEXT: &str = r#"
 [[model]]
 plugin = "venice"
 id = "claude-haiku-5-5"
+op = "text.generate"
+
+[[model]]
+plugin = "venice"
+id = "gemini-3-6-flash"
 op = "text.generate"
 "#;
 
@@ -85,6 +90,39 @@ fn translations() {
     fs::write(dir.path().join("prompts/translate.md"), "EN: {text}").unwrap();
     let b = draft(&p, DraftFor::Element("paka".into())).unwrap();
     assert_eq!(b.text, "EN: หัวหน้าทีม อายุ 30");
+}
+
+#[test]
+fn translating_can_have_its_own_model() {
+    let (_dir, mut p, r) = film();
+    p.set_model(
+        Task::Translate,
+        Some(&ModelRef::new("venice", "gemini-3-6-flash")),
+    )
+    .unwrap();
+    let model = |p: &Project, what| draft(p, what).unwrap().model;
+    assert_eq!(
+        model(&p, DraftFor::Text("ไปกันเถอะ".into())),
+        "gemini-3-6-flash"
+    );
+    assert_eq!(
+        model(&p, DraftFor::Element("paka".into())),
+        "gemini-3-6-flash"
+    );
+    assert_eq!(
+        model(&p, DraftFor::Shot(r, Draft::Translate)),
+        "gemini-3-6-flash"
+    );
+    assert_eq!(
+        model(&p, DraftFor::Shot(r, Draft::Video)),
+        "claude-haiku-5-5"
+    );
+    // Taken out, it's the drafting model again.
+    p.set_model(Task::Translate, None).unwrap();
+    assert_eq!(
+        model(&p, DraftFor::Text("ไปกันเถอะ".into())),
+        "claude-haiku-5-5"
+    );
 }
 
 #[test]
