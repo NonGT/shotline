@@ -154,6 +154,22 @@ enum Cmd {
     Takes { shot: ShotRef },
     /// Pick the take a shot uses: `select 01-010 3` or `select 01-010#3`
     Select { shot: String, take: Option<String> },
+    /// A new take put together from pieces of others, made here for nothing:
+    /// `splice 01-010 2:0-3.2 fade:4:2.1-6` (take:from-to, in seconds, joined by a cut unless
+    /// it starts with fade: or smooth:)
+    Splice {
+        shot: ShotRef,
+        #[arg(required = true)]
+        pieces: Vec<String>,
+        /// Seconds a fade lasts
+        #[arg(long, default_value_t = 0.3)]
+        fade: f64,
+        /// Leave each piece's colours as they are
+        #[arg(long)]
+        no_colormatch: bool,
+    },
+    /// A new take from a video made somewhere else, e.g. cut in an editor
+    Import { shot: ShotRef, file: PathBuf },
     /// Installed plugins
     #[command(subcommand)]
     Plugin(PluginCmd),
@@ -193,6 +209,9 @@ struct ImageArgs {
     /// Don't ask before spending
     #[arg(long)]
     yes: bool,
+    /// Keep only faces and hair from the reference images, so the clothes can change
+    #[arg(long)]
+    any_outfit: bool,
 }
 
 impl ImageArgs {
@@ -207,6 +226,7 @@ impl ImageArgs {
             aspect: None,
             resolution: None,
             translate: false,
+            outfit: !self.any_outfit,
         }
     }
 }
@@ -683,6 +703,7 @@ fn anchor_make<'a>(ask: &'a shotline_ui::AnchorAsk, at: Option<&'a str>) -> imag
         aspect: ask.aspect.as_deref(),
         resolution: ask.resolution.as_deref(),
         translate: ask.translate,
+        outfit: ask.outfit,
     }
 }
 
@@ -1164,7 +1185,8 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Takes { shot } => {
             let p = open()?;
             let selected = p.shot(shot)?.selected_take;
-            for t in p.takes(shot)? {
+            let takes = p.takes(shot)?;
+            for t in &takes {
                 let mark = if selected.as_deref() == Some(&t.id.to_string()) {
                     "*"
                 } else {
@@ -1178,8 +1200,11 @@ fn run(cli: Cli) -> Result<()> {
                     .join(" + ");
                 let steps = t.jobs.len();
                 let s = if steps == 1 { "" } else { "s" };
+                let made = shotline_core::made_from(t, &takes)
+                    .map(|m| format!("  {m}"))
+                    .unwrap_or_default();
                 println!(
-                    "{mark} {t}  {:<9} {steps} step{s}  {cost}  {}",
+                    "{mark} {t}  {:<9} {steps} step{s}  {cost}  {}{made}",
                     t.status(),
                     t.id
                 );
@@ -1193,6 +1218,37 @@ fn run(cli: Cli) -> Result<()> {
             };
             let t = open()?.select_take(shot, &take)?;
             println!("{t} selected");
+        }
+
+        Cmd::Splice {
+            shot,
+            ref pieces,
+            fade,
+            no_colormatch,
+        } => {
+            let p = open()?;
+            let pieces = pieces
+                .iter()
+                .map(|s| shotline_core::Piece::parse(&p, shot, s))
+                .collect::<shotline_core::Result<Vec<_>>>()?;
+            let ff = shotline_media::Ffmpeg::find()?;
+            let opts = shotline_media::splice::Options {
+                fade,
+                colormatch: !no_colormatch,
+                ..Default::default()
+            };
+            let work = p.root.join(".shotline/cache/splice");
+            let t = p.splice_take(shot, &pieces, |sources, out| {
+                shotline_media::splice::splice(&ff, &media_pieces(sources), &opts, &work, out)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })?;
+            println!("{t} made from {} pieces", pieces.len());
+        }
+
+        Cmd::Import { shot, ref file } => {
+            let t = open()?.import_take(shot, file)?;
+            println!("{t} brought in from {}", file.display());
         }
 
         Cmd::Cost { ref cmd, by, csv } => {
@@ -1313,4 +1369,21 @@ fn parse_shot_number(s: &str) -> Result<u32> {
         Ok(n) => Ok(n),
         Err(_) => bail!("bad shot number {s:?}"),
     }
+}
+
+fn media_pieces(sources: &[(PathBuf, shotline_core::Piece)]) -> Vec<shotline_media::splice::Piece> {
+    use shotline_media::splice::Join;
+    sources
+        .iter()
+        .map(|(path, p)| shotline_media::splice::Piece {
+            path: path.clone(),
+            from: p.from,
+            to: p.to,
+            join: match p.join {
+                shotline_core::Join::Cut => Join::Cut,
+                shotline_core::Join::Fade => Join::Fade,
+                shotline_core::Join::Smooth => Join::Smooth,
+            },
+        })
+        .collect()
 }

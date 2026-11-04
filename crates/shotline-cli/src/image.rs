@@ -27,6 +27,8 @@ pub struct Make<'a> {
     pub resolution: Option<&'a str>,
     /// Anchors only: put the prompt into English with the text model first, if it isn't.
     pub translate: bool,
+    /// The references' clothes too, not only faces and hair.
+    pub outfit: bool,
 }
 
 impl Make<'_> {
@@ -41,7 +43,7 @@ impl Make<'_> {
 fn request(p: &Project, what: ImageFor, m: &Make) -> Result<(String, Request)> {
     let installed = plugins::load();
     let catalog = plugins::catalog(p, &installed)?;
-    let b: BuiltImage = build_image(p, &catalog, &what, m.plugin, m.model)?;
+    let b: BuiltImage = build_image(p, &catalog, &what, m.plugin, m.model, m.outfit)?;
     for w in &b.warnings {
         eprintln!("warning: {w}");
     }
@@ -66,11 +68,13 @@ fn request(p: &Project, what: ImageFor, m: &Make) -> Result<(String, Request)> {
     Ok((b.plugin, req))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make(
     p: &Project,
     what: ImageFor,
     label: &str,
     shot: Option<ShotRef>,
+    element: Option<&str>,
     m: &Make,
     english: Option<&str>,
     go: Go,
@@ -80,7 +84,8 @@ fn make(
         text: m.prompt,
         english,
     };
-    let Some(job) = spend_once(p, &plugin, &req, shot, label, Some(brief), go)? else {
+    let Some(job) = crate::shoot::spend(p, &plugin, &req, shot, label, Some(brief), element, go)?
+    else {
         return Ok(None);
     };
     let file = job
@@ -98,6 +103,14 @@ pub enum Target<'a> {
     Shot(ShotRef),
     /// The shot's storyboard frame, made from its frame prompt or prompt.
     Frame(ShotRef),
+}
+
+/// The element a new anchor is for.
+fn element_of(t: Target<'_>) -> Option<&str> {
+    match t {
+        Target::Anchor(h) => Some(h.trim_start_matches('@')),
+        _ => None,
+    }
 }
 
 /// What the image is for and how the ledger names it.
@@ -207,7 +220,7 @@ pub fn quote(p: &Project, t: Target, m: &Make) -> Result<String> {
 pub fn image(p: &Project, t: Target, m: &Make) -> Result<Option<(Job, std::path::PathBuf)>> {
     let Some((tp, treq)) = translation(p, m)? else {
         let (label, what, shot) = image_for(p, t, m, None)?;
-        return make(p, what, &label, shot, m, None, m.go());
+        return make(p, what, &label, shot, element_of(t), m, None, m.go());
     };
     let (label, _, shot) = image_for(p, t, m, None)?;
     // Two jobs, one price: agreed (or asked about) once for both.
@@ -241,7 +254,16 @@ pub fn image(p: &Project, t: Target, m: &Make) -> Result<Option<(Job, std::path:
     let english = finish_draft(p, &raw).with_context(|| format!("job {}", job.id))?;
     println!("in English: {english}");
     let (label, what, shot) = image_for(p, t, m, Some(&english))?;
-    make(p, what, &label, shot, m, Some(&english), Go::Yes)
+    make(
+        p,
+        what,
+        &label,
+        shot,
+        element_of(t),
+        m,
+        Some(&english),
+        Go::Yes,
+    )
 }
 
 /// Makes a new anchor image for an element.

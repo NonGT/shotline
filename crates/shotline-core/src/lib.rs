@@ -8,6 +8,7 @@ pub mod handle;
 mod job;
 mod model;
 mod money;
+mod pieces;
 mod project;
 mod prompt;
 mod shot;
@@ -19,9 +20,10 @@ pub use draft::{BuiltDraft, Draft, DraftFor, build_draft, finish_draft, looks_en
 pub use element::{Element, Kind, Voice};
 pub use error::{Error, Result};
 pub use git::{Git, summary as change_summary};
-pub use job::{Clock, Cost, Job, JobStatus, SystemClock, Take, TestClock};
+pub use job::{Clock, Cost, Job, JobStatus, MadeImage, SystemClock, Take, TestClock};
 pub use model::{Catalog, ModelSpec};
 pub use money::{Measured, MeasuredRates, UserConfig};
+pub use pieces::{IMPORT, Join, Piece, SPLICE, made_from, pieces_of};
 pub use project::{
     CONFIG_FILE, Config, Format, ImageConfig, LIP_SYNCED, Money, Project, PromptLayers, SPOKEN,
     Step, TextConfig, user_dir,

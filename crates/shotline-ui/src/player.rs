@@ -441,7 +441,7 @@ impl Deck {
         }
     }
 
-    fn seek(&mut self, t: f64, audio: Option<&Audio>) {
+    pub fn seek(&mut self, t: f64, audio: Option<&Audio>) {
         for p in &mut self.players {
             p.seek(t, audio);
         }

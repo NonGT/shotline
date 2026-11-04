@@ -4,6 +4,7 @@
 //! before and after so the change can be undone.
 
 use shotline_core::ledger::money;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -75,6 +76,8 @@ pub(crate) struct ElementForm {
     pub name: String,
     pub description: String,
     pub voice: VoiceForm,
+    /// Anchor labels by file name; an empty one is dropped.
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -101,6 +104,7 @@ impl ElementForm {
                 sample: v.sample.unwrap_or_default(),
                 settings: settings_text(&v.settings),
             },
+            labels: el.labels.clone(),
         }
     }
 
@@ -135,6 +139,7 @@ impl ElementForm {
             name: name.to_string(),
             description: self.description.clone(),
             voice,
+            labels: self.labels.clone(),
             ..el.clone()
         })
     }
@@ -224,6 +229,8 @@ pub(crate) enum Action {
     /// An image file copied in as the shot's next picture.
     AddShotImage(ShotRef, PathBuf),
     RemoveShotImage(ShotRef, usize),
+    /// A made image off the Browse existing list, by job id; its file stays.
+    ForgetImage(String),
     ShotImageNote(ShotRef, usize, String),
     /// What an element's anchor shows in this shot, by its path.
     AnchorNote(ShotRef, String, String),
@@ -268,6 +275,7 @@ impl Action {
             Action::SaveElement(el) | Action::AddAnchor(el, _) | Action::RemoveAnchor(el, _) => {
                 format!("@{}", el.handle)
             }
+            Action::ForgetImage(_) => "a made image".into(),
             Action::Timeline(_) => "the cut".into(),
             Action::AddTrack(_) => "music".into(),
         }
@@ -327,7 +335,12 @@ impl Action {
             Action::Style(_) => vec![p.root.join("style.md")],
             Action::Format(_) | Action::Param { .. } => vec![p.root.join(CONFIG_FILE)],
             Action::SaveElement(el) => vec![p.element_file(el.kind, &el.handle)],
-            Action::RemoveAnchor(_, f) => vec![f.clone()],
+            Action::RemoveAnchor(el, f) => vec![f.clone(), p.element_file(el.kind, &el.handle)],
+            Action::ForgetImage(id) => p
+                .job(id)
+                .map(|j| p.job_dir(j.id).join("job.toml"))
+                .into_iter()
+                .collect(),
             Action::Timeline(_) | Action::AddTrack(_) => vec![p.root.join(TIMELINE_FILE)],
             Action::AddChapter(_)
             | Action::AddShot(..)
@@ -825,7 +838,7 @@ impl App {
                 }
             }
             Action::RemoveAnchor(el, file) => {
-                std::fs::remove_file(&file)?;
+                p.remove_anchor(&el.handle, &file)?;
                 format!("{} taken off @{}", p.rel(&file), el.handle).into()
             }
             Action::AddShotImage(r, file) => {
@@ -836,6 +849,11 @@ impl App {
                     msg: format!("{r} has {}", p.rel(&dest)),
                     made: vec![if new_dir { dir } else { dest }],
                 }
+            }
+            Action::ForgetImage(id) => {
+                let j = p.job(&id)?;
+                p.set_discarded(j.id, true)?;
+                "image thrown out; undo brings it back".to_string().into()
             }
             Action::RemoveShotImage(r, i) => {
                 let img = p.remove_shot_image(r, i)?;

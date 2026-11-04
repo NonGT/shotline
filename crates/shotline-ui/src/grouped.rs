@@ -99,6 +99,8 @@ fn header(ui: &mut egui::Ui, text: &str, level: u8) -> egui::Rect {
         egui::Sense::hover(),
     );
     paint(ui.painter(), ui, rect, text, level);
+    // Stacked right under each other, the way they sit once pinned.
+    ui.add_space(-ui.spacing().item_spacing.y);
     rect
 }
 
@@ -119,13 +121,19 @@ fn paint(p: &egui::Painter, ui: &egui::Ui, rect: egui::Rect, text: &str, level: 
     } else {
         (theme::GRAPHITE, 16.0)
     };
-    p.text(
-        egui::pos2(rect.left() + indent, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        text,
+    // Cut short with … to fit: a dropdown's clip runs the whole window sideways.
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.into(),
         egui::TextStyle::Small.resolve(ui.style()),
         color,
     );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - indent - 6.0);
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    let at = egui::pos2(
+        rect.left() + indent,
+        rect.center().y - galley.size().y / 2.0,
+    );
+    p.galley(at, galley, color);
 }
 
 /// Pins the headers of what's scrolled under the top: the group's, and under it the subgroup's.

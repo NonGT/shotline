@@ -286,7 +286,7 @@ fn unknown_model() {
 }
 
 fn image(p: &Project, what: ImageFor) -> shotline_core::Result<BuiltImage> {
-    shotline_core::build_image(p, &p.catalog(Catalog::builtin())?, &what, None, None)
+    shotline_core::build_image(p, &p.catalog(Catalog::builtin())?, &what, None, None, true)
 }
 
 #[test]
@@ -540,4 +540,36 @@ fn an_anchor_says_what_it_shows_here() {
     );
     // Saved and read back.
     assert_eq!(p.shot(r).unwrap().anchor_notes.len(), 2);
+}
+
+#[test]
+fn outfit_can_be_left_free() {
+    let (_dir, p) = film();
+    let what = ImageFor::Anchor {
+        handle: "paka".into(),
+        prompt: "in a ball gown".into(),
+        refs: None,
+        aspect: None,
+        resolution: None,
+    };
+    let kept = image(&p, what.clone()).unwrap();
+    assert!(!kept.references.is_empty());
+    assert!(
+        kept.text
+            .ends_with("face, hair and outfit exactly as in their reference images.")
+    );
+    let free = shotline_core::build_image(
+        &p,
+        &p.catalog(Catalog::builtin()).unwrap(),
+        &what,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(!free.text.contains("outfit"), "{}", free.text);
+    assert!(
+        free.text
+            .ends_with("face and hair exactly as in their reference images.")
+    );
 }

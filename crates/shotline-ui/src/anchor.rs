@@ -86,10 +86,12 @@ pub(crate) struct Maker {
     defaults: (String, Option<String>),
     /// Ticked: the prompt goes into English first.
     translate: bool,
+    /// Ticked: the outfit as in the references, not only faces and hair.
+    outfit: bool,
     url: String,
     fetch: Arc<Mutex<Fetch>>,
     stage: Arc<Mutex<Stage>>,
-    /// The Add an anchor dropdown shows other shots' pictures too.
+    /// Browse existing shows other shots' pictures too.
     show_all: bool,
 }
 
@@ -134,6 +136,7 @@ impl Maker {
             resolution: None,
             defaults,
             translate: false,
+            outfit: true,
             url: String::new(),
             fetch: Arc::new(Mutex::new(Fetch::Idle)),
             stage: Arc::new(Mutex::new(Stage::Idle)),
@@ -313,12 +316,17 @@ impl Maker {
                             }
                         };
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.prompt)
+                            egui::TextEdit::multiline(&mut self.prompt)
                                 .hint_text(RichText::new(example).color(theme::DUST))
+                                .desired_rows(2)
                                 .desired_width(f32::INFINITY),
                         )
                         .widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Image prompt")
+                            egui::WidgetInfo::labeled(
+                                egui::Role::MultilineTextInput,
+                                true,
+                                "Image prompt",
+                            )
                         });
                     }
                     translate_box(ui, &mut self.translate, &self.prompt, translator.as_deref());
@@ -328,6 +336,16 @@ impl Maker {
                             self.references(ui, m, pool, thumbs, &fetched, host.clone(), film)
                         {
                             wants = Wants::Zoom(z);
+                        }
+                        if m.ref_label.is_some() && !self.refs.is_empty() {
+                            ui.checkbox(
+                                &mut self.outfit,
+                                "Outfit exactly as in their reference images",
+                            )
+                            .on_hover_text(
+                                "off: faces and hair stay, the clothes can change, so you can \
+                                 try other looks",
+                            );
                         }
                     }
                 });
@@ -367,6 +385,7 @@ impl Maker {
                     translate: self.translate
                         && translator.is_some()
                         && !shotline_core::looks_english(self.prompt.trim()),
+                    outfit: self.outfit,
                 };
                 ui.add_space(4.0);
                 ui.horizontal(|ui| match &stage {
@@ -534,7 +553,7 @@ impl Maker {
                 let (mut picked, mut more) = (None, false);
                 ui.add_enabled_ui(!left.is_empty(), |ui| {
                     let open = egui::ComboBox::from_id_salt("add anchor ref")
-                        .selected_text("Add an anchor")
+                        .selected_text(crate::browse::LABEL)
                         .width(150.0)
                         .height(crate::grouped::MAX)
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
@@ -574,7 +593,7 @@ impl Maker {
                         self.show_all = false;
                     }
                     open.response.on_disabled_hover_text(&why).widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Add an anchor")
+                        egui::WidgetInfo::labeled(egui::Role::ComboBox, true, crate::browse::LABEL)
                     });
                 });
                 if more {
@@ -584,7 +603,7 @@ impl Maker {
                     self.refs.push(p);
                 }
                 if ui
-                    .button("Add file…")
+                    .button("Add image…")
                     .on_disabled_hover_text(&why)
                     .clicked()
                     && let Some(f) = rfd::FileDialog::new()

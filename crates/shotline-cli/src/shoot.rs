@@ -692,7 +692,7 @@ pub fn spend_once(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn spend(
+pub fn spend(
     p: &Project,
     plugin_name: &str,
     req: &Request,

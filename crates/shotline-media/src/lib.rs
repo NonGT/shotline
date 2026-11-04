@@ -9,6 +9,7 @@ pub mod colour;
 pub mod lines;
 pub mod play;
 pub mod render;
+pub mod splice;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -180,11 +181,27 @@ impl Ffmpeg {
         fps: &str,
         limit: Option<usize>,
     ) -> Result<Frames> {
+        self.frames_from(path, 0.0, width, height, fps, limit)
+    }
+
+    /// Like `frames`, starting `from` seconds in.
+    pub fn frames_from(
+        &self,
+        path: &Path,
+        from: f64,
+        width: u32,
+        height: u32,
+        fps: &str,
+        limit: Option<usize>,
+    ) -> Result<Frames> {
         let vf = format!(
             "scale={width}:{height}:force_original_aspect_ratio=decrease,\
              pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps}"
         );
         let mut c = self.ffmpeg();
+        if from > 0.0 {
+            c.args(["-ss", &format!("{from:.4}")]);
+        }
         c.arg("-i").arg(path).args(["-an", "-vf", &vf]);
         if let Some(n) = limit {
             c.args(["-frames:v", &n.to_string()]);

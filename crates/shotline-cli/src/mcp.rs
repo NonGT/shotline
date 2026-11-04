@@ -231,6 +231,10 @@ pub struct MakeAnchor {
     /// spend, in the price)
     #[serde(default)]
     translate: bool,
+    /// Keep only faces and hair from the reference images, so the clothes can change (other
+    /// outfits of the same person)
+    #[serde(default)]
+    any_outfit: bool,
     /// Spend the money. Only after the user agreed to the price.
     #[serde(default)]
     confirm: bool,
@@ -256,6 +260,9 @@ pub struct ShotImage {
     resolution: Option<String>,
     #[serde(default)]
     translate: bool,
+    /// Keep only faces and hair from the reference images, so the clothes can change
+    #[serde(default)]
+    any_outfit: bool,
     plugin: Option<String>,
     model: Option<String>,
     /// Take image n (from 1) off the shot
@@ -289,6 +296,9 @@ pub struct Frame {
     /// Put the frame prompt into English with the text model first, if it isn't
     #[serde(default)]
     translate: bool,
+    /// Keep only faces and hair from the reference images, so the clothes can change
+    #[serde(default)]
+    any_outfit: bool,
     plugin: Option<String>,
     model: Option<String>,
     /// Spend the money. Only after the user agreed to the price.
@@ -618,6 +628,9 @@ impl Server {
         if p.translate {
             args.push("--translate".into());
         }
+        if p.any_outfit {
+            args.push("--any-outfit".into());
+        }
         self.spend(args, p.confirm, &ctx).await
     }
 
@@ -651,6 +664,9 @@ impl Server {
             opt(&mut args, "--resolution", p.resolution);
             if p.translate {
                 args.push("--translate".into());
+            }
+            if p.any_outfit {
+                args.push("--any-outfit".into());
             }
             return self.spend(args, p.confirm, &ctx).await;
         }
@@ -687,6 +703,9 @@ impl Server {
         opt(&mut args, "--resolution", p.resolution);
         if p.translate {
             args.push("--translate".into());
+        }
+        if p.any_outfit {
+            args.push("--any-outfit".into());
         }
         self.spend(args, p.confirm, &ctx).await
     }

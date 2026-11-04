@@ -100,24 +100,6 @@ fn stop_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
     p.rect_filled(s.shrink(1.0), 1.0, stroke.color);
 }
 
-fn bin_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
-    let lid = s.top() + 1.5;
-    p.line_segment(
-        [egui::pos2(s.left(), lid), egui::pos2(s.right(), lid)],
-        stroke,
-    );
-    let body = egui::Rect::from_min_max(egui::pos2(s.left() + 1.5, lid + 1.5), s.right_bottom());
-    p.rect_stroke(body, 1.0, stroke, egui::StrokeKind::Middle);
-    let x = body.center().x;
-    p.line_segment(
-        [
-            egui::pos2(x, body.top() + 2.0),
-            egui::pos2(x, body.bottom() - 2.0),
-        ],
-        stroke,
-    );
-}
-
 /// An arrow, to go where something is.
 fn go_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
     let y = s.center().y;
@@ -1011,7 +993,7 @@ fn recording_list(
                         }
                         None if !elsewhere.is_empty() => {
                             ui.add_enabled_ui(false, |ui| {
-                                icon_button(ui, &format!("Delete {words}"), bin_icon)
+                                crate::delete_button(ui, &format!("Delete {words}"))
                             })
                             .inner
                             .on_disabled_hover_text(format!(
@@ -1020,15 +1002,7 @@ fn recording_list(
                             ));
                         }
                         None => {
-                            let bin = ui
-                                .scope(|ui| {
-                                    let w = &mut ui.visuals_mut().widgets;
-                                    for s in [&mut w.inactive, &mut w.hovered, &mut w.active] {
-                                        s.fg_stroke.color = theme::FLAG;
-                                    }
-                                    icon_button(ui, &format!("Delete {words}"), bin_icon)
-                                })
-                                .inner;
+                            let bin = crate::delete_button(ui, &format!("Delete {words}"));
                             if bin.on_hover_text("delete this recording").clicked() {
                                 pick = Some(Pick::Delete(id.clone()));
                             }

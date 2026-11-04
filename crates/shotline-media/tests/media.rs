@@ -325,3 +325,71 @@ fn lines_join_into_one_clip() {
         "silence before a timed line: {len}"
     );
 }
+
+#[test]
+fn pieces_of_takes_made_into_one() {
+    use shotline_media::splice::{Join, Piece, splice};
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let a = clip(dir.path(), "a.mp4", RED, false);
+    let b = clip(dir.path(), "b.mp4", BLUE, true);
+    let piece = |path: &Path, from, to, join| Piece {
+        path: path.to_path_buf(),
+        from,
+        to,
+        join,
+    };
+    let opts = shotline_media::splice::Options::default();
+
+    // Trimmed.
+    let out = dir.path().join("trim.mp4");
+    let r = splice(
+        &ff,
+        &[piece(&b, 0.25, 0.75, Join::Cut)],
+        &opts,
+        dir.path(),
+        &out,
+    )
+    .unwrap();
+    assert!(close(r.duration, 0.5), "{}", r.duration);
+    let i = ff.probe(&out).unwrap();
+    assert!(i.audio && close(i.duration, 0.5), "{i:?}");
+
+    // 14 + 19 frames, 7 of them faded together, 6 made up, then 10.
+    let out = dir.path().join("three.mp4");
+    let r = splice(
+        &ff,
+        &[
+            piece(&a, 0.0, 0.6, Join::Cut),
+            piece(&b, 0.2, 1.0, Join::Fade),
+            piece(&a, 0.1, 0.5, Join::Smooth),
+        ],
+        &opts,
+        &dir.path().join("work"),
+        &out,
+    )
+    .unwrap();
+    assert!(close(r.duration, 42.0 / 24.0), "{}", r.duration);
+    let i = ff.probe(&out).unwrap();
+    assert_eq!((i.width, i.height), (160, 90));
+    assert!(i.audio && close(i.duration, 42.0 / 24.0), "{i:?}");
+    let frames = ff.frames(&out, 160, 90, "24", None).unwrap().count();
+    assert_eq!(frames, 42);
+
+    let short = splice(
+        &ff,
+        &[
+            piece(&a, 0.0, 0.2, Join::Cut),
+            piece(&b, 0.0, 0.8, Join::Fade),
+        ],
+        &opts,
+        dir.path(),
+        &dir.path().join("x.mp4"),
+    );
+    assert!(
+        short
+            .unwrap_err()
+            .to_string()
+            .contains("shorter than its fade")
+    );
+}

@@ -31,7 +31,7 @@ my-film/
   story.md             logline, world, synopsis
   style.md             look of the film, camera/lens notes; goes into every prompt
   elements/
-    cast/paka.toml     name, @handle, description, voice
+    cast/paka.toml     name, @handle, description, voice, [labels] for anchors
     cast/paka/*.png    anchor images
     sets/...  props/...
   chapters/01-into-the-forest/
@@ -127,7 +127,9 @@ The prompt that actually gets sent is put together from a few parts:
    The shot's own pictures come after, each with its note: "Image 5: the rest stop by the
    stream." (`shot-image.md`)
 3. style.md
-4. a short identity note (keep faces/outfits from the references)
+4. a short identity note (keep faces/outfits from the references). Images can leave the outfit
+   out (`--any-outfit`, or untick it in Make image) to try other clothes on the same person
+   (`identity-look.md`)
 5. for continue shots and storyboard frames, a note that it starts on the given frame
 6. per-model tweaks
 
@@ -290,6 +292,33 @@ ULIDs are long, so the CLI and UI also show takes by order within the shot (`01-
 is worked out from the ULIDs and never stored, so it can't clash between two copies of a project.
 A removed take has its jobs marked `discarded`: its files stay because the ledger points at them,
 it drops off the list, and the others keep their numbers.
+
+Two kinds of take are made here, for nothing, as a single job by plugin `shotline`. A take from
+pieces (`x.splice`) keeps its pieces in the job, so it can be opened again and changed into a new
+take:
+
+```toml
+op = "x.splice"
+plugin = "shotline"
+model = "pieces"
+
+[[params.pieces]]
+take = "01JBX9Q3T7K2M8V5N4R6P1W0YZ"
+from = 0.0
+to = 3.2
+
+[[params.pieces]]
+take = "01JBXA0R2C8N6M4V1K7P3W9QZT"
+from = 2.1
+to = 6.0
+join = "fade"      # cut (default) | fade | smooth
+```
+
+Each piece is colour matched to the end of the one before (MKL, as at render time). A fade
+overlaps the two by 0.3s; smooth puts 0.25s of frames made by ffmpeg's minterpolate between them,
+for two pieces that almost line up. Sound follows the pictures. A take brought in (`x.import`) is a
+copy of a file made somewhere else, e.g. cut in an editor; `brief` keeps the file's name. Either
+is selected, continued from and rendered like any other take.
 
 ## Recipes
 
@@ -495,6 +524,8 @@ shotline quote <shot|chapter>
 shotline take <shot> [--from-step n [--of take]] [--translate] [--yes]
 shotline takes <shot>
 shotline select <shot> <take>
+shotline splice <shot> <[fade:|smooth:]take:from-to>... [--fade s] [--no-colormatch]
+shotline import <shot> <file>
 shotline run <op> --plugin p --model m [--prompt ..] [--duration s] [--input name=file]
              [--ref file] [--param k=v] [--yes]          one-off operation outside a shot
 shotline timeline [render [-o file] [--no-colormatch] [--xfade s]]
@@ -585,13 +616,15 @@ in the project folder. Paid actions still quote and ask first: an element's "Mak
 changed since. The image becomes an anchor like one added from a file, so it can be undone.
 Models that take reference images get the element's own anchors to start with; any can be left
 out, and others added from any element, a shot's storyboard frame or own pictures, a file, or a
-web address (downloaded into `.shotline/cache/refs`). Add an anchor lists them under headers
-like the recordings: the shot it's for first, then the elements, then other shots behind Show
-all. The prompt names them Image 1, Image 2… in that order. Size picks the
+web address (downloaded into `.shotline/cache/refs`). Browse existing lists them under headers
+like the recordings: the shot it's for first, then the elements, then images made before, then
+other shots behind Show all. The prompt names them Image 1, Image 2… in that order. Size picks the
 shape (and the resolution, for models that offer a choice) when it shouldn't be the film's: a
 face square, a set wide. Every job.toml keeps the prompt exactly as the model got it, and for an
 anchor what was typed into the box (`brief`). Details under a zoomed picture shows them, finding
 the job by matching the picture to a job's output, so it works for anchors made from the CLI too.
+The zoomed picture can be pinched in (up to 8x) and dragged or scrolled around; a double-click
+shows it whole.
 What's typed for an anchor can be put into English with the film's text model first
 (`element anchor --generate --translate`, or the tick box under the prompt in the app, shown only
 when the text isn't English and the text model's plugin and keys are there). It's a second small
@@ -600,11 +633,23 @@ job, priced and agreed together with the image; the English goes into the prompt
 
 A shot's page lists what goes to the video model under References: the anchors of the elements
 it names, then its own pictures (Add image… or Make image…, the same panel as for anchors), one a
-row, each with a note of what it shows here; its tooltip shows the sentence the prompt gets. Add
-an anchor sends one anchor of any element (the element goes into the shot's `elements` with its
+row, each with a note of what it shows here; its tooltip shows the sentence the prompt gets. Browse
+existing sends one anchor of any element (the element goes into the shot's `elements` with its
 other anchors left out), including one left out before; Remove under an element's anchor leaves it
-out of this shot only. Starts sits under the plot; on a cut, the storyboard frame comes before the
-prompt with Add image…, Make frame… and Remove. Every box typed for a model (Prompt, Frame
+out of this shot only, or adds an image made before as one of the shot's pictures. Starts sits under
+the plot; on a cut, the storyboard frame comes before the prompt with Browse existing, Add image…,
+Make frame… and Remove.
+
+An element's page shows its anchors as cards of one size, the picture letterboxed on black with
+a label beside it (up to 40 letters, kept in the element's `[labels]` by file name, e.g.
+`"02.png" = "side view"`). The label follows the anchor's name wherever one is picked from a
+list ("@paka 2  side view") and goes when the anchor is removed.
+
+Every image a model makes stays in its job folder, so making a frame or an anchor again doesn't
+lose the one before. Each job records what it was for (`shot`, or the element in `who`), and every
+Browse existing (frame, References, an element's anchors, the image panel) lists them, the ones
+made for what's open first, newest first. Picking one copies it in. Remove beside one throws it
+out (its job is marked `discarded`, the file and the ledger line stay) and can be undone. Every box typed for a model (Prompt, Frame
 prompt, Make image) offers "Translate to English first" when what's in it isn't English and the
 film's text model has its key; the price then includes the translation. Make frame… opens the image panel with the frame
 prompt, the size and the references, starting from what the video gets; it closes once the

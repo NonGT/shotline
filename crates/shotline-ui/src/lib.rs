@@ -3,6 +3,7 @@
 //! both always agree.
 
 mod anchor;
+mod browse;
 mod cost;
 mod cut;
 mod edit;
@@ -11,6 +12,7 @@ mod grouped;
 mod keys;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
+mod pieces;
 mod player;
 mod plugins;
 mod shoot;
@@ -80,6 +82,10 @@ struct Film {
     takes: HashMap<ShotRef, usize>,
     /// Shots with a selected take.
     made: usize,
+    /// Every image made and not thrown out, newest first.
+    images: Vec<shotline_core::MadeImage>,
+    /// Made images in use somewhere, by their path: where.
+    in_use: HashMap<PathBuf, String>,
 }
 
 /// What the app asks of installed plugins. The CLI provides it; the app calls it off the UI thread.
@@ -171,6 +177,8 @@ pub struct AnchorAsk {
     pub resolution: Option<String>,
     /// Put the prompt into English with the film's text model first.
     pub translate: bool,
+    /// Ask for the references' clothes too; off lets them change.
+    pub outfit: bool,
 }
 
 #[derive(Clone)]
@@ -191,6 +199,8 @@ pub struct App {
     deck: Option<Deck>,
     /// A take open in its own popup, with a player when it could be opened.
     watching: Option<(Take, Option<Deck>)>,
+    /// Making a take from pieces of others.
+    splicer: Option<pieces::Splicer>,
     /// The open shot's selected take under its title, by take id; None in it when it can't play.
     in_cut: Option<(String, Option<Deck>)>,
     /// Posters of takes still being taken from their videos.
@@ -202,6 +212,8 @@ pub struct App {
     status: Option<(String, bool)>,
     /// The job that made the zoomed picture, once Details is asked for.
     zoom_details: Option<(PathBuf, Option<shotline_core::Job>)>,
+    /// How far the zoomed picture is pinched in, and the middle of what shows, 0-1 across it.
+    zoom_view: (f32, egui::Pos2),
     /// Jobs found holding money with nothing running them when the film was opened.
     stuck: Vec<String>,
     thumbs: Thumbs,
@@ -305,6 +317,13 @@ fn decode(path: &Path, px: u32) -> Option<egui::ColorImage> {
 
 pub(crate) const THUMB: u32 = 512;
 const BIG: u32 = 2048;
+/// The zoomed picture seen whole.
+const FIT: (f32, egui::Pos2) = (1.0, egui::pos2(0.5, 0.5));
+/// An anchor's card on an element's page, two to a row; the picture's box is the same for all.
+const ANCHOR_CARD: f32 = 290.0;
+const ANCHOR_IMAGE: egui::Vec2 = egui::vec2(128.0, 96.0);
+/// Enough for "side view, red dress" without filling the list it's picked from.
+const LABEL_MAX: usize = 40;
 
 impl Thumbs {
     /// Drops the pictures whose files changed (or went) since they were decoded. Decoding is
@@ -377,10 +396,16 @@ impl Thumbs {
         }
     }
 
-    /// A square thumbnail, the picture whole and centred on black, so tall and wide ones line
-    /// up. Clicking it asks for the picture full size.
-    pub(crate) fn tile(&mut self, ui: &mut egui::Ui, path: &Path, side: f32, name: &str) -> bool {
-        let (rect, r) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    /// A thumbnail box, the picture whole and centred on black, so tall and wide ones line up.
+    /// Clicking it asks for the picture full size.
+    pub(crate) fn tile(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &Path,
+        side: egui::Vec2,
+        name: &str,
+    ) -> bool {
+        let (rect, r) = ui.allocate_exact_size(side, egui::Sense::click());
         ui.painter().rect_filled(rect, 2.0, egui::Color32::BLACK);
         match self.texture_later(ui, path, THUMB, name) {
             Big::Decoding => {
@@ -391,7 +416,7 @@ impl Thumbs {
             }
             Big::Ready(t) => {
                 let size = t.size_vec2();
-                let k = (side / size.x).min(side / size.y);
+                let k = (side.x / size.x).min(side.y / size.y);
                 ui.painter().image(
                     t.id(),
                     egui::Rect::from_center_size(rect.center(), size * k),
@@ -459,6 +484,7 @@ impl App {
             audio_tried: false,
             deck: None,
             watching: None,
+            splicer: None,
             in_cut: None,
             posters: Arc::default(),
             film: Film::default(),
@@ -467,6 +493,7 @@ impl App {
             takes: vec![],
             status: None,
             zoom_details: None,
+            zoom_view: FIT,
             stuck: vec![],
             thumbs: Thumbs::default(),
             place: None,
@@ -691,7 +718,7 @@ impl App {
         for (el, anchors) in &self.film.elements {
             for (i, a) in anchors.iter().enumerate() {
                 pool.push(anchor::Pooled {
-                    name: format!("@{} {}", el.handle, i + 1),
+                    name: anchor_name(el, i, a),
                     path: a.clone(),
                     group: ("Elements".into(), format!("@{}  {}", el.handle, el.name)),
                     near: true,
@@ -699,6 +726,24 @@ impl App {
             }
         }
         pool.extend(rest);
+        let near = match self.maker.as_ref().map(|m| &m.target) {
+            Some(anchor::For::Element(h)) => browse::Near::Element(h.clone()),
+            _ => browse::Near::Shot(here.unwrap_or(ShotRef {
+                chapter: 0,
+                shot: 0,
+            })),
+        };
+        let used: HashSet<PathBuf> = pool.iter().map(|p| p.path.clone()).collect();
+        for (top, group, e) in self.made_rows(&near) {
+            if !used.contains(&e.path) {
+                pool.push(anchor::Pooled {
+                    near: top == browse::MINE,
+                    name: e.name,
+                    path: e.path,
+                    group: (top, group),
+                });
+            }
+        }
         pool
     }
 
@@ -845,7 +890,10 @@ impl App {
             cost: cost::load(p, &self.user_dir)?,
             takes: takes.into_iter().map(|(s, t)| (s, t.len())).collect(),
             made: p.selected_take_ids()?.len(),
+            in_use: HashMap::new(),
+            images: p.made_images()?,
         };
+        self.film.in_use = in_use(&self.film, &self.project.root);
         self.load_takes()
     }
 
@@ -1041,6 +1089,7 @@ impl App {
         self.git_dialog(ui);
         self.zoomed(ui);
         self.watched(ui);
+        self.splicing(ui);
         // Files change outside the app too, from the CLI or the co-director.
         let now = ui.input(|i| i.time);
         if now - self.repo_at > 5.0 {
@@ -1087,13 +1136,52 @@ impl App {
             let bar = title_bar(ui, &name);
             match self.thumbs.texture_later(ui, &path, BIG, &name) {
                 Big::Ready(t) => {
-                    let img = ui.add(
-                        egui::Image::new(&t)
-                            .max_size(max)
-                            .alt_text(format!("{name} big"))
-                            .sense(egui::Sense::click()),
+                    let size = t.size_vec2();
+                    let size = size * (max / size).min_elem().min(1.0);
+                    let (rect, img) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    let (scale, mid) = &mut self.zoom_view;
+                    if img.hovered() {
+                        let (pinch, scroll, at) = ui.input(|i| {
+                            (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos())
+                        });
+                        if pinch != 1.0 {
+                            // The spot under the fingers stays put.
+                            let off = (at.unwrap_or(rect.center()) - rect.center()) / rect.size();
+                            let under = *mid + off / *scale;
+                            *scale = (*scale * pinch).clamp(1.0, 8.0);
+                            *mid = under - off / *scale;
+                        } else if *scale > 1.0 {
+                            *mid -= scroll / rect.size() / *scale;
+                        }
+                    }
+                    *mid -= img.drag_delta() / rect.size() / *scale;
+                    let half = 0.5 / *scale;
+                    *mid = mid.clamp(egui::pos2(half, half), egui::pos2(1.0 - half, 1.0 - half));
+                    ui.painter().image(
+                        t.id(),
+                        rect,
+                        egui::Rect::from_center_size(*mid, egui::Vec2::splat(2.0 * half)),
+                        egui::Color32::WHITE,
                     );
-                    close = img.clicked();
+                    let zoomed = *scale > 1.0;
+                    if img.double_clicked() {
+                        self.zoom_view = FIT;
+                    }
+                    // Clicking closes it, unless it's pinched in.
+                    close = img.clicked() && !zoomed;
+                    img.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Image, true, format!("{name} big"))
+                    });
+                    let img = if zoomed {
+                        img.on_hover_cursor(egui::CursorIcon::Grab)
+                    } else {
+                        img
+                    };
+                    img.on_hover_text(if zoomed {
+                        "drag to look around; double-click to see it whole"
+                    } else {
+                        "pinch to zoom in; click to close"
+                    });
                 }
                 Big::Decoding => {
                     // The size it will show at, from the header, so nothing jumps once it's in.
@@ -1156,6 +1244,7 @@ impl App {
         if close || modal.should_close() {
             self.zoom = None;
             self.zoom_details = None;
+            self.zoom_view = FIT;
         }
     }
 
@@ -1331,29 +1420,41 @@ impl App {
                 hint(ui, "Pictures of it that video models are shown, to keep it the same in every shot.");
             }
             let mut remove = None;
-            ui.horizontal_wrapped(|ui| {
-                for a in anchors {
-                    ui.vertical(|ui| {
-                        let name = self.project.rel(a);
-                        if self.thumbs.show(ui, a, 160.0, &name) {
-                            self.zoom = Some(a.clone());
-                        }
-                        if remove_button(ui)
-                            .on_hover_text(format!("take {name} off @{}", el.handle))
-                            .clicked()
-                        {
+            // Rows worked out here: horizontal_wrapped can't tell a card's width before it's drawn.
+            let gap = 8.0;
+            let outer = ANCHOR_CARD + 14.0;
+            let per_row = (((ui.available_width() + gap) / (outer + gap)) as usize).max(1);
+            for row in anchors.chunks(per_row) {
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for a in row {
+                        if self.anchor_card(ui, el, a) {
                             remove = Some(a.clone());
                         }
-                    });
-                }
-            });
+                    }
+                });
+                ui.add_space(gap - ui.spacing().item_spacing.y);
+            }
             if let Some(a) = remove {
                 acts.push(Action::RemoveAnchor(el.clone(), a));
             }
             let models = self.image_models();
             let me = anchor::For::Element(el.handle.clone());
             let making = self.maker.as_ref().is_some_and(|m| m.target == me);
+            let rows = self.made_rows(&browse::Near::Element(el.handle.clone()));
             ui.horizontal(|ui| {
+                match browse::dropdown(
+                    ui,
+                    "Browse existing anchors",
+                    ("element", &el.handle),
+                    &rows,
+                    &mut self.thumbs,
+                    "an image made before, for this element or anything else",
+                ) {
+                    Some(browse::Browsed::Pick(f)) => acts.push(Action::AddAnchor(el.clone(), f)),
+                    Some(browse::Browsed::Forget(id)) => acts.push(Action::ForgetImage(id)),
+                    None => {}
+                }
                 if ui.button("Add image…").clicked()
                     && let Some(file) = rfd::FileDialog::new()
                         .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
@@ -1399,6 +1500,78 @@ impl App {
             self.flush();
             self.apply(acts);
         }
+    }
+
+    /// An anchor with its label beside it, all cards one size. True when Remove is clicked.
+    fn anchor_card(&mut self, ui: &mut egui::Ui, el: &Element, a: &Path) -> bool {
+        let name = self.project.rel(a);
+        let file = a
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut remove = false;
+        // The page's colour, so the label box shows as a box.
+        egui::Frame::new()
+            .fill(theme::BAY)
+            .stroke(egui::Stroke::new(1.0, theme::LINE))
+            .corner_radius(4.0)
+            .inner_margin(6)
+            .show(ui, |ui| {
+                ui.set_width(ANCHOR_CARD);
+                ui.horizontal_top(|ui| {
+                    if self.thumbs.tile(ui, a, ANCHOR_IMAGE, &name) {
+                        self.zoom = Some(a.to_path_buf());
+                    }
+                    let size = egui::vec2(ui.available_width(), ANCHOR_IMAGE.y);
+                    ui.allocate_ui_with_layout(
+                        size,
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_size(size);
+                            let labels = &mut self.element_form.labels;
+                            let mut text = labels.get(&file).cloned().unwrap_or_default();
+                            let typed = ui
+                                .add(
+                                    egui::TextEdit::multiline(&mut text)
+                                        .hint_text(
+                                            RichText::new("what it shows, e.g. side view")
+                                                .color(theme::DUST),
+                                        )
+                                        .char_limit(LABEL_MAX)
+                                        .return_key(None)
+                                        .desired_rows(3)
+                                        .desired_width(f32::INFINITY),
+                                )
+                                .on_hover_text(format!(
+                                    "shown with it when picking it from a list, up to {LABEL_MAX} \
+                                 letters"
+                                ));
+                            typed.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::Role::MultilineTextInput,
+                                    true,
+                                    format!("Label of {name}"),
+                                )
+                            });
+                            if typed.changed() {
+                                let text = text.replace('\n', " ");
+                                if text.is_empty() {
+                                    labels.remove(&file);
+                                } else {
+                                    labels.insert(file.clone(), text);
+                                }
+                            }
+                            // On the bottom edge, so it lines up across cards.
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                                remove = remove_button(ui)
+                                    .on_hover_text(format!("take {name} off @{}", el.handle))
+                                    .clicked();
+                            });
+                        },
+                    );
+                });
+            });
+        remove
     }
 
     /// Which TTS plugin and voice speak a cast member's lines.
@@ -1886,7 +2059,20 @@ impl App {
         let models = self.image_models();
         let me = anchor::For::Frame(r);
         let making = self.maker.as_ref().is_some_and(|m| m.target == me);
+        let rows = self.made_rows(&browse::Near::Shot(r));
         ui.horizontal_wrapped(|ui| {
+            match browse::dropdown(
+                ui,
+                "Browse existing frames",
+                ("frame", r.to_string()),
+                &rows,
+                &mut self.thumbs,
+                "an image made before, for this shot or another",
+            ) {
+                Some(browse::Browsed::Pick(f)) => acts.push(Action::SetFrame(r, Some(f))),
+                Some(browse::Browsed::Forget(id)) => acts.push(Action::ForgetImage(id)),
+                None => {}
+            }
             if ui.button("Add image…").clicked()
                 && let Some(file) = rfd::FileDialog::new()
                     .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
@@ -1905,16 +2091,35 @@ impl App {
                     ))
                     .clicked()
             {
-                // What the video gets, to start with.
-                let refs = self
-                    .built(r)
-                    .map(|b| {
-                        b.references
-                            .iter()
-                            .map(|x| self.project.root.join(&x.path))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                // The ones the frame there now was made from, else what the video gets.
+                let made = s.frame.as_ref().and_then(|f| {
+                    self.project
+                        .job_that_made(&self.project.root.join(f))
+                        .ok()
+                        .flatten()
+                });
+                // And what was typed for it; saved as the frame prompt once it's priced.
+                let prompt = made
+                    .as_ref()
+                    .and_then(|j| j.brief.clone())
+                    .unwrap_or_else(|| self.form.frame_prompt.clone());
+                let refs = match made {
+                    Some(j) => j
+                        .inputs
+                        .iter()
+                        .map(|i| self.project.root.join(i))
+                        .filter(|p| p.is_file())
+                        .collect(),
+                    None => self
+                        .built(r)
+                        .map(|b| {
+                            b.references
+                                .iter()
+                                .map(|x| self.project.root.join(&x.path))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                };
                 let cfg = &self.project.config.image;
                 let aspect = s
                     .model
@@ -1929,7 +2134,7 @@ impl App {
                         (&cfg.plugin, &cfg.model),
                         (aspect, cfg.resolution.clone()),
                     )
-                    .with_prompt(&self.form.frame_prompt),
+                    .with_prompt(&prompt),
                 );
             }
             if s.frame.is_some() {
@@ -1957,6 +2162,31 @@ impl App {
     fn take_list(&mut self, ui: &mut egui::Ui, s: &Shot, acts: &mut Vec<Action>) {
         section(ui, "Takes");
         ui.add_space(6.0);
+        let mut splice: Option<Vec<shotline_core::Piece>> = None;
+        ui.horizontal(|ui| {
+            let any = self.takes.iter().any(|t| t.output().is_some());
+            if ui
+                .add_enabled(any, egui::Button::new("Make a take from pieces…"))
+                .on_hover_text(
+                    "trim a take, or put parts of several together; made here for nothing",
+                )
+                .on_disabled_hover_text("needs a take with a video")
+                .clicked()
+            {
+                splice = Some(vec![]);
+            }
+            if ui
+                .button("Bring in a video…")
+                .on_hover_text("a new take from a file, e.g. one cut in an editor")
+                .clicked()
+                && let Some(file) = rfd::FileDialog::new()
+                    .add_filter("Video", &["mp4", "mov", "mkv", "webm", "m4v"])
+                    .pick_file()
+            {
+                self.bring_in(&file);
+            }
+        });
+        ui.add_space(8.0);
         if self.takes.is_empty() {
             hint(ui, "No takes yet.");
             return;
@@ -2035,13 +2265,15 @@ impl App {
                                 }
                             });
                             let last = t.jobs.last();
+                            let made = shotline_core::made_from(t, &self.takes);
                             let cost: Vec<String> = t
                                 .costs()
                                 .iter()
                                 .map(|c| format!("{} {}", money(c.amount), c.unit))
                                 .collect();
-                            let about = last
-                                .map(|j| format!("{} {}", j.plugin, j.model))
+                            let about = made
+                                .clone()
+                                .or_else(|| last.map(|j| format!("{} {}", j.plugin, j.model)))
                                 .into_iter()
                                 .chain((!cost.is_empty()).then(|| cost.join(" + ")))
                                 .collect::<Vec<_>>()
@@ -2071,6 +2303,13 @@ impl App {
                                     acts.push(Action::RemoveTake(t.clone()));
                                 }
                             }
+                            if let Some(pieces) = shotline_core::pieces_of(t)
+                                && act(ui, "Change pieces", n)
+                                    .on_hover_text("makes a new take from these pieces, changed")
+                                    .clicked()
+                            {
+                                splice = Some(pieces);
+                            }
                             if video.is_some()
                                 && !selected
                                 && act(ui, "Use in the cut", n)
@@ -2091,6 +2330,95 @@ impl App {
         }
         if let Some(t) = watch {
             self.watch(ui, t);
+        }
+        if let Some(pieces) = splice
+            && let Some(r) = self.shot
+        {
+            self.open_splicer(r, pieces);
+        }
+    }
+
+    fn open_splicer(&mut self, r: ShotRef, pieces: Vec<shotline_core::Piece>) {
+        if self.ff.is_none() {
+            self.error("can't cut without ffmpeg; install it or set SHOTLINE_FFMPEG".into());
+            return;
+        }
+        // One sound device: the page's players give it up.
+        if let Some(d) = &mut self.deck {
+            d.pause(self.audio.as_ref());
+        }
+        if let Some((_, Some(d))) = &mut self.in_cut {
+            d.pause(self.audio.as_ref());
+        }
+        self.audio();
+        let sources = self
+            .takes
+            .iter()
+            .filter_map(|t| {
+                let j = t.output()?;
+                Some((
+                    t.clone(),
+                    self.project.job_dir(j.id).join(j.outputs.first()?),
+                ))
+            })
+            .collect();
+        self.splicer = Some(pieces::Splicer::new(r, sources, pieces));
+    }
+
+    fn splicing(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = &mut self.splicer else {
+            return;
+        };
+        let done = {
+            let mut m = s.making.lock().unwrap();
+            match std::mem::replace(&mut *m, pieces::Making::Idle) {
+                pieces::Making::Done(out) => Some(out),
+                other => {
+                    *m = other;
+                    None
+                }
+            }
+        };
+        match done {
+            Some(Ok(t)) => {
+                s.pause(self.audio.as_ref());
+                self.splicer = None;
+                if let Err(e) = self.load_takes() {
+                    self.error(e.to_string());
+                }
+                self.reload();
+                self.info(format!("{t} made; use it in the cut if it's the one"));
+                return;
+            }
+            Some(Err(e)) => {
+                if let Err(e) = self.load_takes() {
+                    self.error(e.to_string());
+                }
+                self.error(format!("couldn't make it: {e}"));
+            }
+            None => {}
+        }
+        let Some(s) = &mut self.splicer else {
+            return;
+        };
+        if !s.show(ui, self.ff.as_ref(), self.audio.as_ref(), &self.project) {
+            self.splicer = None;
+        }
+    }
+
+    fn bring_in(&mut self, file: &Path) {
+        let Some(r) = self.shot else {
+            return;
+        };
+        match self.project.import_take(r, file) {
+            Ok(t) => {
+                self.reload();
+                self.info(format!(
+                    "{t} brought in from {}",
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+            Err(e) => self.error(e.to_string()),
         }
     }
 
@@ -2266,6 +2594,43 @@ impl App {
     }
 }
 
+/// Which made images are a copy of an anchor, a frame or a shot's picture, matched by bytes.
+fn in_use(film: &Film, root: &Path) -> HashMap<PathBuf, String> {
+    let mut used: Vec<(PathBuf, String)> = vec![];
+    for (el, anchors) in &film.elements {
+        for a in anchors {
+            used.push((a.clone(), format!("an anchor of @{}", el.handle)));
+        }
+    }
+    for (_, shots) in &film.chapters {
+        for (r, s) in shots {
+            if let Some(f) = &s.frame {
+                used.push((root.join(f), format!("the storyboard frame of {r}")));
+            }
+            for (i, img) in s.images.iter().enumerate() {
+                used.push((root.join(&img.file), format!("picture {} of {r}", i + 1)));
+            }
+        }
+    }
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
+    let mut out = HashMap::new();
+    for m in &film.images {
+        let Some(len) = size(&m.path) else { continue };
+        let mut bytes = None;
+        for (f, what) in &used {
+            if size(f) != Some(len) {
+                continue;
+            }
+            let mine = bytes.get_or_insert_with(|| std::fs::read(&m.path).unwrap_or_default());
+            if std::fs::read(f).is_ok_and(|b| b == *mine) {
+                out.insert(m.path.clone(), what.clone());
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// A take's still, taken from its video the first time it's shown. Clicking it opens the take.
 fn poster(
     ui: &mut egui::Ui,
@@ -2380,6 +2745,30 @@ fn take_details(ui: &mut egui::Ui, t: &Take, p: &Project) {
         .max_height(240.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            let takes = p.takes(t.shot).unwrap_or_default();
+            if let Some(m) = shotline_core::made_from(t, &takes) {
+                ui.label(RichText::new(m).color(theme::GRAPHITE));
+            }
+            for (i, piece) in shotline_core::pieces_of(t)
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let name = takes
+                    .iter()
+                    .find(|o| o.id == piece.take)
+                    .map_or("a removed take".into(), |o| format!("#{}", o.number));
+                let join = if i == 0 { "" } else { piece.join.name() };
+                hint(
+                    ui,
+                    &format!(
+                        "{join} {}. {name} {:.2}–{:.2}s",
+                        i + 1,
+                        piece.from,
+                        piece.to
+                    ),
+                );
+            }
             for (i, j) in t.jobs.iter().enumerate() {
                 if i > 0 {
                     ui.add_space(10.0);
@@ -2620,6 +3009,15 @@ fn close_corner(ui: &mut egui::Ui, bar: egui::Rect) -> bool {
     icon_button(&mut over, "Close", close_icon)
         .on_hover_text("Close")
         .clicked()
+}
+
+/// A red ✕ that takes something off a dropdown's list; grey while it can't.
+pub(crate) fn delete_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let enabled = ui.is_enabled();
+    icon_button(ui, label, |p, s, stroke| {
+        let color = if enabled { theme::FLAG } else { stroke.color };
+        close_icon(p, s, egui::Stroke::new(stroke.width, color));
+    })
 }
 
 pub(crate) fn close_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
@@ -2945,6 +3343,14 @@ fn top_label(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 // No fill of its own, so it lights up on hover like every other button.
+/// "@paka 2", and its label if it has one.
+pub(crate) fn anchor_name(el: &Element, i: usize, anchor: &Path) -> String {
+    match el.label(anchor) {
+        Some(l) => format!("@{} {}  {l}", el.handle, i + 1),
+        None => format!("@{} {}", el.handle, i + 1),
+    }
+}
+
 pub(crate) fn remove_button(ui: &mut egui::Ui) -> egui::Response {
     ui.button(RichText::new("Remove").small().color(theme::FLAG))
 }

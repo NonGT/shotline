@@ -7,6 +7,10 @@ const DEFAULTS: &[(&str, &str)] = &[
         include_str!("../../../assets/prompts/identity.md"),
     ),
     (
+        "identity-look",
+        include_str!("../../../assets/prompts/identity-look.md"),
+    ),
+    (
         "continue",
         include_str!("../../../assets/prompts/continue.md"),
     ),

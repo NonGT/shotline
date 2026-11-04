@@ -147,7 +147,7 @@ pub struct Job {
     pub created: jiff::Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<jiff::Timestamp>,
-    /// Who speaks, for a line's recording (a cast handle).
+    /// The element it's for: who speaks a line's recording, or whose anchor an image is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub who: Option<String>,
     /// A recording thrown out but kept, since a take still uses it.
@@ -182,6 +182,16 @@ impl Job {
             discarded: false,
         }
     }
+}
+
+/// An image a model made: an anchor, a shot's picture or its storyboard frame.
+#[derive(Debug, Clone)]
+pub struct MadeImage {
+    pub path: PathBuf,
+    pub shot: Option<ShotRef>,
+    /// The element's handle, for an anchor.
+    pub element: Option<String>,
+    pub job: Job,
 }
 
 /// One run of a shot's recipe: a chain of jobs.
@@ -286,6 +296,54 @@ impl Project {
         let mut job: Job = fsx::read_toml(&path)?;
         job.id = id;
         Ok(job)
+    }
+
+    /// Every image made for the film and not thrown out, newest first, so one made again doesn't
+    /// lose the one before.
+    pub fn made_images(&self) -> Result<Vec<MadeImage>> {
+        // Anchors made before jobs said whose they were are known by matching an anchor's bytes.
+        let mut anchors: Vec<(String, PathBuf, u64)> = vec![];
+        for el in self.elements()? {
+            for a in self.anchors(&el)? {
+                if let Ok(m) = std::fs::metadata(&a) {
+                    anchors.push((el.handle.clone(), a, m.len()));
+                }
+            }
+        }
+        let whose = |path: &Path| -> Option<String> {
+            let len = std::fs::metadata(path).ok()?.len();
+            let mine = fsx::read_bytes(path).ok()?;
+            anchors
+                .iter()
+                .filter(|(_, _, l)| *l == len)
+                .find(|(_, a, _)| fsx::read_bytes(a).is_ok_and(|b| b == mine))
+                .map(|(h, _, _)| h.clone())
+        };
+        let mut out = vec![];
+        for j in self.jobs()? {
+            if !matches!(j.op, Op::ImageGenerate | Op::ImageEdit)
+                || j.status != JobStatus::Done
+                || j.discarded
+            {
+                continue;
+            }
+            let Some(f) = j.outputs.first() else { continue };
+            let path = self.job_dir(j.id).join(f);
+            if path.is_file() {
+                let element = match (&j.who, j.shot) {
+                    (None, None) => whose(&path),
+                    _ => j.who.clone(),
+                };
+                out.push(MadeImage {
+                    path,
+                    shot: j.shot,
+                    element,
+                    job: j,
+                });
+            }
+        }
+        out.reverse();
+        Ok(out)
     }
 
     /// The job whose output `file` is a copy of, like an anchor made by "Make image". Newest

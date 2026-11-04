@@ -90,6 +90,29 @@ fn anchors_are_numbered() {
 }
 
 #[test]
+fn an_anchor_s_label_goes_with_it() {
+    let (dir, p) = new_project();
+    p.add_element(Kind::Cast, "Paka", None, "").unwrap();
+    let img = dir.path().join("face.png");
+    fs::write(&img, b"png").unwrap();
+    let a = p.add_anchor("paka", &img).unwrap();
+    let b = p.add_anchor("paka", &img).unwrap();
+
+    let mut el = p.element("paka").unwrap();
+    el.labels.insert("01.png".into(), "side view".into());
+    el.labels.insert("02.png".into(), "red dress".into());
+    p.save_element(&el).unwrap();
+    let el = p.element("paka").unwrap();
+    assert_eq!(el.label(&a), Some("side view"));
+
+    p.remove_anchor("paka", &a).unwrap();
+    assert!(!a.exists());
+    let el = p.element("paka").unwrap();
+    assert_eq!(el.label(&a), None);
+    assert_eq!(el.label(&b), Some("red dress"));
+}
+
+#[test]
 fn shots_get_ids_and_elements() {
     let (_dir, p) = new_project();
     p.add_element(Kind::Cast, "Paka", None, "").unwrap();

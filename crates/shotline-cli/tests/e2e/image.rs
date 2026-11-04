@@ -86,6 +86,8 @@ fn generated_anchor() {
     let last = jobs.map(|e| e.unwrap().path()).max().unwrap();
     let job = std::fs::read_to_string(last.join("job.toml")).unwrap();
     assert!(job.contains("brief = \"side view\""), "{job}");
+    // Kept as made for @paka, to pick again later.
+    assert!(job.contains("who = \"paka\""), "{job}");
     let job: toml::Table = toml::from_str(&job).unwrap();
     assert!(
         job["prompt"]

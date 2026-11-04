@@ -32,6 +32,10 @@ pub fn mkdir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(io(path))
 }
 
+pub fn remove(path: &Path) -> Result<()> {
+    fs::remove_file(path).map_err(io(path))
+}
+
 pub fn remove_dir(path: &Path) -> Result<()> {
     fs::remove_dir_all(path).map_err(io(path))
 }

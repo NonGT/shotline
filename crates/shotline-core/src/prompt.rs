@@ -172,6 +172,7 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
     add_layers(
         project,
         &references[frame_ref.is_some() as usize..],
+        true,
         &mut parts,
     )?;
 
@@ -325,13 +326,14 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
 }
 
 /// The prompt for an anchor image or a storyboard frame, on the project's image model unless
-/// `plugin`/`model` say otherwise.
+/// `plugin`/`model` say otherwise. `outfit` asks for the clothes in the references too.
 pub fn build_image(
     project: &Project,
     catalog: &Catalog,
     what: &ImageFor,
     plugin: Option<&str>,
     model: Option<&str>,
+    outfit: bool,
 ) -> Result<BuiltImage> {
     let cfg = &project.config;
     let plugin = plugin.unwrap_or(&cfg.image.plugin).to_string();
@@ -450,7 +452,7 @@ pub fn build_image(
             (vec![text], references, aspect)
         }
     };
-    add_layers(project, &references, &mut parts)?;
+    add_layers(project, &references, outfit, &mut parts)?;
     let resolution = match what {
         ImageFor::Anchor {
             resolution: Some(r),
@@ -737,8 +739,13 @@ fn own_images(
     Ok(())
 }
 
-/// style.md and the identity note.
-fn add_layers(project: &Project, references: &[Reference], parts: &mut Vec<String>) -> Result<()> {
+/// style.md and the identity note; without `outfit` the note leaves clothes free.
+fn add_layers(
+    project: &Project,
+    references: &[Reference],
+    outfit: bool,
+    parts: &mut Vec<String>,
+) -> Result<()> {
     let layers = &project.config.prompt;
     if layers.style {
         let style = project.style()?;
@@ -750,7 +757,7 @@ fn add_layers(project: &Project, references: &[Reference], parts: &mut Vec<Strin
     }
     if layers.identity
         && !references.is_empty()
-        && let Some(t) = project.template("identity")?
+        && let Some(t) = project.template(if outfit { "identity" } else { "identity-look" })?
     {
         parts.push(render(&t, &[]));
     }

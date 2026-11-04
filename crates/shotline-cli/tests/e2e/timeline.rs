@@ -219,3 +219,47 @@ fn glob(dir: &Path, name: &str) -> Vec<PathBuf> {
         })
         .collect()
 }
+
+#[test]
+fn bring_in_and_splice() {
+    let Some(t) = tools() else { return };
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("film")).unwrap();
+    let run = |args: &[&str]| -> String {
+        let out = shotline(&tmp, &t).args(args).assert().success();
+        String::from_utf8(out.get_output().stdout.clone()).unwrap()
+    };
+    run(&["init", "."]);
+    run(&["chapter", "add", "One"]);
+    run(&["shot", "add", "1", "--prompt", "a walk"]);
+    clip(&t, &tmp.path().join("red.mp4"), "rr=1:gg=0.5:bb=0.4", false);
+    clip(&t, &tmp.path().join("blue.mp4"), "rr=0.4:gg=0.6:bb=1", true);
+    assert!(run(&["import", "01-010", "../red.mp4"]).contains("01-010#1 brought in"));
+    run(&["import", "01-010", "../blue.mp4"]);
+
+    let out = run(&[
+        "splice",
+        "01-010",
+        "1:0-0.5",
+        "fade:2:0.2-1",
+        "smooth:1:0.5-1",
+    ]);
+    assert!(out.contains("01-010#3 made from 3 pieces"), "{out}");
+    let takes = run(&["takes", "01-010"]);
+    assert!(takes.contains("brought in from red.mp4"), "{takes}");
+    assert!(takes.contains("from pieces of #1, #2"), "{takes}");
+    run(&["select", "01-010", "3"]);
+    // Two brought in, then the one made; job folders sort by when they were made.
+    let mut made = glob(&tmp.path().join("film/jobs"), "take.mp4");
+    made.sort();
+    assert_eq!(made.len(), 3);
+    // 12 + 19 frames with 7 faded together, 6 made up, then 12.
+    let d = duration(&t, &made[2]);
+    assert!((d - 42.0 / 24.0).abs() < 0.15, "{d}");
+
+    shotline(&tmp, &t)
+        .args(["splice", "01-010", "9:0-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no take 9"));
+}

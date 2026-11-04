@@ -440,6 +440,7 @@ impl Host for TestHost {
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf> {
         if ask.frame {
             assert_eq!((ask.shot, ask.prompt.as_str()), (Some(R), "at the edge"));
+            assert!(ask.outfit);
             let saved = Project::open(film)?.shot(R)?.frame_prompt;
             assert_eq!(saved.as_deref(), Some("at the edge"));
             // What the video gets, to start with.
@@ -464,6 +465,7 @@ impl Host for TestHost {
             ("paka", "side view", "$0.04")
         );
         assert_eq!(ask.refs, [film.join(".shotline").join("dress.png")]);
+        assert!(!ask.outfit, "unticked, so the clothes can change");
         assert_eq!(
             (ask.aspect.as_deref(), ask.resolution.as_deref()),
             (Some("1:1"), Some("2K"))
@@ -605,7 +607,7 @@ fn make_an_anchor_image() {
     h.run();
     h.get_by_label("2K").click();
     h.run();
-    let prompt = h.get_by_role_and_label(Role::TextInput, "Image prompt");
+    let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
     prompt.focus();
     prompt.type_text("side view");
     h.run();
@@ -620,6 +622,9 @@ fn make_an_anchor_image() {
         .query_all_by_label("Image 1")
         .count()
         > 0));
+    h.get_by_label("Outfit exactly as in their reference images")
+        .click();
+    h.run();
     h.get_by_label("Get price").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Make it for $0.04")
@@ -700,7 +705,7 @@ fn a_shot_s_pictures_and_a_take() {
     assert!(
         h.get_by_label("Shoot a take…").rect().top() > h.get_by_label("Get price").rect().bottom()
     );
-    let prompt = h.get_by_role_and_label(Role::TextInput, "Image prompt");
+    let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
     prompt.focus();
     prompt.type_text("the café");
     h.run();
@@ -755,7 +760,7 @@ fn a_shot_s_pictures_and_a_take() {
     // The shot's own picture can go along with the next one, listed under the shot.
     h.get_by_label("Make image…").click();
     h.run();
-    h.get_all_by_role_and_label(Role::ComboBox, "Add an anchor")
+    h.get_all_by_role_and_label(Role::ComboBox, "Browse existing")
         .last()
         .unwrap()
         .click();
@@ -793,7 +798,7 @@ fn a_shot_s_pictures_and_a_take() {
     let left = p.shot(R).unwrap().leave_out;
     assert_eq!(left, ["elements/cast/paka/01.png"]);
     assert!(h.query_by_label("Image 1 · @paka").is_none());
-    h.get_all_by_role_and_label(Role::ComboBox, "Add an anchor")
+    h.get_all_by_role_and_label(Role::ComboBox, "Browse existing")
         .next()
         .unwrap()
         .click();
@@ -806,7 +811,7 @@ fn a_shot_s_pictures_and_a_take() {
 
     // One of the jeep's pictures picked from Elements: the jeep comes along with only that one.
     // The shot's own, before the image panel's further down.
-    h.get_all_by_role_and_label(Role::ComboBox, "Add an anchor")
+    h.get_all_by_role_and_label(Role::ComboBox, "Browse existing")
         .next()
         .unwrap()
         .click();
@@ -829,7 +834,7 @@ fn a_shot_s_pictures_and_a_take() {
     h.get_by_label("Make frame…").click();
     h.run();
     assert!(
-        h.query_by_role_and_label(Role::TextInput, "Image prompt")
+        h.query_by_role_and_label(Role::MultilineTextInput, "Image prompt")
             .is_none()
     );
     let fp = h.get_by_role_and_label(Role::MultilineTextInput, "Frame prompt");
@@ -899,7 +904,7 @@ fn translate_only_when_it_helps() {
     h.get_by_label("Make image…").click();
     h.run();
     let typed = |h: &mut Harness<'static, App>, t: &str| {
-        let prompt = h.get_by_role_and_label(Role::TextInput, "Image prompt");
+        let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
         prompt.focus();
         prompt.type_text(t);
         h.run();
@@ -1115,17 +1120,53 @@ fn edit_elements() {
         .is_some()));
     // A new modal takes a frame or two to find its place.
     h.run();
+    // Pinched in, a click doesn't close it; pinched back out, it does.
+    let big = "elements/cast/paka/01.png big";
+    h.get_by_label(big).hover();
+    h.run();
+    h.event(egui::Event::Zoom(2.0));
+    h.run();
+    h.get_by_label(big).click();
+    h.run();
+    h.get_by_label(big).hover();
+    h.run();
+    h.event(egui::Event::Zoom(0.25));
+    h.run();
+    h.get_by_label(big).click();
+    h.run();
+    assert!(h.query_by_label(big).is_none());
+
+    h.get_by_label("elements/cast/paka/01.png").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label(big).is_some()));
+    h.run();
     h.get_by_label("Close").click();
     h.run();
     assert!(h.query_by_label("elements/cast/paka/01.png big").is_none());
 
-    // Taking an anchor off can be undone.
+    // A label says what it shows, saved once the box is left; Enter doesn't break the line.
+    let label = h.get_by_role_and_label(
+        Role::MultilineTextInput,
+        "Label of elements/cast/paka/01.png",
+    );
+    label.focus();
+    label.type_text("side view");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert_eq!(p.element("paka").unwrap().labels["01.png"], "side view");
+
+    // Taking an anchor off takes its label too, and both come back on undo.
     h.get_by_label("Remove").click();
     h.run();
     assert!(!anchor.exists());
+    assert!(p.element("paka").unwrap().labels.is_empty());
     h.get_by_label("Undo").click();
     h.run();
     assert_eq!(std::fs::read(&anchor).unwrap(), bytes);
+    assert_eq!(p.element("paka").unwrap().labels["01.png"], "side view");
 
     // And so can adding the element, after the edits to it.
     while h.query_by_label("Undo").is_some() {
@@ -2368,4 +2409,206 @@ fn plugins_window() {
     h.get_by_label("Let PATH decide").click();
     h.run();
     h.get_by_label("Also found, not used:");
+}
+
+#[test]
+fn a_take_from_pieces() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let r = ShotRef {
+        chapter: 1,
+        shot: 10,
+    };
+    let takes = p.takes(r).unwrap();
+    let first = p.job_dir(takes[0].jobs[0].id).join("out.mp4");
+    if clip(&first).is_none() {
+        return;
+    }
+    let other = tmp.path().join("from an editor.mp4");
+    clip(&other).unwrap();
+    assert_eq!(p.import_take(r, &other).unwrap().number, 3);
+
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size([1100.0, 1800.0])
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.step();
+    h.get_by_label_contains("01-010").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("brought in from from an editor.mp4");
+
+    h.get_by_label("Make a take from pieces…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Add piece")
+        .is_some()));
+    // The whole of #1, then the second half of #3, faded in.
+    h.get_by_label("Add piece").click();
+    wait(&mut h, 0.1);
+    h.get_by_role_and_label(Role::RadioButton, "cut from #3")
+        .click();
+    wait(&mut h, 0.2);
+    h.get_by_label("Add piece").click();
+    wait(&mut h, 0.1);
+    h.get_by_label_contains("2. #3  0.00–1.00s").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("changing piece 2");
+    h.get_by_role_and_label(Role::SpinButton, "Start").focus();
+    // Focused, it turns into a box to type in.
+    h.run();
+    h.get_by_role_and_label(Role::SpinButton, "Start")
+        .type_text("0.5");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    wait(&mut h, 0.1);
+    h.get_by_label("Done").click();
+    h.get_by_role_and_label(Role::RadioButton, "Fade into piece 2")
+        .click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Make take").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("01-010#4 made")
+        .is_some()));
+    let made = p.take(r, "4").unwrap();
+    let pieces = shotline_core::pieces_of(&made).unwrap();
+    assert_eq!(pieces.len(), 2);
+    assert_eq!(pieces[1].join, shotline_core::Join::Fade);
+    assert_eq!((pieces[1].from, pieces[1].to), (0.5, 1.0));
+    h.get_by_label("from pieces of #1, #3");
+
+    // Opened again with its pieces, to change.
+    h.get_by_label("Change pieces #4").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("2. #3  0.50–1.00s")
+        .is_some()));
+}
+
+#[test]
+fn made_images_stay_to_pick_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let made = |brief: &str, shot: Option<ShotRef>, who: Option<&str>| {
+        let mut j = Job::new(Op::ImageGenerate, "fake", "fake/image");
+        j.shot = shot;
+        j.who = who.map(Into::into);
+        j.brief = Some(brief.into());
+        let mut j = p.create_job(j).unwrap();
+        std::fs::write(p.job_dir(j.id).join("out.png"), brief).unwrap();
+        j.outputs = vec!["out.png".into()];
+        j.status = JobStatus::Done;
+        p.save_job(&j).unwrap();
+        j
+    };
+    made("first try", Some(R), None);
+    let second = made("second try", Some(R), None);
+    made("paka side view", None, Some("paka"));
+
+    let app = App::new(p.clone(), tmp.path().join("home")).silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 1800.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.step();
+    h.get_by_label_contains("01-010").click();
+    h.run();
+
+    // The first frame made is still there after the second, and goes back in.
+    h.get_by_role_and_label(Role::ComboBox, "Browse existing frames")
+        .click();
+    h.run();
+    h.run();
+    // Other things' too, after this shot's.
+    assert_eq!(h.query_all_by_label_contains("paka side view").count(), 2);
+    // Its Throw out, then the row.
+    h.get_all_by_label_contains("first try")
+        .last()
+        .unwrap()
+        .click();
+    h.run();
+    let frame = p.shot(R).unwrap().frame.unwrap();
+    assert_eq!(std::fs::read(p.root.join(frame)).unwrap(), b"first try");
+
+    // The frame's one is in use, so it stays; the other is thrown out, and undo puts it back.
+    h.get_by_role_and_label(Role::ComboBox, "Browse existing frames")
+        .click();
+    h.run();
+    h.get_by_label("in use");
+    // Each row's Throw out comes before it.
+    let rm = h.get_all_by_label_contains("second try").next().unwrap();
+    assert!(!rm.accesskit_node().is_disabled());
+    let first = h.get_all_by_label_contains("first try").next().unwrap();
+    assert!(first.accesskit_node().is_disabled());
+    rm.click();
+    h.run();
+    let left: Vec<String> = p
+        .made_images()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.job.brief.clone())
+        .collect();
+    assert_eq!(left, ["paka side view", "first try"]);
+    h.get_by_label("Undo").click();
+    h.run();
+    assert_eq!(p.made_images().unwrap().len(), 3);
+    assert!(!p.job(&second.id.to_string()).unwrap().discarded);
+}
+
+#[test]
+fn make_frame_starts_from_the_frame_s_own_references() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    // Made from three pictures, one of them since deleted.
+    let mut inputs = vec![];
+    for n in ["a", "b", "c"] {
+        let f = p.root.join(format!("refs/{n}.png"));
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(&f, n).unwrap();
+        inputs.push(format!("refs/{n}.png"));
+    }
+    inputs.push("refs/gone.png".into());
+    let mut j = Job::new(Op::ImageGenerate, "fal", "fal-ai/nano-banana");
+    j.shot = Some(R);
+    j.inputs = inputs;
+    j.brief = Some("ผกายืนริมป่า".into());
+    let mut j = p.create_job(j).unwrap();
+    let out = p.job_dir(j.id).join("out.png");
+    std::fs::write(&out, "the frame").unwrap();
+    j.outputs = vec!["out.png".into()];
+    j.status = JobStatus::Done;
+    p.save_job(&j).unwrap();
+    p.set_frame(R, Some(&out)).unwrap();
+
+    let mut app = App::new(p, tmp.path().join("home")).silent();
+    app.set_plugins(
+        vec![Description {
+            name: "fal".into(),
+            version: "1".into(),
+            protocol: 1,
+            env: vec![],
+            models: vec![ModelInfo {
+                id: "fal-ai/nano-banana".into(),
+                op: Op::ImageGenerate,
+                ref_image: Some("Image {n}".into()),
+                ..ModelInfo::default()
+            }],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 1800.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.step();
+    h.get_by_label_contains("01-010").click();
+    h.run();
+    h.get_by_label("Make frame…").click();
+    h.run();
+    h.get_by_label("Image 3");
+    assert!(h.query_by_label("Image 4").is_none());
+    // What was typed for that frame, not what the shot had.
+    let fp = h.get_by_role_and_label(Role::MultilineTextInput, "Frame prompt");
+    assert_eq!(fp.value().as_deref(), Some("ผกายืนริมป่า"));
 }

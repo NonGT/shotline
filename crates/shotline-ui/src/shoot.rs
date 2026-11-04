@@ -5,7 +5,7 @@ use eframe::egui::{self, RichText};
 use shotline_core::{Built, Catalog, Shot, ShotRef};
 
 use crate::edit::Action;
-use crate::{App, anchor, hint, remove_button, short, spend_button, theme};
+use crate::{App, anchor, browse, hint, remove_button, short, spend_button, theme};
 
 #[derive(Clone, Default)]
 pub(crate) enum Shoot {
@@ -139,7 +139,7 @@ impl App {
                     }
                 };
                 let path = self.project.root.join(&file);
-                if self.thumbs.tile(ui, &path, TILE, &file) {
+                if self.thumbs.tile(ui, &path, egui::Vec2::splat(TILE), &file) {
                     zoom = Some(path);
                 }
                 ui.vertical(|ui| {
@@ -235,55 +235,56 @@ impl App {
                     (
                         "Elements".to_string(),
                         group.clone(),
-                        (
-                            format!("@{} {}", el.handle, i + 1),
-                            el.handle.clone(),
-                            a.clone(),
-                        ),
+                        (crate::anchor_name(el, i, a), el.handle.clone(), a.clone()),
                     )
                 })
             })
             .filter(|(_, _, (_, _, a))| !sent.contains(&self.project.rel(a).as_str()))
             .collect();
+        // Anchors not sent yet, then images made before.
+        let anchors_left: Vec<(String, std::path::PathBuf)> = left
+            .iter()
+            .map(|(_, _, (_, h, a))| (h.clone(), a.clone()))
+            .collect();
+        let rows: Vec<(String, String, browse::Entry)> = left
+            .into_iter()
+            .map(|(top, group, (name, _, a))| {
+                let hover = self.project.rel(&a);
+                (
+                    top,
+                    group,
+                    browse::Entry {
+                        name,
+                        path: a,
+                        hover,
+                        made: None,
+                        used: None,
+                    },
+                )
+            })
+            .chain(self.made_rows(&browse::Near::Shot(r)))
+            .collect();
         // Wrapped: the column is narrow.
         ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(!left.is_empty(), |ui| {
-                let mut picked = None;
-                let thumbs = &mut self.thumbs;
-                let open = egui::ComboBox::from_id_salt(("send anchor", r.to_string()))
-                    .selected_text("Add an anchor")
-                    .width(170.0)
-                    .height(crate::grouped::MAX)
-                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                    .show_ui(ui, |ui| {
-                        ui.set_width(320.0);
-                        let grown = crate::grouped::list(
-                            ui,
-                            &left,
-                            |ui, (name, handle, a)| {
-                                let hover = self.project.rel(a);
-                                if crate::grouped::picture(ui, thumbs, a, name, &hover) {
-                                    picked = Some((handle.clone(), hover));
-                                }
-                            },
-                            |_| {},
-                        );
-                        crate::grouped::remeasure_later(ui, grown);
-                        if picked.is_some() {
-                            ui.close();
+            match browse::dropdown(
+                ui,
+                browse::LABEL,
+                ("send", r.to_string()),
+                &rows,
+                &mut self.thumbs,
+                "an element's anchor, sent with this shot only, or an image made before",
+            ) {
+                Some(browse::Browsed::Pick(f)) => {
+                    match anchors_left.iter().find(|(_, a)| *a == f) {
+                        Some((h, a)) => {
+                            acts.push(Action::SendAnchor(r, h.clone(), self.project.rel(a)))
                         }
-                    });
-                crate::grouped::remeasure(ui.ctx());
-                if let Some((handle, a)) = picked {
-                    acts.push(Action::SendAnchor(r, handle, a));
+                        None => acts.push(Action::AddShotImage(r, f)),
+                    }
                 }
-                open.response
-                    .on_hover_text("an element's anchor image, sent with this shot only")
-                    .on_disabled_hover_text("every anchor is sent already")
-                    .widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Add an anchor")
-                    });
-            });
+                Some(browse::Browsed::Forget(id)) => acts.push(Action::ForgetImage(id)),
+                None => {}
+            }
             if ui.button("Add image…").clicked()
                 && let Some(file) = rfd::FileDialog::new()
                     .add_filter("Images", &["png", "jpg", "jpeg", "webp"])

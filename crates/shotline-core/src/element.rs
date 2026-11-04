@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -57,8 +58,18 @@ pub struct Element {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice: Option<Voice>,
+    /// A few words on each anchor, by file name, to tell them apart when picking one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
     #[serde(skip, default = "default_kind")]
     pub kind: Kind,
+}
+
+impl Element {
+    pub fn label(&self, anchor: &Path) -> Option<&str> {
+        let name = anchor.file_name()?.to_str()?;
+        self.labels.get(name).map(String::as_str)
+    }
 }
 
 /// How a cast member sounds: which TTS plugin and voice to use for their lines.
@@ -134,6 +145,7 @@ impl Project {
             handle,
             description: description.to_string(),
             voice: None,
+            labels: BTreeMap::new(),
             kind,
         };
         fsx::write_toml(&self.element_file(kind, &el.handle), &el)?;
@@ -233,5 +245,17 @@ impl Project {
         let dest = self.anchor_dir(&el).join(format!("{n:02}.{ext}"));
         fsx::copy(file, &dest)?;
         Ok(dest)
+    }
+
+    /// Deletes an anchor and its label.
+    pub fn remove_anchor(&self, handle: &str, anchor: &Path) -> Result<()> {
+        let mut el = self.element(handle)?;
+        fsx::remove(anchor)?;
+        if let Some(name) = anchor.file_name().and_then(|n| n.to_str())
+            && el.labels.remove(name).is_some()
+        {
+            self.save_element(&el)?;
+        }
+        Ok(())
     }
 }
