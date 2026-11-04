@@ -221,7 +221,7 @@ fn options(m: &shotline_core::protocol::ModelInfo) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The plugins as the app's Plugins window shows them.
+/// The plugins as the app's Preferences shows them.
 #[cfg(feature = "ui")]
 pub fn infos(installed: &Installed) -> (Vec<shotline_ui::PluginInfo>, Vec<String>) {
     use shotline_ui::{PluginInfo, Runs};

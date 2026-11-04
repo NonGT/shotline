@@ -50,8 +50,7 @@ impl NativeMenu {
         let open = item("&Open Film…", Some("CmdOrCtrl+O"));
         let recent = Submenu::new("Open &Recent", true);
         let close = item("&Close Film", Some("CmdOrCtrl+W"));
-        let settings = item("&Settings…", Some("CmdOrCtrl+,"));
-        let plugins = item("&Plugins…", None);
+        let prefs = item("&Preferences…", Some("CmdOrCtrl+,"));
         let file = Submenu::with_items("&File", true, &[&new, &open, &recent, &sep(), &close])
             .expect("file menu");
         #[cfg(target_os = "windows")]
@@ -67,8 +66,7 @@ impl NativeMenu {
             (close.id().clone(), MenuCommand::CloseFilm),
             (undo.id().clone(), MenuCommand::Undo),
             (redo.id().clone(), MenuCommand::Redo),
-            (settings.id().clone(), MenuCommand::Settings),
-            (plugins.id().clone(), MenuCommand::Plugins),
+            (prefs.id().clone(), MenuCommand::Preferences),
         ];
         // Not the system's own items: they send copy: and paste: to the window, which winit
         // doesn't answer, so these ask egui instead.
@@ -83,8 +81,7 @@ impl NativeMenu {
             commands.push((i.id().clone(), cmd));
         }
         #[cfg(target_os = "windows")]
-        edit.append_items(&[&sep(), &settings, &plugins])
-            .expect("edit menu");
+        edit.append_items(&[&sep(), &prefs]).expect("edit menu");
 
         #[cfg(target_os = "macos")]
         let menu = {
@@ -99,8 +96,7 @@ impl NativeMenu {
                 &[
                     &PredefinedMenuItem::about(None, Some(about)),
                     &sep(),
-                    &settings,
-                    &plugins,
+                    &prefs,
                     &sep(),
                     &PredefinedMenuItem::services(None),
                     &sep(),

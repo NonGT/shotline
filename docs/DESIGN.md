@@ -51,12 +51,13 @@ If you keep the film folder in git, the `.gitignore` that `init` writes leaves o
 was made, from what, and for how much survives even if the media lives elsewhere.
 
 Keys are never stored in the project, only read from the environment or `~/.config/shotline/.env`.
-The app's Settings lists the keys each installed plugin needs, writes them to that file (mode 600)
-and checks one works by asking the plugin for its balance, which is free.
-
-Plugins… (next to Settings in the menu) lists each plugin, where its program is, the copies on
-PATH that aren't used with a button to use one instead, the keys it's missing, and each model's
-options for the open film. Changes go into shotline.toml and can be undone.
+The app's Preferences (Cmd+,) has a page per plugin, listed on the left with a dot on one missing
+a key or not answering. A page has the keys it needs, written to that file (mode 600) and checked
+by asking the plugin for its balance, which is free; where its program is, with the copies on PATH
+that aren't used and a button to use one instead; and each model's options for the open film.
+Nothing is written until OK, and Cancel or Escape throws the changes away (Escape asks first). The
+film's options go into shotline.toml as one step that can be undone. Asking for a plugin's keys
+elsewhere, e.g. Keys… under a voice that couldn't be listed, opens Preferences at that plugin.
 
 ## Shots
 

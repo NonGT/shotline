@@ -9,7 +9,7 @@ use shotline_core::protocol::Description;
 use shotline_core::slug::slugify;
 use shotline_core::{Git, Project};
 
-use crate::keys::Keys;
+use crate::prefs::Prefs;
 use crate::{App, Host, caption, hint, read, theme};
 
 const RECENT: usize = 8;
@@ -27,8 +27,7 @@ pub enum MenuCommand {
     Copy,
     Paste,
     SelectAll,
-    Settings,
-    Plugins,
+    Preferences,
     Quit,
 }
 
@@ -46,9 +45,8 @@ pub struct Shell {
     screen: Screen,
     /// New Film asked for over an open film.
     dialog: Option<Form>,
-    /// Settings, while open.
-    keys_page: Option<Keys>,
-    plugins_page: Option<crate::plugins::Plugins>,
+    /// Preferences, while open.
+    prefs: Option<Prefs>,
     /// Edit commands for egui, sent with the next frame.
     edits: Vec<MenuCommand>,
     /// The text box last typed in, which a click on the window menu takes focus from.
@@ -101,8 +99,7 @@ impl Shell {
             here: here.to_path_buf(),
             screen: Screen::Start(Form::new(here)),
             dialog: None,
-            keys_page: None,
-            plugins_page: None,
+            prefs: None,
             edits: vec![],
             typing: None,
             window_menu: cfg!(not(any(target_os = "macos", target_os = "windows"))),
@@ -188,12 +185,7 @@ impl Shell {
                     self.dialog = None;
                 }
             }
-            MenuCommand::Settings => {
-                self.keys_page = Some(Keys::new(&self.user_dir, &self.plugins));
-            }
-            MenuCommand::Plugins => {
-                self.plugins_page = Some(crate::plugins::Plugins::new(self.host.as_ref()));
-            }
+            MenuCommand::Preferences => self.preferences(None),
             MenuCommand::Cut
             | MenuCommand::Copy
             | MenuCommand::Paste
@@ -252,20 +244,11 @@ impl Shell {
             self.go(o);
         }
         if let Screen::Film(app) = &mut self.screen
-            && std::mem::take(&mut app.wants_keys)
+            && let Some(plugin) = app.wants_keys.take()
         {
-            self.command(MenuCommand::Settings);
+            self.preferences(Some(&plugin));
         }
-        self.plugins_window(ui);
-        if let Some(k) = &mut self.keys_page {
-            let (open, changed) = k.show(ui, self.host.clone());
-            if changed && let Screen::Film(app) = &self.screen {
-                app.forget_voices();
-            }
-            if !open {
-                self.keys_page = None;
-            }
-        }
+        self.prefs_window(ui);
         let title = title(self.film().map(|a| &a.project));
         if title != self.titled {
             ui.ctx()
@@ -274,50 +257,44 @@ impl Shell {
         }
     }
 
-    fn plugins_window(&mut self, ui: &mut egui::Ui) {
-        let Some(page) = &mut self.plugins_page else {
-            return;
-        };
+    /// Opens Preferences, at `plugin`'s page if given.
+    fn preferences(&mut self, plugin: Option<&str>) {
         let film = match &self.screen {
-            Screen::Film(app) => Some(app.project.config.clone()),
+            Screen::Film(app) => Some(&app.project.config),
             Screen::Start(_) => None,
         };
-        let (open, asks) = page.show(ui, self.host.clone(), film.as_ref());
-        if std::mem::take(&mut page.changed) {
-            self.plugins = page.descriptions();
-            if let Screen::Film(app) = &mut self.screen {
+        self.prefs = Some(Prefs::new(&self.user_dir, self.host.as_ref(), film, plugin));
+    }
+
+    fn prefs_window(&mut self, ui: &mut egui::Ui) {
+        let Some(page) = &mut self.prefs else {
+            return;
+        };
+        let done = page.show(ui, self.host.clone());
+        if !done.open {
+            self.prefs = None;
+        }
+        if done.plugins_changed || done.keys_changed {
+            // What a plugin says it needs is worked out again from the keys.
+            if let Some(h) = &self.host {
+                self.plugins = h
+                    .plugins()
+                    .0
+                    .into_iter()
+                    .filter_map(|p| p.description.ok())
+                    .collect();
+            }
+        }
+        if let Screen::Film(app) = &mut self.screen {
+            if done.plugins_changed {
                 app.set_plugins(self.plugins.clone(), self.host.clone());
             }
-        }
-        if !open {
-            self.plugins_page = None;
-        }
-        let mut keys = false;
-        let mut acts = vec![];
-        for a in asks {
-            match a {
-                crate::plugins::Ask::Keys => keys = true,
-                crate::plugins::Ask::Param {
-                    plugin,
-                    model,
-                    key,
-                    value,
-                } => acts.push(crate::edit::Action::Param {
-                    plugin,
-                    model,
-                    key,
-                    value,
-                }),
+            if done.keys_changed {
+                app.forget_voices();
             }
-        }
-        if let Screen::Film(app) = &mut self.screen
-            && !acts.is_empty()
-        {
-            app.apply(acts);
-        }
-        if keys {
-            self.plugins_page = None;
-            self.command(MenuCommand::Settings);
+            if !done.params.is_empty() {
+                app.apply(done.params);
+            }
         }
     }
 
@@ -335,7 +312,7 @@ impl Shell {
         } else if key(egui::Key::W) {
             MenuCommand::CloseFilm
         } else if key(egui::Key::Comma) {
-            MenuCommand::Settings
+            MenuCommand::Preferences
         } else if self.window_menu && key(egui::Key::Q) {
             MenuCommand::Quit
         } else {
@@ -396,8 +373,13 @@ impl Shell {
                         item(ui, "Paste", "Ctrl+V", true, MenuCommand::Paste);
                         item(ui, "Select All", "Ctrl+A", true, MenuCommand::SelectAll);
                         ui.separator();
-                        item(ui, "Settings...", "Ctrl+,", true, MenuCommand::Settings);
-                        item(ui, "Plugins...", "", true, MenuCommand::Plugins);
+                        item(
+                            ui,
+                            "Preferences...",
+                            "Ctrl+,",
+                            true,
+                            MenuCommand::Preferences,
+                        );
                     });
                 });
             });

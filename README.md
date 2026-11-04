@@ -49,7 +49,7 @@ one without spending anything. `plugins/local` upscales and interpolates for fre
 RIFE if you have `rife-ncnn-vulkan`), for use in recipes.
 
 Needs ffmpeg. API keys go in your environment or `~/.config/shotline/.env`, which the app's
-Settings writes for you.
+Preferences writes for you.
 
 MIT licensed. The app has Noto Sans and Noto Sans Thai built in, under the SIL Open Font License
 (`assets/fonts/OFL.txt`).

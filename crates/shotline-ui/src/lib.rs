@@ -9,12 +9,11 @@ mod cut;
 mod edit;
 mod git;
 mod grouped;
-mod keys;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
 mod pieces;
 mod player;
-mod plugins;
+mod prefs;
 mod shoot;
 mod start;
 mod theme;
@@ -232,8 +231,8 @@ pub struct App {
     zoom: Option<PathBuf>,
     plugins: Vec<Description>,
     host: Option<Arc<dyn Host>>,
-    /// Keys asked for, e.g. from a plugin that said it has none; the shell opens Settings.
-    wants_keys: bool,
+    /// A plugin's keys asked for, e.g. one that said it has none; the shell opens Preferences.
+    pub(crate) wants_keys: Option<String>,
     maker: Option<anchor::Maker>,
     /// The open shot as it would be sent; None once anything is read again.
     built: Option<(ShotRef, Result<shotline_core::Built, String>)>,
@@ -507,7 +506,7 @@ impl App {
             zoom: None,
             plugins: vec![],
             host: None,
-            wants_keys: false,
+            wants_keys: None,
             maker: None,
             built: None,
             translate_prompt: false,
@@ -1678,7 +1677,9 @@ impl App {
                 settings_rows(ui, schema.as_ref(), &mut v.settings);
             });
         let none = v.plugin.is_empty();
-        self.wants_keys |= keys;
+        if keys {
+            self.wants_keys = Some(v.plugin.clone());
+        }
         if let Some(f) = sample {
             self.element_form.voice.sample = self.project.rel(&f);
         }

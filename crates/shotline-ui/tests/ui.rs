@@ -304,6 +304,16 @@ impl Host for TestHost {
                     description: Ok(d("venice", vec![])),
                     missing: vec![],
                 },
+                PluginInfo {
+                    name: "elevenlabs".into(),
+                    runs: Runs::Path("/a/shotline-plugin-elevenlabs".into()),
+                    skipped: vec![],
+                    description: Ok(Description {
+                        env: vec![ELEVENLABS_KEY.into()],
+                        ..d("elevenlabs", vec![])
+                    }),
+                    missing: vec![],
+                },
             ],
             vec![],
         )
@@ -943,60 +953,79 @@ fn translate_only_when_it_helps() {
     assert!(!offered(&h));
 }
 
+/// A name nobody has set, so the file is what counts.
+const ELEVENLABS_KEY: &str = "SHOTLINE_TEST_ELEVENLABS_KEY";
+
 #[test]
-fn keys_in_settings() {
+fn keys_in_preferences() {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
-    // A name nobody has set, so the file is what counts.
-    let var = "SHOTLINE_TEST_ELEVENLABS_KEY";
-    let plugins = vec![Description {
-        name: "elevenlabs".into(),
-        version: "1".into(),
-        protocol: 1,
-        env: vec![var.into()],
-        models: vec![],
-    }];
+    let var = ELEVENLABS_KEY;
     let shell = Shell::new(None, home.clone(), tmp.path())
-        .with_plugins(plugins, Some(Arc::new(TestHost)))
+        .with_plugins(vec![], Some(Arc::new(TestHost)))
         .testing();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 800.0))
+        .with_size(egui::vec2(1100.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
-    h.state_mut().command(MenuCommand::Settings);
-    h.run();
+    let open = |h: &mut Harness<Shell>| {
+        h.state_mut().command(MenuCommand::Preferences);
+        h.run();
+        h.get_by_role_and_label(Role::Button, "elevenlabs").click();
+        h.run();
+    };
+    open(&mut h);
     h.get_by_label("not set");
-    // Nothing to check with yet.
-    h.get_by_label("Check").click();
-    h.run();
-    assert!(h.query_by_label_contains("works").is_none());
+    assert!(h.get_by_label("Check").accesskit_node().is_disabled());
 
+    // Typed, it waits for OK.
     let field = h.get_by_role_and_label(Role::TextInput, var);
     field.focus();
     field.type_text("sk-123");
     h.run();
-    h.get_by_label("Save").click();
+    h.get_by_label("saved on OK");
+    assert!(h.get_by_label("Check").accesskit_node().is_disabled());
+    // Escape doesn't throw it away.
+    h.key_press(egui::Key::Escape);
     h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.get_by_label("OK saves the changes; Cancel throws them away");
+    h.get_by_label("OK").click();
+    h.run();
+    assert!(h.query_by_label("Preferences").is_none());
     let env = home.join(".env");
     assert_eq!(
         std::fs::read_to_string(&env).unwrap(),
         format!("{var}=sk-123\n")
     );
-    h.get_by_label("in .env");
 
+    open(&mut h);
+    h.get_by_label("in .env");
     h.get_by_label("Check").click();
     assert!(wait_for_shell(&mut h, |h| h
         .query_by_label("works: 3.5 USD left")
         .is_some()));
 
+    // Cancel leaves it.
     h.get_by_label("Remove").click();
     h.run();
-    assert_eq!(std::fs::read_to_string(&env).unwrap(), "\n");
-    h.get_by_label("not set");
-    h.get_by_label("Close").click();
+    h.get_by_label("taken out on OK");
+    h.get_by_label("Cancel").click();
     h.run();
-    assert!(h.query_by_label("Keys").is_none());
+    assert!(h.query_by_label("Preferences").is_none());
+    assert_eq!(
+        std::fs::read_to_string(&env).unwrap(),
+        format!("{var}=sk-123\n")
+    );
+
+    open(&mut h);
+    h.get_by_label("Remove").click();
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(std::fs::read_to_string(&env).unwrap(), "\n");
 }
 
 fn wait_for_shell(h: &mut Harness<Shell>, done: impl Fn(&Harness<Shell>) -> bool) -> bool {
@@ -2353,7 +2382,7 @@ fn lines_dragged_into_order() {
 }
 
 #[test]
-fn plugins_window() {
+fn plugins_in_preferences() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
@@ -2364,51 +2393,75 @@ fn plugins_window() {
         .with_size(egui::vec2(1100.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
-    h.state_mut().command(MenuCommand::Plugins);
-    h.run();
+    let open = |h: &mut Harness<Shell>| {
+        h.state_mut().command(MenuCommand::Preferences);
+        h.run();
+    };
+    open(&mut h);
+    // The first plugin's page.
     h.get_by_label("built into shotline");
     h.get_by_label("needs FAL_API_KEY");
-    h.get_by_label("Also found, not used:");
-    h.get_by_label("/b/shotline-plugin-venice");
 
-    // An option goes into the film, and undo takes it back out.
+    // Options go into the film on OK, as one step to undo.
     const H3: &str = "minimax/h3-max/reference-to-video";
     let safety = format!("Safety checker for {H3}");
     h.get_by_role_and_label(Role::CheckBox, &safety).click();
     h.run();
-    let cfg = || Project::open(&p.root).unwrap().config;
-    assert_eq!(
-        cfg().params["fal"][H3]["enable_safety_checker"].as_bool(),
-        Some(false)
-    );
     h.get_by_role_and_label(Role::ComboBox, &format!("Prompt rewriting for {H3}"))
         .click();
     h.run();
     h.get_by_label("quality").click();
     h.run();
-    assert_eq!(
-        cfg().params["fal"][H3]["prompt_expansion_mode"].as_str(),
-        Some("quality")
-    );
+    let cfg = || Project::open(&p.root).unwrap().config;
+    assert!(cfg().params.is_empty());
+    h.get_by_label("OK").click();
+    h.run();
+    let h3 = || cfg().params["fal"][H3].clone();
+    assert_eq!(h3()["enable_safety_checker"].as_bool(), Some(false));
+    assert_eq!(h3()["prompt_expansion_mode"].as_str(), Some("quality"));
     h.state_mut().command(MenuCommand::Undo);
     h.run();
-    assert!(!cfg().params["fal"][H3].contains_key("prompt_expansion_mode"));
+    assert!(cfg().params.is_empty());
+    h.state_mut().command(MenuCommand::Redo);
+    h.run();
+
     // Back to the default by hand.
-    h.get_by_label("Use default").click();
+    open(&mut h);
+    h.get_all_by_label("Use default").next().unwrap().click();
+    h.run();
+    h.get_all_by_label("Use default").next().unwrap().click();
+    h.run();
+    h.get_by_label("OK").click();
     h.run();
     assert!(cfg().params.is_empty());
 
-    // The copy further along PATH, kept.
+    // The copy further along PATH, kept on OK.
+    open(&mut h);
+    h.get_by_role_and_label(Role::Button, "venice").click();
+    h.run();
+    h.get_by_label("Also found, not used");
     h.get_by_label("Use this one").click();
+    h.run();
+    h.get_by_label("keeps /b/shotline-plugin-venice");
+    assert!(PINNED.lock().unwrap().is_empty());
+    h.get_by_label("OK").click();
     h.run();
     assert_eq!(
         PINNED.lock().unwrap().last().unwrap().1,
         PathBuf::from("/b/shotline-plugin-venice")
     );
+    open(&mut h);
+    h.get_by_role_and_label(Role::Button, "venice").click();
+    h.run();
     h.get_by_label("kept");
     h.get_by_label("Let PATH decide").click();
     h.run();
-    h.get_by_label("Also found, not used:");
+    h.get_by_label("OK").click();
+    h.run();
+    open(&mut h);
+    h.get_by_role_and_label(Role::Button, "venice").click();
+    h.run();
+    h.get_by_label("Also found, not used");
 }
 
 #[test]
