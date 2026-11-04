@@ -190,9 +190,6 @@ pub fn line_request(
     if let Some(id) = &voice.voice_id {
         v["voice_id"] = json!(id);
     }
-    if let Some(s) = &voice.sample {
-        v["sample"] = json!(project.root.join(s));
-    }
     Ok((
         plugin,
         Request {

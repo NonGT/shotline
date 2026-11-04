@@ -1597,7 +1597,6 @@ impl App {
                 (!models.is_empty()).then(|| (d.name.clone(), models))
             })
             .collect();
-        let root = self.project.root.clone();
         let film_tts = self.project.config.tts.clone();
         let v = &mut self.element_form.voice;
         let installed = tts.iter().find(|(p, _)| *p == v.plugin);
@@ -1613,7 +1612,6 @@ impl App {
             .find(|m| m.id == v.model)
             .or(models.first())
             .and_then(|m| m.voice_schema.clone());
-        let mut sample = None;
         let mut keys = false;
         egui::Grid::new("voice")
             .num_columns(2)
@@ -1675,27 +1673,11 @@ impl App {
                 ui.weak("Voice");
                 keys |= voice_picker(ui, &mut v.voice_id, voices.as_ref());
                 ui.end_row();
-                let l = ui.weak("Sample");
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut v.sample)
-                            .hint_text(RichText::new("a recording to clone").color(theme::DUST))
-                            .desired_width(240.0),
-                    )
-                    .labelled_by(l.id);
-                    if ui.button("Choose").clicked() {
-                        sample = rfd::FileDialog::new().set_directory(&root).pick_file();
-                    }
-                });
-                ui.end_row();
                 settings_rows(ui, schema.as_ref(), &mut v.settings);
             });
         let none = v.plugin.is_empty();
         if keys {
             self.wants_keys = Some(v.plugin.clone());
-        }
-        if let Some(f) = sample {
-            self.element_form.voice.sample = self.project.rel(&f);
         }
         if tts.is_empty() {
             hint(

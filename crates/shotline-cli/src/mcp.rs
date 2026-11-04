@@ -312,8 +312,6 @@ pub struct Voice {
     plugin: String,
     model: Option<String>,
     voice_id: Option<String>,
-    /// Recording to clone from, relative to the project folder
-    sample: Option<String>,
     /// Voice settings passed to the plugin, e.g. {"stability": 0.5}
     #[serde(default)]
     settings: BTreeMap<String, serde_json::Value>,
@@ -720,7 +718,6 @@ impl Server {
         let mut args = a(["element", "voice", &p.handle, "--plugin", &p.plugin]);
         opt(&mut args, "--model", p.model);
         opt(&mut args, "--voice-id", p.voice_id);
-        opt(&mut args, "--sample", p.sample);
         settings(&p.settings, "--set", &mut args);
         self.cli(args, None, &ctx).await
     }

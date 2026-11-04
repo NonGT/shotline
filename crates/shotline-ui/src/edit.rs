@@ -85,7 +85,6 @@ pub(crate) struct VoiceForm {
     pub plugin: String,
     pub model: String,
     pub voice_id: String,
-    pub sample: String,
     /// One `key = value` a line.
     pub settings: String,
 }
@@ -101,7 +100,6 @@ impl ElementForm {
                 plugin: v.plugin,
                 model: v.model.unwrap_or_default(),
                 voice_id: v.voice_id.unwrap_or_default(),
-                sample: v.sample.unwrap_or_default(),
                 settings: settings_text(&v.settings),
             },
             labels: el.labels.clone(),
@@ -126,7 +124,6 @@ impl ElementForm {
                     plugin,
                     model: some(&v.model),
                     voice_id: some(&v.voice_id),
-                    sample: some(&v.sample),
                     settings,
                 })
             }

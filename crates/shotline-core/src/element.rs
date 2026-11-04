@@ -80,9 +80,6 @@ pub struct Voice {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub voice_id: Option<String>,
-    /// A recording to clone from, for plugins that do that. Relative to the project.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sample: Option<String>,
     /// Passed to the plugin as is, e.g. stability.
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub settings: toml::Table,

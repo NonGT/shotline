@@ -407,9 +407,6 @@ enum ElementCmd {
         model: Option<String>,
         #[arg(long)]
         voice_id: Option<String>,
-        /// A recording to clone from, for plugins that do that
-        #[arg(long)]
-        sample: Option<PathBuf>,
         /// Voice setting passed to the plugin, e.g. --set stability=0.5
         #[arg(long = "set", value_parser = key_value)]
         settings: Vec<(String, String)>,
@@ -815,20 +812,9 @@ fn run(cli: Cli) -> Result<()> {
             ref plugin,
             ref model,
             ref voice_id,
-            ref sample,
             ref settings,
         }) => {
             let p = open()?;
-            let sample = match sample {
-                Some(f) => {
-                    let full = std::env::current_dir()?.join(f);
-                    if !full.is_file() {
-                        bail!("{} doesn't exist", f.display());
-                    }
-                    Some(p.rel(&full))
-                }
-                None => None,
-            };
             let mut set = toml::Table::new();
             for (k, v) in settings {
                 let v = v
@@ -842,7 +828,6 @@ fn run(cli: Cli) -> Result<()> {
                     plugin: plugin.clone(),
                     model: model.clone(),
                     voice_id: voice_id.clone(),
-                    sample,
                     settings: set,
                 },
             )?;

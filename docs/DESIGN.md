@@ -111,7 +111,6 @@ A cast member can have a voice:
 [voice]
 plugin = "elevenlabs"
 voice_id = "..."
-# or sample = "paka/voice.wav" for plugins that clone
 ```
 
 Audio length matters: a shot's lines have to fit its duration, and models limit audio input (h3 takes
@@ -519,7 +518,7 @@ shotline plugin option <plugin> <model> <key> [value]   # film-wide; no value ta
 shotline element add <kind> <name> [--handle h] [--desc ...]
 shotline element anchor <handle> (--file img | --generate [--prompt ..] [--ref file|url].. [--no-anchors] [--aspect a] [--resolution r] [--translate] [--plugin p] [--model m] [--yes])
 shotline element draft <handle> [--write] [--plugin p] [--model m] [--yes]
-shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--sample f] [--set k=v]
+shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--set k=v]
 shotline element ls
 shotline chapter add <title>
 shotline chapter ls
