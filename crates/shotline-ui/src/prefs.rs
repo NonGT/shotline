@@ -238,7 +238,7 @@ impl Prefs {
         let mut done = Done::default();
         let (mut ok, mut cancel) = (false, false);
         let mut check = None;
-        let modal = egui::Modal::new(egui::Id::unique("preferences")).show(ui.ctx(), |ui| {
+        let modal = crate::modal(ui.ctx(), "preferences", |ui| {
             ui.set_width(900.0);
             ui.heading("Preferences");
             ui.add_space(8.0);

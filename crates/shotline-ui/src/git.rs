@@ -71,7 +71,7 @@ impl App {
             _ => &[],
         };
         let film = self.project.root.display().to_string();
-        let modal = egui::Modal::new(egui::Id::unique("git")).show(ui.ctx(), |ui| {
+        let modal = crate::modal(ui.ctx(), "git", |ui| {
             ui.set_width(440.0);
             match dialog {
                 Dialog::Commit(message) => {

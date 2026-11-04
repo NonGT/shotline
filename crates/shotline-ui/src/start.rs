@@ -519,7 +519,7 @@ impl Shell {
 fn new_film_dialog(ui: &mut egui::Ui, form: &mut Form, has_git: bool) -> (Option<Opened>, bool) {
     let mut out = None;
     let mut cancel = false;
-    let modal = egui::Modal::new(egui::Id::unique("new film")).show(ui.ctx(), |ui| {
+    let modal = crate::modal(ui.ctx(), "new film", |ui| {
         ui.set_width(460.0);
         ui.heading("New film");
         ui.add_space(10.0);

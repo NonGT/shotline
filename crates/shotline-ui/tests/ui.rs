@@ -2498,6 +2498,16 @@ fn default_models_in_preferences() {
     h.get_by_role_and_label(Role::ComboBox, "Translating")
         .click();
     h.run();
+    // A click on the window can put it back on top; the open list still draws above it.
+    let window = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("preferences"));
+    h.ctx.move_to_top(window);
+    h.run();
+    let item = h
+        .get_by_label("venice · claude-haiku-5-5\nper token")
+        .rect()
+        .center();
+    let on_top = h.ctx.layer_id_at(item).unwrap();
+    assert_ne!(on_top, window, "the list is under the window");
     h.get_by_label("venice · claude-haiku-5-5\nper token")
         .click();
     h.run();

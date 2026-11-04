@@ -124,7 +124,7 @@ impl Splicer {
         let wide = (ui.ctx().content_rect().width() * 0.7).clamp(480.0, 960.0);
         let mut close = false;
         let mut pick = None;
-        let modal = egui::Modal::new(egui::Id::unique("pieces")).show(ui.ctx(), |ui| {
+        let modal = crate::modal(ui.ctx(), "pieces", |ui| {
             ui.set_width(wide);
             ui.horizontal(|ui| {
                 ui.heading("Make a take from pieces");

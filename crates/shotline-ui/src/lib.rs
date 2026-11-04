@@ -1135,7 +1135,7 @@ impl App {
         let details = self.zoom_details.as_ref().is_some_and(|(p, _)| *p == path);
         let max = room - egui::vec2(0.0, if details { 330.0 } else { 40.0 });
         let max = max - egui::vec2(0.0, 28.0);
-        let modal = egui::Modal::new(egui::Id::unique("zoom")).show(ui.ctx(), |ui| {
+        let modal = crate::modal(ui.ctx(), "zoom", |ui| {
             let bar = title_bar(ui, &name);
             match self.thumbs.texture_later(ui, &path, BIG, &name) {
                 Big::Ready(t) => {
@@ -2541,7 +2541,7 @@ impl App {
             .and_then(|d| d.players.get(1))
             .map(|p| p.label.clone());
         let mut pick: Option<Option<Take>> = None;
-        let modal = egui::Modal::new(egui::Id::unique("take")).show(ui.ctx(), |ui| {
+        let modal = crate::modal(ui.ctx(), "take", |ui| {
             ui.set_width(wide);
             let bar = title_bar(ui, &take.to_string());
             match deck {
@@ -2993,6 +2993,34 @@ pub(crate) fn icon_button(
             rect.shrink(7.0),
             egui::Stroke::new(1.5, v.fg_stroke.color),
         );
+    }
+    r
+}
+
+/// An `egui::Modal` whose dropdowns always draw above it. Both sit on the foreground layer, and
+/// a click on the modal can put it back over a list that's open.
+pub(crate) fn modal<R>(
+    ctx: &egui::Context,
+    name: &str,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::ModalResponse<R> {
+    let modals = egui::Id::unique("modal layers");
+    let r = egui::Modal::new(egui::Id::unique(name)).show(ctx, content);
+    let me = r.response.layer_id;
+    let others = ctx.data_mut(|d| {
+        let all = d.get_temp_mut_or_default::<Vec<egui::LayerId>>(modals);
+        if !all.contains(&me) {
+            all.push(me);
+        }
+        all.clone()
+    });
+    if r.is_top_modal {
+        let popups = ctx.memory(|m| m.areas().visible_layer_ids());
+        for l in popups {
+            if l.order == egui::Order::Foreground && !others.contains(&l) {
+                ctx.set_sublayer(me, l);
+            }
+        }
     }
     r
 }
