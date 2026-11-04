@@ -1480,7 +1480,7 @@ impl App {
                     let cfg = &film.image;
                     self.maker = Some(anchor::Maker::new(
                         me.clone(),
-                        anchors.to_vec(),
+                        vec![],
                         &models,
                         (&cfg.plugin, &cfg.model),
                         (

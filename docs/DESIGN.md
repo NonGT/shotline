@@ -632,8 +632,8 @@ The UI only goes through shotline-core, same as the CLI and MCP, so all three al
 in the project folder. Paid actions still quote and ask first: an element's "Make image…" shows
 "Get price" (free), then a "Make it for $0.04" button, and the CLI refuses the job if the price has
 changed since. The image becomes an anchor like one added from a file, so it can be undone.
-Models that take reference images get the element's own anchors to start with; any can be left
-out, and others added from any element, a shot's storyboard frame or own pictures, a file, or a
+Models that take reference images start with none, so a new look isn't pulled toward the old
+anchors; they can be added from any element, a shot's storyboard frame or own pictures, a file, or a
 web address (downloaded into `.shotline/cache/refs`). Browse existing lists them under headers
 like the recordings: the shot it's for first, then the elements, then images made before, then
 other shots behind Show all. The prompt names them Image 1, Image 2… in that order. Size picks the

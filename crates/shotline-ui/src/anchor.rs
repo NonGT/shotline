@@ -116,7 +116,7 @@ pub(crate) enum Wants {
 }
 
 impl Maker {
-    /// `refs` go along to start with: an element's own anchors, so a new one keeps the look.
+    /// `refs` go along to start with, e.g. a shot's references.
     pub fn new(
         target: For,
         refs: Vec<PathBuf>,

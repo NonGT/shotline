@@ -653,8 +653,10 @@ fn make_an_anchor_image() {
     assert_eq!(anchors(&p).len(), 1);
     // Done with, so it closes.
     assert!(h.query_by_label("Get price").is_none());
+    // The anchor it made doesn't go along with the next one.
     h.get_by_label("Make image…").click();
     h.run();
+    h.get_by_label("None: the image comes from the words alone.");
     h.get_by_label("Close").click();
     h.run();
     assert!(h.query_by_label("Get price").is_none());
