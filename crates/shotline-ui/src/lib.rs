@@ -3200,21 +3200,24 @@ fn settings_rows(ui: &mut egui::Ui, schema: Option<&serde_json::Value>, text: &m
     let mut table = edit::settings_table(text);
     let before = table.clone();
     for (key, p) in props {
-        let l = ui.weak(key.replace('_', " "));
-        if let Some(d) = p.get("description").and_then(|d| d.as_str()) {
-            l.on_hover_text(d);
-        }
-        ui.horizontal(|ui| {
-            setting(ui, key, p, &mut table);
-            // Greyed out while the provider's default is what's used.
-            let set = table.contains_key(key);
-            if ui
-                .add_enabled(set, egui::Button::new("Default"))
-                .on_hover_text("go back to the provider's default")
-                .on_disabled_hover_text("the provider's default is used")
-                .clicked()
-            {
-                table.remove(key);
+        top_label(ui, &key.replace('_', " "));
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                setting(ui, key, p, &mut table);
+                // Greyed out while the provider's default is what's used.
+                let set = table.contains_key(key);
+                if ui
+                    .add_enabled(set, egui::Button::new("Default"))
+                    .on_hover_text("go back to the provider's default")
+                    .on_disabled_hover_text("the provider's default is used")
+                    .clicked()
+                {
+                    table.remove(key);
+                }
+            });
+            if let Some(d) = p.get("description").and_then(|d| d.as_str()) {
+                ui.set_max_width(360.0);
+                ui.add(egui::Label::new(RichText::new(d).small().color(theme::DUST)).wrap());
             }
         });
         ui.end_row();

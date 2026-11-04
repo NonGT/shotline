@@ -1064,7 +1064,8 @@ fn edit_elements() {
         id: id.into(),
         op: Op::AudioTts,
         voice_schema: Some(serde_json::json!({"type": "object", "properties": {
-            "stability": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5},
+            "stability": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5,
+                "description": "Higher is steadier"},
             "boost": {"type": "boolean", "default": false},
             "mood": {"type": "string", "enum": ["calm", "angry"]}
         }})),
@@ -1125,7 +1126,8 @@ fn edit_elements() {
     h.run();
     h.get_by_label("Somchai").click();
     h.run();
-    // Settings as the model describes them.
+    // Settings as the model describes them, each with what it does under it.
+    h.get_by_label("Higher is steadier");
     h.get_by_role_and_label(Role::CheckBox, "boost").click();
     h.run();
     h.get_by_role_and_label(Role::ComboBox, "mood").click();

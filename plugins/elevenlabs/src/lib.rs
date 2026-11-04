@@ -75,27 +75,27 @@ fn voice_schema(model: &str) -> Value {
     let stability = if model == "eleven_v3" {
         json!({
             "type": "number", "enum": [0.0, 0.5, 1.0], "default": 0.5,
-            "description": "0 creative, 0.5 natural, 1 robust"
+            "description": "0 creative, 0.5 natural, 1 robust: steadier but flatter"
         })
     } else {
         unit(
             0.5,
-            "Higher is steadier and more monotone, lower more expressive",
+            "Higher is steadier and flatter, lower more emotional but can swing",
         )
     };
     json!({
         "type": "object",
         "properties": {
             "stability": stability,
-            "similarity_boost": unit(0.75, "How closely it sticks to the original voice"),
-            "style": unit(0.0, "Exaggerates the voice's style; slower and less stable when high"),
+            "similarity_boost": unit(0.75, "How closely it sticks to the original voice; too high copies the recording's flaws too"),
+            "style": unit(0.0, "Exaggerates the voice's own style, more dramatic; slower and less steady when high"),
             "speed": {
                 "type": "number", "minimum": 0.7, "maximum": 1.2, "default": 1.0,
                 "description": "Below 1 is slower, above 1 faster"
             },
             "use_speaker_boost": {
                 "type": "boolean", "default": true,
-                "description": "Closer to the original speaker, a bit slower"
+                "description": "Closer to the original speaker, a bit slower to make"
             }
         }
     })
