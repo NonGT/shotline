@@ -91,6 +91,10 @@ fn image_list() -> serde_json::Value {
     json!({"data": [
         tiers("nano-banana-2"), tiers("nano-banana-pro"), flat("seedream-v5-lite", 0.05),
         flat("seedream-v4", 0.05), tiers("qwen-image-2-1-pro"), tiers("gpt-image-2"),
+        json!({"id": "seedream-v5-pro", "model_spec": {
+            "pricing": {"resolutions": {"1K": {"usd": 0.06}, "2K": {"usd": 0.11}}},
+            "constraints": {"defaultResolution": "1K"}
+        }}),
     ]})
 }
 
@@ -98,6 +102,13 @@ fn edit_list() -> serde_json::Value {
     let data: Vec<_> = ["nano-banana-2", "nano-banana-pro", "seedream-v5-lite", "seedream-v4", "qwen-image-2-1-pro"]
         .iter()
         .map(|id| json!({"id": format!("{id}-edit"), "model_spec": {"pricing": {"inpaint": {"usd": 0.05}}}}))
+        .chain([json!({"id": "seedream-v5-pro-edit", "model_spec": {
+            "pricing": {
+                "resolutions": {"1K": {"usd": 0.06}, "2K": {"usd": 0.11}},
+                "inputImages": {"included": 1, "additional": {"usd": 0.00345}}
+            },
+            "constraints": {"defaultResolution": "1K"}
+        }})])
         .chain([json!({"id": "gpt-image-2-edit", "model_spec": {"pricing": {
             "inpaint": {"usd": 0.31},
             "inputImages": {"included": 1, "additional": {"usd": 0.03}}
@@ -377,4 +388,12 @@ async fn conforms() {
     let checks = conformance::check(&Venice::new(Some("k".into()), &s.uri()), &opts).await;
     let failed: Vec<_> = checks.iter().filter(|c| c.problem.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
+}
+
+#[test]
+fn seedream_pro_charges_per_resolution_and_extra_reference() {
+    let one = venice::image_price(&edit_list(), "seedream-v5-pro-edit", None, 1).unwrap();
+    assert!((one - 0.06).abs() < 1e-9, "{one}");
+    let three = venice::image_price(&edit_list(), "seedream-v5-pro-edit", Some("2K"), 3).unwrap();
+    assert!((three - 0.1169).abs() < 1e-9, "{three}");
 }

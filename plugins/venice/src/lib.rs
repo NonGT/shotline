@@ -31,17 +31,33 @@ use shotline_plugin::{Error, Plugin, Result};
 pub const KEY_VAR: &str = "VENICE_API_KEY";
 const BASE: &str = "https://api.venice.ai/api/v1";
 
-const IMAGE_ASPECTS: [&str; 8] = ["1:1", "3:2", "16:9", "21:9", "9:16", "2:3", "3:4", "4:5"];
+const WIDE: &[&str] = &["1:1", "3:2", "16:9", "21:9", "9:16", "2:3", "3:4", "4:5"];
 
 /// Image models that have an `-edit` twin, so they can take references. (id, max references,
-/// resolutions)
-const IMAGES: &[(&str, usize, &[&str])] = &[
-    ("nano-banana-2", 6, &["1K", "2K", "4K"]),
-    ("nano-banana-pro", 6, &["1K", "2K", "4K"]),
-    ("seedream-v5-lite", 6, &[]),
-    ("seedream-v4", 6, &[]),
-    ("qwen-image-2-1-pro", 10, &["1K", "2K"]),
-    ("gpt-image-2", 6, &["1K", "2K", "4K"]),
+/// resolutions, aspect ratios both the model and its twin take)
+const IMAGES: &[(&str, usize, &[&str], &[&str])] = &[
+    ("nano-banana-2", 6, &["1K", "2K", "4K"], WIDE),
+    ("nano-banana-pro", 6, &["1K", "2K", "4K"], WIDE),
+    (
+        "seedream-v5-pro",
+        6,
+        &["1K", "2K"],
+        &["1:1", "3:2", "16:9", "9:16", "2:3", "3:4", "4:3"],
+    ),
+    (
+        "seedream-v5-lite",
+        6,
+        &[],
+        &["1:1", "3:2", "16:9", "9:16", "2:3", "3:4", "4:5", "4:3"],
+    ),
+    (
+        "seedream-v4",
+        6,
+        &[],
+        &["1:1", "3:2", "16:9", "9:16", "2:3", "3:4", "4:5"],
+    ),
+    ("qwen-image-2-1-pro", 10, &["1K", "2K"], WIDE),
+    ("gpt-image-2", 6, &["1K", "2K", "4K"], WIDE),
 ];
 
 /// Text models for drafting prompts. Venice has many more; add one here to use it.
@@ -93,14 +109,14 @@ pub fn models() -> Vec<ModelInfo> {
             ..ModelInfo::default()
         });
     }
-    for (id, max, resolutions) in IMAGES {
+    for (id, max, resolutions, aspects) in IMAGES {
         models.push(ModelInfo {
             id: id.to_string(),
             op: Op::ImageGenerate,
             ref_image: Some("image {n}".into()),
             max_images: Some(*max),
             resolutions: resolutions.iter().map(|r| r.to_string()).collect(),
-            aspects: IMAGE_ASPECTS.map(String::from).to_vec(),
+            aspects: aspects.iter().map(|a| a.to_string()).collect(),
             params_schema: Some(image_options()),
             ..ModelInfo::default()
         });
