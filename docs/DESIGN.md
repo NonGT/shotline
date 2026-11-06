@@ -656,7 +656,10 @@ existing sends one anchor of any element (the element goes into the shot's `elem
 other anchors left out), including one left out before; Remove under an element's anchor leaves it
 out of this shot only, or adds an image made before as one of the shot's pictures. Starts sits under
 the plot; on a cut, the storyboard frame comes before the prompt with Browse existing, Add image…,
-Make frame… and Remove.
+Make frame… and Remove. Make frame… starts from the frame prompt, with no pictures. The
+frame and each of the shot's own pictures also have Remake…, which opens the same panel filled
+from the job that made that picture: what was typed, the pictures sent along that are still
+there, the model, and the translate tick. Nothing is spent until it's priced and made again.
 
 An element's page shows its anchors as cards of one size, the picture letterboxed on black with
 a label beside it (up to 40 letters, kept in the element's `[labels]` by file name, e.g.

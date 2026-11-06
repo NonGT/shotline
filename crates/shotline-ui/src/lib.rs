@@ -638,6 +638,46 @@ impl App {
         }
     }
 
+    /// The Make panel again for a picture made here: what was typed for it, the pictures that
+    /// went along and the model, ready to change and make once more.
+    pub(crate) fn remake(
+        &mut self,
+        target: anchor::For,
+        file: &Path,
+        defaults: (String, Option<String>),
+    ) {
+        let Some(job) = self.project.job_that_made(file).ok().flatten() else {
+            let name = self.project.rel(file);
+            self.error(format!(
+                "{name} wasn't made here, so there's nothing to make again"
+            ));
+            return;
+        };
+        let models = self.image_models();
+        let refs = job
+            .inputs
+            .iter()
+            .map(|i| self.project.root.join(i))
+            .filter(|p| p.is_file())
+            .collect();
+        self.maker = Some(
+            anchor::Maker::new(target, refs, &models, (&job.plugin, &job.model), defaults)
+                .with_prompt(job.brief.as_deref().unwrap_or_default())
+                .translating(job.english.is_some()),
+        );
+    }
+
+    /// A shot's picture's shape and resolution, unless picked: the shot's model's, else the film's.
+    pub(crate) fn image_defaults(&self, s: &Shot) -> (String, Option<String>) {
+        let film = &self.project.config;
+        let aspect = s
+            .model
+            .as_ref()
+            .and_then(|m| m.aspect.clone())
+            .unwrap_or_else(|| film.aspect.clone());
+        (aspect, film.image.resolution.clone())
+    }
+
     /// What an image is being made or priced for, e.g. "@paka" or "01-010".
     fn making_for(&self) -> Option<String> {
         let m = self.maker.as_ref().filter(|m| m.busy())?;
@@ -2058,6 +2098,7 @@ impl App {
         let me = anchor::For::Frame(r);
         let making = self.maker.as_ref().is_some_and(|m| m.target == me);
         let rows = self.made_rows(&browse::Near::Shot(r));
+        let mut remake = None;
         ui.horizontal_wrapped(|ui| {
             match browse::dropdown(
                 ui,
@@ -2085,39 +2126,12 @@ impl App {
                     .add_enabled(busy.is_none(), egui::Button::new("Make frame…"))
                     .on_disabled_hover_text(format!(
                         "still making one for {}",
-                        busy.unwrap_or_default()
+                        busy.clone().unwrap_or_default()
                     ))
                     .clicked()
             {
-                // The ones the frame there now was made from, else what the video gets.
-                let made = s.frame.as_ref().and_then(|f| {
-                    self.project
-                        .job_that_made(&self.project.root.join(f))
-                        .ok()
-                        .flatten()
-                });
-                // And what was typed for it; saved as the frame prompt once it's priced.
-                let prompt = made
-                    .as_ref()
-                    .and_then(|j| j.brief.clone())
-                    .unwrap_or_else(|| self.form.frame_prompt.clone());
-                let refs = match made {
-                    Some(j) => j
-                        .inputs
-                        .iter()
-                        .map(|i| self.project.root.join(i))
-                        .filter(|p| p.is_file())
-                        .collect(),
-                    None => self
-                        .built(r)
-                        .map(|b| {
-                            b.references
-                                .iter()
-                                .map(|x| self.project.root.join(&x.path))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                };
+                // The frame prompt and no pictures; Remake starts from the frame there.
+                let prompt = self.form.frame_prompt.clone();
                 let cfg = &self.project.config.image;
                 let aspect = s
                     .model
@@ -2127,7 +2141,7 @@ impl App {
                 self.maker = Some(
                     anchor::Maker::new(
                         me.clone(),
-                        refs,
+                        vec![],
                         &models,
                         (&cfg.plugin, &cfg.model),
                         (aspect, cfg.resolution.clone()),
@@ -2135,7 +2149,16 @@ impl App {
                     .with_prompt(&prompt),
                 );
             }
-            if s.frame.is_some() {
+            if let Some(f) = &s.frame {
+                if !models.is_empty()
+                    && !making
+                    && ui
+                        .add_enabled(busy.is_none(), egui::Button::new("Remake…"))
+                        .on_hover_text("make it again from what it was made with, to change first")
+                        .clicked()
+                {
+                    remake = Some(self.project.root.join(f));
+                }
                 let rm = remove_button(ui);
                 rm.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::Role::Button, true, "Remove storyboard frame")
@@ -2143,10 +2166,12 @@ impl App {
                 if rm.clicked() {
                     acts.push(Action::SetFrame(r, None));
                 }
-            } else {
-                ui.weak("none yet");
             }
         });
+        if let Some(f) = remake {
+            let defaults = self.image_defaults(s);
+            self.remake(me, &f, defaults);
+        }
         if making {
             ui.add_space(6.0);
             self.show_maker(ui, &models);

@@ -488,12 +488,8 @@ impl Host for TestHost {
             assert!(ask.outfit);
             let saved = Project::open(film)?.shot(R)?.frame_prompt;
             assert_eq!(saved.as_deref(), Some("at the edge"));
-            // What the video gets, to start with.
-            assert!(
-                ask.refs[0].ends_with("elements/cast/paka/01.png"),
-                "{:?}",
-                ask.refs
-            );
+            // No pictures unless some are added.
+            assert!(ask.refs.is_empty(), "{:?}", ask.refs);
             let out = film.join(".shotline").join("frame.png");
             image::RgbImage::new(8, 8).save(&out)?;
             return Ok(out);
@@ -2702,7 +2698,7 @@ fn made_images_stay_to_pick_again() {
 }
 
 #[test]
-fn make_frame_starts_from_the_frame_s_own_references() {
+fn remake_starts_from_what_a_picture_was_made_with() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     // Made from three pictures, one of them since deleted.
@@ -2725,6 +2721,10 @@ fn make_frame_starts_from_the_frame_s_own_references() {
     j.status = JobStatus::Done;
     p.save_job(&j).unwrap();
     p.set_frame(R, Some(&out)).unwrap();
+    p.add_shot_image(R, &out, "the forest").unwrap();
+    let mut shot = p.shot(R).unwrap();
+    shot.frame_prompt = Some("wide, dusk".into());
+    p.save_shot(R, &shot).unwrap();
 
     let mut app = App::new(p, tmp.path().join("home")).silent();
     app.set_plugins(
@@ -2749,11 +2749,30 @@ fn make_frame_starts_from_the_frame_s_own_references() {
     h.step();
     h.get_by_label_contains("01-010").click();
     h.run();
+    // Make frame starts from the shot's frame prompt, with no pictures.
     h.get_by_label("Make frame…").click();
+    h.run();
+    h.get_by_label("None: the image comes from the words alone.");
+    let fp = h.get_by_role_and_label(Role::MultilineTextInput, "Frame prompt");
+    assert_eq!(fp.value().as_deref(), Some("wide, dusk"));
+    h.get_by_label("Close").click();
+    h.run();
+
+    // Remake starts from what that frame was made with: what was typed and the pictures still
+    // there.
+    h.get_by_label("Remake…").click();
     h.run();
     h.get_by_label("Image 3");
     assert!(h.query_by_label("Image 4").is_none());
-    // What was typed for that frame, not what the shot had.
     let fp = h.get_by_role_and_label(Role::MultilineTextInput, "Frame prompt");
     assert_eq!(fp.value().as_deref(), Some("ผกายืนริมป่า"));
+    h.get_by_label("Close").click();
+    h.run();
+
+    // A picture of the shot's own made here, the same way.
+    h.get_by_label_contains("Remake ").click();
+    h.run();
+    h.get_by_label("Image 3");
+    let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
+    assert_eq!(prompt.value().as_deref(), Some("ผกายืนริมป่า"));
 }

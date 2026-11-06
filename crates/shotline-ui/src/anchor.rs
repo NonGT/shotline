@@ -162,6 +162,12 @@ impl Maker {
         self
     }
 
+    /// Starts with the prompt put into English first, as it was last time.
+    pub fn translating(mut self, on: bool) -> Maker {
+        self.translate = on;
+        self
+    }
+
     pub fn busy(&self) -> bool {
         matches!(*self.stage.lock().unwrap(), Stage::Pricing | Stage::Making)
     }

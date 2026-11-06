@@ -118,6 +118,8 @@ impl App {
         let mut zoom = None;
         let mut remove = None;
         let mut leave = None;
+        let mut remake = None;
+        let can_make = !self.image_models().is_empty() && self.making_for().is_none();
         // One picture a row, its note beside it with room to say what it shows.
         const TILE: f32 = 76.0;
         // "<Picture 2>" reads as "Picture 2".
@@ -140,7 +142,7 @@ impl App {
                 };
                 let path = self.project.root.join(&file);
                 if self.thumbs.tile(ui, &path, egui::Vec2::splat(TILE), &file) {
-                    zoom = Some(path);
+                    zoom = Some(path.clone());
                 }
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 6.0;
@@ -164,6 +166,23 @@ impl App {
                                 None => (format!("take {file} off {r}"), format!("Remove {name}")),
                             };
                             let rm = remove_button(ui).on_hover_text(hover);
+                            if from.is_none() {
+                                let again = ui
+                                    .add_enabled(can_make, egui::Button::new("Remake…"))
+                                    .on_hover_text(
+                                        "make it again from what it was made with, to change first",
+                                    );
+                                again.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::Button,
+                                        true,
+                                        format!("Remake {name}"),
+                                    )
+                                });
+                                if again.clicked() {
+                                    remake = Some(path.clone());
+                                }
+                            }
                             rm.widget_info(|| {
                                 egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
                             });
@@ -220,6 +239,10 @@ impl App {
         }
         if let Some(a) = leave {
             acts.push(Action::LeaveOut(r, a, true));
+        }
+        if let Some(f) = remake {
+            let defaults = self.image_defaults(s);
+            self.remake(anchor::For::Shot(r), &f, defaults);
         }
         let models = self.image_models();
         let me = anchor::For::Shot(r);
