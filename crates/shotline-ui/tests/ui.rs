@@ -2875,7 +2875,8 @@ fn a_recorded_line_has_a_player_under_it() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
-    p.add_line(R, "paka", "เร็วเข้า", None).unwrap();
+    let long = "เร็วเข้า [stops abruptly] ... [apologetically] ขอโทษนะ ลืมตัวไปหน่อย ".repeat(6);
+    p.add_line(R, "paka", long.trim(), None).unwrap();
     let mut s = p.shot(R).unwrap();
     s.recipe = Some(shotline_core::SPOKEN.into());
     p.save_shot(R, &s).unwrap();
@@ -2907,7 +2908,7 @@ fn a_recorded_line_has_a_player_under_it() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1300.0, 1200.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -2918,6 +2919,11 @@ fn a_recorded_line_has_a_player_under_it() {
     // The second follows the first, 0.3 s after it ends.
     h.get_by_label("0.0 / 0.5 s");
     h.get_by_label("1.3 s in the shot");
+    // Long words are cut short, not drawn over who says them.
+    let who = h.get_all_by_label("Who says it").nth(1).unwrap().rect();
+    let words = h.get_by_role_and_label(Role::ComboBox, "Line 2").rect();
+    assert!(who.right() <= words.left(), "{who:?} {words:?}");
+    assert!(words.width() > 150.0, "{words:?}");
     // Both together: the second ends at 1.8 s.
     h.get_by_label("1.8 s");
 

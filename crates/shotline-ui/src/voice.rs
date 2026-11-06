@@ -970,7 +970,10 @@ impl App {
         let combo = if compact {
             combo.selected_text("").width(ui.spacing().icon_width)
         } else {
-            combo.selected_text(short(&shown, 200)).width(width)
+            combo
+                .selected_text(short(&shown, 200))
+                .width(width)
+                .truncate()
         };
         let open = ui
             .add_enabled_ui(!all.is_empty(), |ui| {
@@ -1001,6 +1004,9 @@ impl App {
             resp = resp.on_hover_text(format!(
                 "one @{who} recorded before, in this shot or another"
             ));
+        } else if picked.is_some() {
+            // The whole of it, when it's cut short.
+            resp = resp.on_hover_text(&shown);
         }
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &label));
         match pick {
