@@ -846,9 +846,12 @@ impl App {
                 acts.push(Action::RemoveLine(r, i));
             }
             if remaking {
+                let say = self.say.lock().unwrap().clone();
+                let recording = matches!(say, Say::Recording(..)) && saying;
                 if ui
-                    .button("Cancel")
+                    .add_enabled(!recording, egui::Button::new("Cancel"))
                     .on_hover_text("keep the recording it has")
+                    .on_disabled_hover_text("it's being recorded; wait for it to finish")
                     .clicked()
                 {
                     self.remaking = None;
