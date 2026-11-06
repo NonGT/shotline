@@ -323,6 +323,13 @@ pub struct Title {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct ChapterRename {
+    /// Chapter number, e.g. 1
+    chapter: String,
+    title: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct ShotAdd {
     /// Chapter number, e.g. 1
     chapter: String,
@@ -736,6 +743,17 @@ impl Server {
         ctx: RequestContext<RoleServer>,
     ) -> Reply {
         self.cli(a(["chapter", "add", &p.title]), None, &ctx).await
+    }
+
+    /// Change a chapter's title.
+    #[tool]
+    async fn chapter_rename(
+        &self,
+        Parameters(p): Parameters<ChapterRename>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Reply {
+        self.cli(a(["chapter", "rename", &p.chapter, &p.title]), None, &ctx)
+            .await
     }
 
     /// List chapters.

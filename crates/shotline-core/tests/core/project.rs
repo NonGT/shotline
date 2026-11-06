@@ -113,6 +113,20 @@ fn an_anchor_s_label_goes_with_it() {
 }
 
 #[test]
+fn a_chapter_s_title_changes_but_not_its_folder() {
+    let (_dir, p) = new_project();
+    let ch = p.add_chapter("Into the Forest").unwrap();
+    let r = p.add_shot("1", None, Shot::default()).unwrap();
+    let c = p.rename_chapter("1", "  The woods ").unwrap();
+    assert_eq!(c.title, "The woods");
+    assert_eq!(c.dir, ch.dir);
+    assert_eq!(p.chapter("01").unwrap().title, "The woods");
+    assert!(p.shot(r).is_ok());
+    assert!(p.rename_chapter("1", " ").is_err());
+    assert!(p.rename_chapter("9", "Nowhere").is_err());
+}
+
+#[test]
 fn shots_get_ids_and_elements() {
     let (_dir, p) = new_project();
     p.add_element(Kind::Cast, "Paka", None, "").unwrap();

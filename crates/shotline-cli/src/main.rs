@@ -416,7 +416,14 @@ enum ElementCmd {
 
 #[derive(Subcommand)]
 enum ChapterCmd {
-    Add { title: String },
+    Add {
+        title: String,
+    },
+    /// Change a chapter's title; its folder keeps its name
+    Rename {
+        chapter: String,
+        title: String,
+    },
     Ls,
 }
 
@@ -849,6 +856,13 @@ fn run(cli: Cli) -> Result<()> {
             let p = open()?;
             let c = p.add_chapter(title)?;
             println!("{} {}", c.id(), p.rel(&c.dir));
+        }
+        Cmd::Chapter(ChapterCmd::Rename {
+            ref chapter,
+            ref title,
+        }) => {
+            let c = open()?.rename_chapter(chapter, title)?;
+            println!("{}  {}", c.id(), c.title);
         }
         Cmd::Chapter(ChapterCmd::Ls) => {
             for c in open()?.chapters()? {

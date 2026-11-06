@@ -201,6 +201,34 @@ fn edit_the_story_and_add_shots() {
     let adds = h.query_all_by_label("Add shot").count();
     assert_eq!(adds, 2);
 
+    // Its title changed from the right-click menu; Escape leaves it as it was.
+    h.get_by_label("02 The river").click_secondary();
+    h.run();
+    h.get_by_label("Rename chapter").click();
+    h.run();
+    h.get_by_role_and_label(Role::TextInput, "Chapter title")
+        .type_text(" bank");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(p.chapter("2").unwrap().title, "The river");
+    h.get_by_label("02 The river").click_secondary();
+    h.run();
+    h.get_by_label("Rename chapter").click();
+    h.run();
+    h.get_by_role_and_label(Role::TextInput, "Chapter title")
+        .type_text(" bank");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.run();
+    assert_eq!(p.chapter("2").unwrap().title, "The river bank");
+    h.get_by_label("02 The river bank");
+    h.get_by_label("Undo").click();
+    h.run();
+    h.run();
+    assert_eq!(p.chapter("2").unwrap().title, "The river");
+
     // A shot after 01-010, then one at the end of chapter 2.
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();

@@ -306,6 +306,23 @@ impl Project {
         })
     }
 
+    /// Only the title changes; the folder keeps its name so paths to it stay good.
+    pub fn rename_chapter(&self, id: &str, title: &str) -> Result<Chapter> {
+        let title = title.trim();
+        if title.is_empty() {
+            return invalid("a chapter needs a title");
+        }
+        let mut c = self.chapter(id)?;
+        fsx::write_toml(
+            &c.dir.join("chapter.toml"),
+            &ChapterFile {
+                title: title.to_string(),
+            },
+        )?;
+        c.title = title.to_string();
+        Ok(c)
+    }
+
     fn shot_numbers(&self, chapter: &Chapter) -> Result<Vec<u32>> {
         let mut out: Vec<u32> = fsx::list(&chapter.dir.join("shots"))?
             .iter()

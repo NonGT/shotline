@@ -223,6 +223,8 @@ pub struct App {
     texts: Texts,
     /// The title typed for a new chapter.
     new_chapter: String,
+    /// The chapter whose title is being typed, and what's typed.
+    renaming: Option<(u32, String)>,
     /// The open element, by handle.
     element: Option<String>,
     element_form: ElementForm,
@@ -500,6 +502,7 @@ impl App {
             form: Form::default(),
             texts: Texts::default(),
             new_chapter: String::new(),
+            renaming: None,
             element: None,
             element_form: ElementForm::default(),
             new_element: NewElement::default(),
@@ -1728,11 +1731,9 @@ impl App {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.add_space(8.0);
-                            ui.label(
-                                RichText::new(format!("{} {}", c.id(), c.title))
-                                    .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
-                                    .color(theme::PAPER),
-                            );
+                            if let Some(a) = chapter_title(ui, c, &mut self.renaming) {
+                                acts.push(a);
+                            }
                         });
                         for (r, s) in shots {
                             let takes = self.film.takes.get(r).copied().unwrap_or(0);
@@ -2841,6 +2842,62 @@ fn tab_button(ui: &mut egui::Ui, open: bool, name: &str) -> egui::Response {
         );
     }
     r
+}
+
+/// A chapter's heading in the shot list. Double-click or right-click to change its title; Enter
+/// or leaving the box keeps it, Escape doesn't.
+fn chapter_title(
+    ui: &mut egui::Ui,
+    c: &Chapter,
+    renaming: &mut Option<(u32, String)>,
+) -> Option<Action> {
+    if let Some((n, text)) = renaming.as_mut().filter(|(n, _)| *n == c.number) {
+        let n = *n;
+        let field = ui.add(
+            egui::TextEdit::singleline(text)
+                .desired_width(f32::INFINITY)
+                .id_salt(("chapter title", n)),
+        );
+        field.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Chapter title")
+        });
+        if !field.has_focus() && !field.lost_focus() {
+            field.request_focus();
+        }
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            *renaming = None;
+            return None;
+        }
+        if field.lost_focus() {
+            let title = text.trim().to_string();
+            *renaming = None;
+            if !title.is_empty() && title != c.title {
+                return Some(Action::RenameChapter(n, title));
+            }
+        }
+        return None;
+    }
+    let head = ui
+        .add(
+            egui::Label::new(
+                RichText::new(format!("{} {}", c.id(), c.title))
+                    .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
+                    .color(theme::PAPER),
+            )
+            .sense(egui::Sense::click()),
+        )
+        .on_hover_text("double-click to rename");
+    let mut start = head.double_clicked();
+    head.context_menu(|ui| {
+        if ui.button("Rename chapter").clicked() {
+            start = true;
+            ui.close();
+        }
+    });
+    if start {
+        *renaming = Some((c.number, c.title.clone()));
+    }
+    None
 }
 
 /// One shot in the list: number, title, how many takes, and an amber dot once one is in the cut.

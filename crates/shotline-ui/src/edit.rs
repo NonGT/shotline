@@ -218,6 +218,7 @@ pub(crate) enum Action {
     /// The film's default model for a job; None takes it out where it can be.
     Model(Task, Option<ModelRef>),
     AddChapter(String),
+    RenameChapter(u32, String),
     /// A new shot at the end of the chapter, or after the given number.
     AddShot(u32, Option<u32>),
     SaveElement(Element),
@@ -270,6 +271,7 @@ impl Action {
             Action::Param { model, key, .. } => format!("{key} for {model}"),
             Action::Model(task, _) => format!("the {} model", task_name(*task)),
             Action::AddChapter(t) => format!("chapter {t}"),
+            Action::RenameChapter(n, _) => format!("chapter {n:02}'s title"),
             Action::AddShot(..) => "a new shot".into(),
             Action::AddElement(n) => format!("new {}", n.kind),
             Action::SaveElement(el) | Action::AddAnchor(el, _) | Action::RemoveAnchor(el, _) => {
@@ -330,6 +332,11 @@ impl Action {
                 .shot_path(t.shot)
                 .into_iter()
                 .chain(t.jobs.iter().map(|j| p.job_dir(j.id).join("job.toml")))
+                .collect(),
+            Action::RenameChapter(n, _) => p
+                .chapter(&n.to_string())
+                .map(|c| c.dir.join("chapter.toml"))
+                .into_iter()
                 .collect(),
             Action::Story(_) => vec![p.root.join("story.md")],
             Action::Style(_) => vec![p.root.join("style.md")],
@@ -808,6 +815,10 @@ impl App {
                     None => format!("no {} model of its own", task_name(task)),
                 }
                 .into()
+            }
+            Action::RenameChapter(n, t) => {
+                let c = p.rename_chapter(&n.to_string(), &t)?;
+                format!("chapter {} is now {}", c.id(), c.title).into()
             }
             Action::AddChapter(t) => {
                 let c = p.add_chapter(t.trim())?;

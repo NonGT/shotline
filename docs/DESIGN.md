@@ -521,6 +521,7 @@ shotline element draft <handle> [--write] [--plugin p] [--model m] [--yes]
 shotline element voice <handle> --plugin p [--model m] [--voice-id id] [--set k=v]
 shotline element ls
 shotline chapter add <title>
+shotline chapter rename <chapter> <title>   # the folder keeps its name
 shotline chapter ls
 shotline shot add <chapter> [--after id] --plot ... [--prompt ...] [--duration n] [--transition cut|continue]
 shotline shot add ... [--plugin p] [--model m] [--recipe r]
