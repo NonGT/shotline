@@ -14,7 +14,10 @@ use shotline_media::play::PcmPipe;
 
 use crate::edit::{Action, LineForm};
 use crate::player::{hush, listen};
-use crate::{App, heading, hint, icon_button, remove_button, short, spend, theme};
+use crate::{
+    App, heading, hint, icon_button, pause_icon, play_icon, remove_button, short, spend, stop_icon,
+    theme,
+};
 
 #[derive(Clone, Default)]
 pub(crate) enum Say {
@@ -86,40 +89,6 @@ pub(crate) struct Hearing {
 
 /// The id salt of the line being added.
 const DRAFT: usize = usize::MAX;
-
-fn play_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
-    let pts = vec![
-        s.left_top(),
-        egui::pos2(s.right(), s.center().y),
-        s.left_bottom(),
-    ];
-    p.add(egui::Shape::convex_polygon(
-        pts,
-        stroke.color,
-        egui::Stroke::NONE,
-    ));
-}
-
-fn stop_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
-    p.rect_filled(s.shrink(1.0), 1.0, stroke.color);
-}
-
-fn pause_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
-    let w = s.width() / 3.0;
-    p.rect_filled(
-        egui::Rect::from_min_size(s.min, egui::vec2(w, s.height())),
-        1.0,
-        stroke.color,
-    );
-    p.rect_filled(
-        egui::Rect::from_min_size(
-            egui::pos2(s.right() - w, s.top()),
-            egui::vec2(w, s.height()),
-        ),
-        1.0,
-        stroke.color,
-    );
-}
 
 /// An arrow, to go where something is.
 fn go_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
@@ -1201,9 +1170,16 @@ impl App {
         };
         let b = ui
             .horizontal(|ui| {
+                let icon: fn(&egui::Painter, egui::Rect, egui::Stroke) =
+                    if playing { stop_icon } else { play_icon };
                 let b = ui
-                    .add_enabled(missing.is_none(), egui::Button::new(label))
-                    .on_hover_text("every line's recording at its start time")
+                    .add_enabled_ui(missing.is_none(), |ui| icon_button(ui, label, icon))
+                    .inner
+                    .on_hover_text(if playing {
+                        "stop"
+                    } else {
+                        "play the scene: every line's recording at its start time"
+                    })
                     .on_disabled_hover_text(match missing {
                         Some(i) => format!("line {} isn't recorded yet", i + 1),
                         None => String::new(),

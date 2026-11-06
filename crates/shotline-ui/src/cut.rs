@@ -67,8 +67,11 @@ impl App {
         let running = matches!(state, Render::Running(_));
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(!files.is_empty(), egui::Button::new("Play the cut"))
-                .on_hover_text("the takes as they are, back to back")
+                .add_enabled_ui(!files.is_empty(), |ui| {
+                    crate::icon_button(ui, "Play the cut", crate::play_icon)
+                })
+                .inner
+                .on_hover_text("play the cut: the takes as they are, back to back")
                 .on_disabled_hover_text("no shot has a take selected yet")
                 .clicked()
             {
@@ -292,8 +295,7 @@ impl App {
                 for f in &self.film.renders {
                     let name = self.project.rel(f);
                     ui.label(RichText::new(&name).color(theme::GRAPHITE));
-                    if ui
-                        .button("Play")
+                    if crate::icon_button(ui, &format!("Play {name}"), crate::play_icon)
                         .on_hover_text(format!("play {name}"))
                         .clicked()
                     {

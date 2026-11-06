@@ -512,7 +512,16 @@ impl Deck {
             let key = self.keys
                 && ui.memory(|m| m.focused().is_none())
                 && ui.input(|i| i.key_pressed(egui::Key::Space));
-            if ui.button(label).clicked() || key {
+            let icon: fn(&egui::Painter, egui::Rect, egui::Stroke) = if self.playing {
+                crate::pause_icon
+            } else {
+                crate::play_icon
+            };
+            if crate::icon_button(ui, label, icon)
+                .on_hover_text(format!("{} (Space)", label.to_lowercase()))
+                .clicked()
+                || key
+            {
                 self.playing = !self.playing;
                 if self.playing {
                     // Sound attaches to a pipe when it's started.

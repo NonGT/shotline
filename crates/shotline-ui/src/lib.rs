@@ -3076,6 +3076,40 @@ pub(crate) fn icon_button(
     r
 }
 
+pub(crate) fn play_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let pts = vec![
+        s.left_top(),
+        egui::pos2(s.right(), s.center().y),
+        s.left_bottom(),
+    ];
+    p.add(egui::Shape::convex_polygon(
+        pts,
+        stroke.color,
+        egui::Stroke::NONE,
+    ));
+}
+
+pub(crate) fn stop_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    p.rect_filled(s.shrink(1.0), 1.0, stroke.color);
+}
+
+pub(crate) fn pause_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let w = s.width() / 3.0;
+    p.rect_filled(
+        egui::Rect::from_min_size(s.min, egui::vec2(w, s.height())),
+        1.0,
+        stroke.color,
+    );
+    p.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(s.right() - w, s.top()),
+            egui::vec2(w, s.height()),
+        ),
+        1.0,
+        stroke.color,
+    );
+}
+
 /// An `egui::Modal` whose dropdowns always draw above it. Both sit on the foreground layer, and
 /// a click on the modal can put it back over a list that's open.
 pub(crate) fn modal<R>(
