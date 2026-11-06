@@ -2294,6 +2294,15 @@ fn a_line_recorded_and_picked() {
         .unwrap();
     p.add_line(other, "paka", "ใครน่ะ", None).unwrap();
     TestHost.say(&p.root, other, 0, "0.02 USD").unwrap();
+    // One said another way before, no longer picked.
+    let mut s = p.shot(R).unwrap();
+    s.lines[0].text = "ไปกันเถอะ [whispers]".into();
+    p.save_shot(R, &s).unwrap();
+    TestHost.say(&p.root, R, 0, "0.02 USD").unwrap();
+    let mut s = p.shot(R).unwrap();
+    s.lines[0].text = "ไปกันเถอะ".into();
+    s.lines[0].audio = None;
+    p.save_shot(R, &s).unwrap();
 
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
@@ -2319,27 +2328,15 @@ fn a_line_recorded_and_picked() {
     let first = p.shot(R).unwrap().lines[0].audio.clone();
     assert!(first.is_some());
 
-    // New recording goes back to the words, to say them another way.
+    // The one said before is there to pick, words and all.
     h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
     h.run();
-    h.get_by_label("New recording").click();
+    h.get_by_label("ไปกันเถอะ [whispers]").click();
     h.run();
     h.run();
-    assert_eq!(p.shot(R).unwrap().lines[0].audio, None);
-    let words = h.get_by_role_and_label(Role::TextInput, "Line 1");
-    words.focus();
-    words.type_text(" [whispers]");
-    h.run();
-    h.get_by_label("Record…").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Record it for 0.02 USD")
-        .is_some()));
-    h.get_by_label("Record it for 0.02 USD").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_by_role_and_label(Role::ComboBox, "Line 1")
-        .is_some()));
-    h.run();
-    assert_eq!(p.shot(R).unwrap().lines[0].text, "ไปกันเถอะ [whispers]");
+    let s = p.shot(R).unwrap();
+    assert_eq!(s.lines[0].text, "ไปกันเถอะ [whispers]");
+    assert!(s.lines[0].audio.is_some() && s.lines[0].audio != first);
 
     // Both are there to go back to; the other shot's after Show all.
     h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
@@ -2396,7 +2393,6 @@ fn a_line_recorded_and_picked() {
     h.get_by_role_and_label(Role::ComboBox, "Pick a recording")
         .click();
     h.run();
-    assert!(h.query_by_label("New recording").is_none());
     h.get_by_label("ไปกันเถอะ [whispers]").click();
     h.run();
     h.run();

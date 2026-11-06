@@ -205,7 +205,6 @@ fn who(ui: &mut egui::Ui, i: usize, l: &mut LineForm, cast: &[String]) {
 /// What the recordings dropdown was asked to do, by recording id.
 enum Pick {
     Use(String),
-    Record,
     Play(String),
     Stop,
     Delete(String),
@@ -1027,7 +1026,7 @@ impl App {
         let all = self.voices_of(who, r);
         let shown = match picked.and_then(|j| j.prompt.as_deref()) {
             Some(t) => t.to_string(),
-            None => "pick one, or record it again".into(),
+            None => "pick one".into(),
         };
         let width = ui.available_width();
         let ctx = ui.ctx().clone();
@@ -1078,9 +1077,8 @@ impl App {
                         show_all,
                         &names,
                         &uses,
-                        !compact,
                     );
-                    if matches!(p, Some(Pick::Use(_) | Pick::Record | Pick::Open(_))) {
+                    if matches!(p, Some(Pick::Use(_) | Pick::Open(_))) {
                         ui.close();
                     }
                     pick = p;
@@ -1114,7 +1112,6 @@ impl App {
                 ]);
             }
             Some(Pick::Use(id)) => acts.push(Action::PickRecording(r, i, Some(id))),
-            Some(Pick::Record) => acts.push(Action::PickRecording(r, i, None)),
             Some(Pick::Play(id)) => {
                 if let Some(j) = all.iter().find(|j| j.id.to_string() == id) {
                     let f = file(self, j);
@@ -1229,7 +1226,7 @@ impl App {
     }
 }
 
-/// The dropdown's insides: New recording, then the recordings grouped by chapter and shot.
+/// The dropdown's insides: the recordings grouped by chapter and shot.
 /// One another line sends can't be deleted; it takes you to that line's shot instead.
 #[allow(clippy::too_many_arguments)]
 fn recording_list(
@@ -1241,21 +1238,10 @@ fn recording_list(
     show_all: bool,
     names: &HashMap<ShotRef, (String, String)>,
     uses: &HashMap<String, Vec<(ShotRef, usize)>>,
-    new_item: bool,
 ) -> Option<Pick> {
     let mut pick = None;
     let width = ui.available_width().max(400.0);
     ui.set_width(width);
-    if new_item {
-        if ui
-            .add(crate::grouped::item(false, "New recording").min_size(egui::vec2(width, 0.0)))
-            .on_hover_text("type the words again, e.g. with other tags, and record them")
-            .clicked()
-        {
-            pick = Some(Pick::Record);
-        }
-        ui.separator();
-    }
     let others = all.iter().filter(|j| j.shot != Some(here.0)).count();
     let rows: Vec<(String, String, &Job)> = all
         .iter()
