@@ -128,9 +128,15 @@ impl Audio {
     }
 }
 
-/// Plays a sound on its own, e.g. a recorded line; it stops when what's returned is dropped.
-pub fn listen(ff: &Ffmpeg, audio: &Audio, path: &std::path::Path) -> anyhow::Result<PcmPipe> {
-    let (pipe, rx) = ff.pcm_pipe(path, 0.0, audio.rate, audio.channels)?;
+/// Plays a sound on its own from `from` seconds, e.g. a recorded line; it stops when what's
+/// returned is dropped.
+pub fn listen(
+    ff: &Ffmpeg,
+    audio: &Audio,
+    path: &std::path::Path,
+    from: f64,
+) -> anyhow::Result<PcmPipe> {
+    let (pipe, rx) = ff.pcm_pipe(path, from, audio.rate, audio.channels)?;
     audio.attach(Some(rx));
     audio.set_playing(true);
     Ok(pipe)

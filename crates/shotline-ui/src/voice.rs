@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, RichText};
 use shotline_core::protocol::Op;
 use shotline_core::{Job, Kind, Shot, ShotRef};
-use shotline_media::lines::Clip;
+use shotline_media::lines::{Clip, GAP};
 use shotline_media::play::PcmPipe;
 
 use crate::edit::{Action, LineForm};
@@ -79,6 +79,9 @@ pub(crate) struct Hearing {
     what: String,
     _pipe: PcmPipe,
     until: Instant,
+    started: Instant,
+    /// Where in the sound it started.
+    from: f64,
 }
 
 /// The id salt of the line being added.
@@ -99,6 +102,23 @@ fn play_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
 
 fn stop_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
     p.rect_filled(s.shrink(1.0), 1.0, stroke.color);
+}
+
+fn pause_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let w = s.width() / 3.0;
+    p.rect_filled(
+        egui::Rect::from_min_size(s.min, egui::vec2(w, s.height())),
+        1.0,
+        stroke.color,
+    );
+    p.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(s.right() - w, s.top()),
+            egui::vec2(w, s.height()),
+        ),
+        1.0,
+        stroke.color,
+    );
 }
 
 /// An arrow, to go where something is.
@@ -292,7 +312,12 @@ impl App {
 
     /// Plays a sound through the app's output, stopping whatever was playing.
     pub(crate) fn hear(&mut self, what: &str, path: &Path) {
+        self.hear_from(what, path, 0.0);
+    }
+
+    fn hear_from(&mut self, what: &str, path: &Path, from: f64) {
         self.hush();
+        self.paused = None;
         if let Some(d) = &mut self.deck {
             d.pause(self.audio.as_ref());
         }
@@ -305,12 +330,14 @@ impl App {
             return;
         };
         let long = ff.audio_duration(path).unwrap_or(30.0);
-        match listen(&ff, audio, path) {
+        match listen(&ff, audio, path, from) {
             Ok(pipe) => {
                 self.hearing = Some(Hearing {
                     what: what.into(),
                     _pipe: pipe,
-                    until: Instant::now() + Duration::from_secs_f64(long + 0.3),
+                    until: Instant::now() + Duration::from_secs_f64((long - from).max(0.0) + 0.3),
+                    started: Instant::now(),
+                    from,
                 })
             }
             Err(e) => self.error(format!("can't play it: {e}")),
@@ -461,6 +488,9 @@ impl App {
                             None => {}
                         }
                     });
+                    if lifted.is_none() {
+                        self.line_player(ui, r, s, i);
+                    }
                     // The price on its own row, as wide as the line; out of the way while
                     // lines are moved.
                     if let Some((_, cost)) = priced.as_ref().filter(|(pi, _)| *pi == i)
@@ -598,6 +628,123 @@ impl App {
             x += w + 16.0;
         }
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+
+    /// How long a recording is; None if ffprobe can't tell.
+    fn length(&mut self, path: &Path) -> Option<f64> {
+        if let Some(l) = self.lengths.get(path) {
+            return Some(*l);
+        }
+        let l = self.ff.as_ref()?.audio_duration(path).ok()?;
+        self.lengths.insert(path.to_path_buf(), l);
+        Some(l)
+    }
+
+    /// Where each line starts in the shot, as far as it's known: its own start, else after the
+    /// line before once that one's recorded.
+    fn line_starts(&mut self, s: &Shot) -> Vec<Option<f64>> {
+        let mut out = vec![];
+        let mut end: Option<f64> = Some(-GAP);
+        for (i, line) in s.lines.iter().enumerate() {
+            let start = line.at.or(end.map(|e| (e + GAP).max(0.0)));
+            let len = self.picked(s, i).and_then(|j| self.length(&file(self, &j)));
+            end = start.zip(len).map(|(s, l)| s + l);
+            out.push(start);
+        }
+        out
+    }
+
+    /// Where the last line to finish ends, once every line has a length.
+    fn scene_length(&mut self, s: &Shot) -> Option<f64> {
+        let starts = self.line_starts(s);
+        let mut end = 0.0f64;
+        for (i, start) in starts.into_iter().enumerate() {
+            let j = self.picked(s, i)?;
+            end = end.max(start? + self.length(&file(self, &j))?);
+        }
+        Some(end)
+    }
+
+    /// Under a line with a recording picked: play and pause, where it's at, and where that is
+    /// in the shot, to set the next line's start by.
+    fn line_player(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, i: usize) {
+        let Some(j) = self.picked(s, i) else {
+            return;
+        };
+        let path = file(self, &j);
+        let Some(len) = self.length(&path) else {
+            return;
+        };
+        let what = format!("{r} line {}", i + 1);
+        let playing = self.hearing(ui.ctx(), &what);
+        let at = match (&self.hearing, &self.paused) {
+            (Some(h), _) if playing => h.from + h.started.elapsed().as_secs_f64(),
+            (_, Some((w, t))) if *w == what => *t,
+            _ => 0.0,
+        }
+        .min(len);
+        let start = self.line_starts(s).get(i).copied().flatten();
+        let mut click = false;
+        let mut to = at;
+        let mut moved = None;
+        ui.horizontal(|ui| {
+            ui.add_space(12.0 + ui.spacing().item_spacing.x);
+            let (icon, label): (fn(&egui::Painter, egui::Rect, egui::Stroke), _) = if playing {
+                (pause_icon, "Pause")
+            } else {
+                (play_icon, "Play")
+            };
+            click = icon_button(ui, &format!("{label} line {}", i + 1), icon).clicked();
+            ui.spacing_mut().slider_width = 180.0;
+            let bar = ui.add(egui::Slider::new(&mut to, 0.0..=len).show_value(false));
+            bar.widget_info(|| {
+                egui::WidgetInfo::slider(true, to, format!("Where in line {}", i + 1))
+            });
+            // Played on from where it's let go, if it was playing when taken.
+            let was = bar.id.with("was playing");
+            if bar.drag_started() {
+                ui.data_mut(|d| d.insert_temp(was, playing));
+            }
+            if bar.changed() && !bar.dragged() {
+                moved = Some(playing);
+            } else if bar.drag_stopped() {
+                moved = Some(ui.data(|d| d.get_temp(was)).unwrap_or(false));
+            } else if bar.dragged() {
+                moved = Some(false);
+            }
+            ui.label(
+                RichText::new(format!("{at:.1} / {len:.1} s"))
+                    .small()
+                    .color(theme::GRAPHITE),
+            );
+            if let Some(st) = start {
+                ui.label(
+                    RichText::new(format!("{:.1} s in the shot", st + at))
+                        .small()
+                        .color(theme::DUST),
+                )
+                .on_hover_text(format!("this line starts at {st:.1} s"));
+            }
+        });
+        if let Some(play_on) = moved {
+            if play_on {
+                self.hear_from(&what, &path, to.min(len - 0.05).max(0.0));
+            } else {
+                self.hush();
+                self.paused = Some((what, to));
+            }
+            return;
+        }
+        if !click {
+            return;
+        }
+        if playing {
+            self.hush();
+            self.paused = Some((what, at));
+        } else {
+            let from = if at >= len - 0.05 { 0.0 } else { at };
+            self.hear_from(&what, &path, from);
+        }
     }
 
     /// The recording line `i` sends, among its speaker's.
@@ -923,13 +1070,35 @@ impl App {
         let what = format!("{r} scene");
         let playing = self.hearing(ui.ctx(), &what);
         let label = if playing { "Stop" } else { "Play the scene" };
+        let total = match missing {
+            Some(_) => None,
+            None => self.scene_length(s),
+        };
         let b = ui
-            .add_enabled(missing.is_none(), egui::Button::new(label))
-            .on_hover_text("every line's recording at its start time")
-            .on_disabled_hover_text(match missing {
-                Some(i) => format!("line {} isn't recorded yet", i + 1),
-                None => String::new(),
-            });
+            .horizontal(|ui| {
+                let b = ui
+                    .add_enabled(missing.is_none(), egui::Button::new(label))
+                    .on_hover_text("every line's recording at its start time")
+                    .on_disabled_hover_text(match missing {
+                        Some(i) => format!("line {} isn't recorded yet", i + 1),
+                        None => String::new(),
+                    });
+                if let Some(t) = total {
+                    let over = s.duration.filter(|d| t > *d + 0.05);
+                    let color = if over.is_some() {
+                        theme::FLAG
+                    } else {
+                        theme::GRAPHITE
+                    };
+                    let l = ui.label(RichText::new(format!("{t:.1} s")).color(color));
+                    match over {
+                        Some(d) => l.on_hover_text(format!("longer than the shot's {d:.1} s")),
+                        None => l.on_hover_text("how long all the lines are together"),
+                    };
+                }
+                b
+            })
+            .inner;
         if !b.clicked() {
             return;
         }

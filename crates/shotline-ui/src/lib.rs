@@ -253,6 +253,10 @@ pub struct App {
     /// Where each line's row was last laid out, to tell where a dragged one lands.
     line_rects: Vec<egui::Rect>,
     hearing: Option<voice::Hearing>,
+    /// A line's recording stopped part way, and where.
+    paused: Option<(String, f64)>,
+    /// Recordings' lengths, as ffprobe gave them.
+    lengths: HashMap<PathBuf, f64>,
     /// timeline.toml as edited, saved once nothing has focus.
     timeline_form: Timeline,
     render: Arc<Mutex<cut::Render>>,
@@ -522,6 +526,8 @@ impl App {
             drags: 0,
             line_rects: vec![],
             hearing: None,
+            paused: None,
+            lengths: HashMap::new(),
             timeline_form: Timeline::default(),
             render: Arc::default(),
             cost_view: cost::View::default(),

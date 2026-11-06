@@ -2819,3 +2819,78 @@ fn no_more_lines_than_the_video_model_takes() {
     // Mixed into one track, any number.
     assert!(!show(true));
 }
+
+#[test]
+fn a_recorded_line_has_a_player_under_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
+    p.add_line(R, "paka", "เร็วเข้า", None).unwrap();
+    let mut s = p.shot(R).unwrap();
+    s.recipe = Some(shotline_core::SPOKEN.into());
+    p.save_shot(R, &s).unwrap();
+    let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    for (line, secs) in [(0, "1"), (1, "0.5")] {
+        let mut j = Job::new(Op::AudioTts, "fake", "fake/tts");
+        j.shot = Some(R);
+        j.who = Some("paka".into());
+        j.prompt = Some(p.shot(R).unwrap().lines[line].text.clone());
+        let mut j = p.create_job(j).unwrap();
+        let out = p.job_dir(j.id).join("out.wav");
+        let made = Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("sine=frequency=440:duration={secs}"))
+            .arg(&out)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            eprintln!("skipped: no ffmpeg");
+            return;
+        }
+        j.status = JobStatus::Done;
+        j.outputs = vec!["out.wav".into()];
+        p.save_job(&j).unwrap();
+        p.set_line_audio(R, line, Some(&j)).unwrap();
+    }
+    let app = App::new(p, tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    h.get_by_label("Play line 1");
+    h.get_by_label("0.0 / 1.0 s");
+    h.get_by_label("0.0 s in the shot");
+    // The second follows the first, 0.3 s after it ends.
+    h.get_by_label("0.0 / 0.5 s");
+    h.get_by_label("1.3 s in the shot");
+    // Both together: the second ends at 1.8 s.
+    h.get_by_label("1.8 s");
+
+    // Dragged to the middle of the first, it waits there.
+    let bar = h.get_by_label("Where in line 1").rect();
+    let (from, to) = (bar.left_center(), bar.center());
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    h.step();
+    h.event(egui::Event::PointerMoved(to));
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    h.run();
+    h.get_by_label("0.5 / 1.0 s");
+    h.get_by_label("0.5 s in the shot");
+}
