@@ -1,7 +1,7 @@
 use serde_json::json;
 use shotline_builtin::fal::{self, Fal, RefMap};
 use shotline_plugin::conformance::{self, Options};
-use shotline_plugin::protocol::{ErrorKind, MediaKind, Op, Reference, Request, Said, State};
+use shotline_plugin::protocol::{ErrorKind, MediaKind, Op, Reference, Request, SpokenLine, State};
 use shotline_plugin::{Error, Plugin};
 use wiremock::matchers::{body_partial_json, header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -15,7 +15,6 @@ fn h3(dir: &std::path::Path) -> Request {
         Reference {
             kind: MediaKind::Image,
             path: p,
-            said: None,
         }
     };
     let audio = dir.join("line.mp3");
@@ -32,7 +31,6 @@ fn h3(dir: &std::path::Path) -> Request {
             Reference {
                 kind: MediaKind::Audio,
                 path: audio,
-                said: None,
             },
             img("b.jpg"),
         ],
@@ -85,26 +83,34 @@ fn lines_say_whose_voice_and_which_words() {
     let (body, _) = fal::input(&req).unwrap();
     assert_eq!(body["prompt"], "Image 1 talks to Image 2");
 
-    req.references[1].said = Some(Said {
-        who: "Nana".into(),
-        text: "[shout] อ้าวมะลิ ทำไมมายืนตากฝนอยู่ตรงนี้ล่ะ".into(),
-    });
     let a = dir.path().join("line2.mp3");
     std::fs::write(&a, b"mp3").unwrap();
     req.references.push(Reference {
         kind: MediaKind::Audio,
         path: a,
-        said: Some(Said {
+    });
+    req.lines = vec![
+        SpokenLine {
+            who: "Nana".into(),
+            text: "[shout] อ้าวมะลิ ทำไมมายืนตากฝนอยู่ตรงนี้ล่ะ".into(),
+            audio: Some(0),
+            at: None,
+            shown_in: vec!["Image 1".into()],
+        },
+        SpokenLine {
             who: "Mali".into(),
             text: "ฝนตก [softly] แล้วไง".into(),
-        }),
-    });
+            audio: Some(1),
+            at: Some(1.5),
+            shown_in: vec!["Image 2".into()],
+        },
+    ];
     let (body, _) = fal::input(&req).unwrap();
     assert_eq!(
         body["prompt"],
         "Image 1 talks to Image 2\n\
-         Nana (shout), in the voice of Audio 1: \"อ้าวมะลิ ทำไมมายืนตากฝนอยู่ตรงนี้ล่ะ\"\n\
-         Mali (softly), in the voice of Audio 2: \"ฝนตก แล้วไง\"\n\
+         Nana (in Image 1, shout), in the voice of Audio 1: \"อ้าวมะลิ ทำไมมายืนตากฝนอยู่ตรงนี้ล่ะ\"\n\
+         Mali (in Image 2, softly), in the voice of Audio 2, starting at 1.5s: \"ฝนตก แล้วไง\"\n\
          Only these lines are spoken, word for word; nothing else in this prompt is said aloud."
     );
 }
@@ -304,7 +310,6 @@ async fn images_with_references_go_to_edit() {
     req.references.push(Reference {
         kind: MediaKind::Image,
         path: anchor,
-        said: None,
     });
     assert_eq!(fal::endpoint(&req), "fal-ai/nano-banana/edit");
     let (body, _) = fal::input(&req).unwrap();

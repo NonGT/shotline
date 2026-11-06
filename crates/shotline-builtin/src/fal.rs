@@ -19,6 +19,7 @@ use shotline_plugin::protocol::{
     Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs, PROTOCOL_VERSION,
     PluginError, Quote, Request, State, Status,
 };
+use shotline_plugin::util::delivery;
 use shotline_plugin::{Error, Plugin, Result};
 
 pub const KEY_VAR: &str = "FAL_API_KEY";
@@ -223,7 +224,7 @@ pub fn input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {
     }
     let mut m = Map::new();
     let mut refs = RefMap::default();
-    if let Some(p) = spoken(req.prompt.as_deref(), &req.references) {
+    if let Some(p) = spoken(req.prompt.as_deref(), &req.lines) {
         m.insert("prompt".into(), json!(p));
     }
     if let Some(d) = req.duration {
@@ -281,28 +282,29 @@ pub fn input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {
 }
 
 /// h3 takes reference audio as a voice to copy, not the soundtrack, and makes up the speech
-/// itself; told nothing, it reads the prompt out. So each line says whose voice and which words.
-fn spoken(
-    prompt: Option<&str>,
-    references: &[shotline_plugin::protocol::Reference],
-) -> Option<String> {
-    let lines: Vec<String> = references
+/// itself; told nothing, it reads the prompt out. So each line says who, in which picture, whose
+/// voice, when it starts if that was set, and the words.
+fn spoken(prompt: Option<&str>, lines: &[shotline_plugin::protocol::SpokenLine]) -> Option<String> {
+    let lines: Vec<String> = lines
         .iter()
-        .filter(|r| r.kind == MediaKind::Audio)
-        .enumerate()
-        .filter_map(|(i, r)| {
-            let s = r.said.as_ref()?;
-            let (how, words) = delivery(&s.text);
-            let how = if how.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", how.join(", "))
-            };
-            Some(format!(
-                "{}{how}, in the voice of Audio {}: \"{words}\"",
-                s.who,
-                i + 1
-            ))
+        .map(|l| {
+            let (how, words) = delivery(&l.text);
+            let mut about = vec![];
+            if !l.shown_in.is_empty() {
+                about.push(format!("in {}", l.shown_in.join(" and ")));
+            }
+            about.extend(how.iter().map(|h| h.to_string()));
+            let mut said = l.who.clone();
+            if !about.is_empty() {
+                said += &format!(" ({})", about.join(", "));
+            }
+            if let Some(a) = l.audio {
+                said += &format!(", in the voice of Audio {}", a + 1);
+            }
+            if let Some(at) = l.at {
+                said += &format!(", starting at {at:.1}s");
+            }
+            format!("{said}: \"{words}\"")
         })
         .collect();
     if lines.is_empty() {
@@ -316,27 +318,6 @@ fn spoken(
         Some(p) if !p.trim().is_empty() => format!("{}\n{said}", p.trim_end()),
         _ => said,
     })
-}
-
-/// Splits ElevenLabs-style "[shout]" tags from the words.
-fn delivery(text: &str) -> (Vec<&str>, String) {
-    let mut how = vec![];
-    let mut words = String::new();
-    let mut rest = text;
-    while let Some(open) = rest.find('[') {
-        let Some(close) = rest[open..].find(']') else {
-            break;
-        };
-        words.push_str(&rest[..open]);
-        let tag = rest[open + 1..open + close].trim();
-        if !tag.is_empty() {
-            how.push(tag);
-        }
-        rest = &rest[open + close + 1..];
-    }
-    words.push_str(rest);
-    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
-    (how, words)
 }
 
 fn image_input(req: &Request) -> Result<(Map<String, Value>, RefMap)> {

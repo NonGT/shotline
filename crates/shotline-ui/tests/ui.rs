@@ -2776,3 +2776,46 @@ fn remake_starts_from_what_a_picture_was_made_with() {
     let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
     assert_eq!(prompt.value().as_deref(), Some("ผกายืนริมป่า"));
 }
+
+#[test]
+fn no_more_lines_than_the_video_model_takes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let model = p.config.model.clone();
+    p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
+    let mut s = p.shot(R).unwrap();
+    s.recipe = Some(shotline_core::SPOKEN.into());
+    p.save_shot(R, &s).unwrap();
+    let video = |mix: bool| Description {
+        name: "fal".into(),
+        version: "1".into(),
+        protocol: 1,
+        env: vec![],
+        models: vec![ModelInfo {
+            id: model.clone(),
+            op: Op::VideoGenerate,
+            max_audio: Some(1),
+            audio_input: true,
+            audio_mix: mix,
+            ..ModelInfo::default()
+        }],
+    };
+    let show = |mix: bool| {
+        let mut app = App::new(p.clone(), tmp.path().join("home"))
+            .with_viewer(None)
+            .silent();
+        app.set_plugins(vec![video(mix)], None);
+        let mut h = Harness::builder()
+            .with_max_steps(16)
+            .with_size(egui::vec2(1000.0, 1200.0))
+            .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+        h.run();
+        h.get_by_label_contains("01-010  Paka walks in").click();
+        h.run();
+        h.get_by_label("Add line").accesskit_node().is_disabled()
+    };
+    // One clip a line, and it takes one.
+    assert!(show(false));
+    // Mixed into one track, any number.
+    assert!(!show(true));
+}

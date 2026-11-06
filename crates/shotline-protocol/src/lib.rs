@@ -129,6 +129,10 @@ pub struct ModelInfo {
     /// Audio only goes along with at least one reference image.
     #[serde(default, skip_serializing_if = "is_false")]
     pub audio_needs_image: bool,
+    /// The lines go as one soundtrack: shotline mixes them at their times into a single audio
+    /// reference. Otherwise each line is its own clip, up to `max_audio`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub audio_mix: bool,
     /// Where the start frame can't go (with references, or alone with audio), it can be sent as
     /// the first reference picture instead, with the prompt saying to open on it.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -165,18 +169,27 @@ pub enum MediaKind {
 pub struct Reference {
     pub kind: MediaKind,
     pub path: PathBuf,
-    /// For a line's recording: who says it and the words, for models that take audio as a voice
-    /// to copy rather than as the soundtrack.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub said: Option<Said>,
 }
 
+/// A line spoken in the video, sent with the lines' audio for the plugin to put in the prompt
+/// the way its model understands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Said {
+pub struct SpokenLine {
     /// The speaker's name as the prompt has it.
     pub who: String,
     /// As written, delivery tags like "[shout]" included.
     pub text: String,
+    /// The audio reference it's in, counting audio references from 0. With `audio_mix` every
+    /// line is in the one mixed clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<usize>,
+    /// Seconds into the video when it starts, when that's known: set by the person, or where the
+    /// mix put it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
+    /// How the prompt names the speaker's reference pictures, e.g. `Image 1`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shown_in: Vec<String>,
 }
 
 /// Input to `quote` and `run`. Which fields matter depends on the operation.
@@ -199,6 +212,9 @@ pub struct Request {
     /// In the order the prompt numbers them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<Reference>,
+    /// The shot's lines, when their audio goes along.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<SpokenLine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_frame: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

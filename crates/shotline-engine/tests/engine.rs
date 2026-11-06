@@ -344,15 +344,11 @@ async fn a_recipe_feeds_each_step_into_the_next() {
     let plan = f.plan(R).await.unwrap();
     let what: Vec<_> = plan.steps.iter().map(|s| s.what.as_str()).collect();
     assert_eq!(what, ["line 1 by @paka", "video", "video.lipsync"]);
-    // The line's audio says who speaks and the words, for models that only copy the voice.
-    let said = plan.steps[1]
-        .request
-        .references
-        .iter()
-        .find_map(|r| r.said.clone());
+    // The line goes along too: who speaks, the words and which clip, for the plugin's prompt.
+    let line = &plan.steps[1].request.lines[0];
     assert_eq!(
-        said.map(|s| (s.who, s.text)),
-        Some(("Paka".into(), "we go on before dark".into()))
+        (line.who.as_str(), line.text.as_str(), line.audio),
+        ("Paka", "we go on before dark", Some(0))
     );
     // 20 chars of speech, 4s of video, 4s of lip sync
     assert!(
@@ -475,7 +471,9 @@ async fn lines_are_joined_for_lip_sync() {
         eprintln!("skipped: no ffmpeg");
         return;
     }
-    let f = talking("", Budgets::default()).await;
+    let mut f = talking("", Budgets::default()).await;
+    // Lip synced only: fake/video takes one clip, and these are two lines.
+    f.p.config.recipes.get_mut("talking").unwrap()[1].audio = false;
     // A second of speech, then 0.45s starting at 2s.
     f.p.add_line(R, "paka", "and again", Some(2.0)).unwrap();
     let plan = f.plan(R).await.unwrap();
@@ -515,4 +513,51 @@ async fn lines_are_joined_for_lip_sync() {
         .unwrap();
     assert_eq!(out.error, None);
     assert!(f.p.job_dir(out.job.id).join("lines.wav").is_file());
+}
+
+#[tokio::test]
+async fn the_video_model_says_how_it_takes_the_lines() {
+    if shotline_media::Ffmpeg::find().is_err() {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    }
+    let mut f = talking("", Budgets::default()).await;
+    f.p.add_line(R, "paka", "and again", Some(2.0)).unwrap();
+    // One clip a line, and fake/video takes one.
+    let e = f.plan(R).await.unwrap_err().to_string();
+    assert!(e.contains("takes at most 1, one clip a line"), "{e}");
+
+    // A model that takes them mixed into one track gets one clip, and each line's start.
+    let mut video = FakePlugin::default()
+        .describe()
+        .await
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|m| m.id == "fake/video")
+        .unwrap();
+    video.audio_mix = true;
+    f.catalog.add_plugin("fake", [video]);
+    let plan = f.plan(R).await.unwrap();
+    let req = &plan.steps[2].request;
+    let audio = req
+        .references
+        .iter()
+        .filter(|r| r.kind == shotline_core::protocol::MediaKind::Audio)
+        .count();
+    assert_eq!(audio, 1);
+    let lines: Vec<_> = req.lines.iter().map(|l| (l.audio, l.at)).collect();
+    assert_eq!(lines, [(Some(0), None), (Some(0), Some(2.0))]);
+    assert_eq!(req.lines[0].shown_in, ["Ref 1", "Ref 2"]);
+
+    let out = take(&f.p, &f.books, &f.plugins, &plan, &fast(), |_| {})
+        .await
+        .unwrap();
+    assert_eq!(out.error, None);
+    let jobs = &out.take.jobs;
+    let video = &jobs[2];
+    for line in &jobs[..2] {
+        assert!(video.inputs.contains(&line.id.to_string()));
+    }
+    assert!(f.p.job_dir(video.id).join("lines.wav").is_file());
 }

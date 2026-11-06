@@ -91,6 +91,9 @@ Model fields other than `id` and `op` are optional; leave out what doesn't apply
 - `min_duration`, `max_duration` in seconds; `whole_seconds` if fractions aren't allowed.
 - `resolutions`, `aspects`: allowed values, as the API spells them.
 - `start_frame`, `start_frame_with_refs`, `audio_input`: what the model accepts.
+- `audio_mix`: the model plays the audio as the soundtrack and takes one clip, so shotline mixes
+  the shot's lines into one track at their times first. Without it each line goes as its own
+  clip, and a shot can't have more lines than `max_audio`.
 - `frame_as_reference`: where the start frame can't go, shotline may send it as the first
   reference picture and ask in the prompt to open on it.
 - `notes`: name of a prompt template (`prompts/models/<notes>.md`) with per-model tweaks.
@@ -237,9 +240,19 @@ Only `op` and `model` are always there, plus `duration` (the planned length of t
 video and lip sync ops. A quote may refer to input files that don't exist yet, because later steps
 of a take are priced before earlier ones have run; don't read files in `quote`. Paths are absolute and local; uploading them, or turning
 them into data URLs, is the plugin's job. References are in the order the prompt numbers them.
-A line's recording also has `"said": {"who": "Nana", "text": "[shout] ..."}`, the speaker's name and
-the words as written. A model that plays the audio as the soundtrack can ignore it; one that takes
-audio only as a voice to copy (fal's h3) needs the words in the prompt or it makes up its own.
+When the lines' audio goes along, `lines` says what's in it, one entry a line:
+
+```json
+"lines": [{"who": "Nana", "text": "[shout] ...", "audio": 0, "at": 1.5, "shown_in": ["Image 1"]}]
+```
+
+`who` is the speaker's name, `text` the words as written with delivery tags, `audio` which audio
+reference has it (counting audio references from 0; with `audio_mix` all of them are in the one
+clip), `at` the second it starts when known (set by the person, or where the mix put it) and
+`shown_in` how the prompt names the speaker's pictures. Putting this into the prompt is the
+plugin's job, in whatever way its model follows: fal's h3 takes audio only as a voice to copy and
+needs the words or it makes up its own; Venice's plays the mix and needs to know whose lips move
+when. `util::delivery` splits the tags from the words.
 `params` comes straight from the user's shot or command line; validate it.
 
 ## Errors

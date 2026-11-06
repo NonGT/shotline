@@ -1,6 +1,6 @@
 use serde_json::json;
 use shotline_plugin::conformance::{self, Options};
-use shotline_plugin::protocol::{ErrorKind, MediaKind, Op, Reference, Request, State};
+use shotline_plugin::protocol::{ErrorKind, MediaKind, Op, Reference, Request, SpokenLine, State};
 use shotline_plugin::{Error, Plugin};
 use venice::Venice;
 use wiremock::matchers::{body_partial_json, header, method, path, query_param};
@@ -24,16 +24,47 @@ fn req(dir: &std::path::Path) -> Request {
             Reference {
                 kind: MediaKind::Audio,
                 path: wav,
-                said: None,
             },
             Reference {
                 kind: MediaKind::Image,
                 path: img,
-                said: None,
             },
         ],
         ..Request::default()
     }
+}
+
+#[test]
+fn the_prompt_says_who_says_what_from_when() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut r = req(dir.path());
+    r.lines = vec![
+        SpokenLine {
+            who: "Nana".into(),
+            text: "[shout] อ้าวมะลิ".into(),
+            audio: Some(0),
+            at: Some(0.0),
+            shown_in: vec!["<Picture 1>".into()],
+        },
+        SpokenLine {
+            who: "Mali".into(),
+            text: "ฝนตก แล้วไง".into(),
+            audio: Some(0),
+            at: Some(1.2),
+            shown_in: vec!["<Picture 2>".into(), "<Picture 3>".into()],
+        },
+    ];
+    let (b, _) = venice::body(&r).unwrap();
+    assert_eq!(
+        b["prompt"],
+        "<Picture 1> speaks\n\
+         Nana (in <Picture 1>, shout) from 0.0s: \"อ้าวมะลิ\"\n\
+         Mali (in <Picture 2> and <Picture 3>) from 1.2s: \"ฝนตก แล้วไง\"\n\
+         The audio holds these lines; each person's lips move only while their own line plays."
+    );
+    // Mixed into one track, so it's told to shotline.
+    let h3 = venice::models().into_iter().find(|m| m.id == H3).unwrap();
+    assert!(h3.audio_mix);
 }
 
 #[test]
@@ -307,7 +338,6 @@ async fn images() {
         Reference {
             kind: MediaKind::Image,
             path: img.clone(),
-            said: None,
         };
         2
     ];

@@ -381,6 +381,14 @@ Lip sync takes one audio clip. A shot with several lines (or a line with `at`) g
 into `lines.wav` in the lip sync job's folder first: each line starts at its `at` seconds, or 0.3s
 after the line before. Redoing lip sync with `--from-step` joins the same lines again for free.
 
+When the video model gets the lines itself ("by the video model"), its plugin says how. A model
+with `audio_mix` (Venice's h3) gets the same kind of mix, made in the video job's folder, as its
+one soundtrack. Any other model gets each line as its own clip, so a shot can have no more lines
+than its `max_audio` (3 for fal's h3); the app stops offering Add line there and a take is refused.
+Either way the plugin is told each line's speaker, words, clip, start and the pictures the speaker
+is in, and writes them into the prompt its own way: fal's says whose voice and when each starts,
+Venice's says whose lips move from when.
+
 Venice's h3 takes the lines' audio only along with at least one reference image
 (`audio_needs_image` in its model info), so a take that would send audio alone is refused before
 anything is spent. It also won't take a start frame along with references or audio, so a cut

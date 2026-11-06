@@ -50,6 +50,27 @@ pub fn data_url(path: &Path, field: &str) -> Result<String, PluginError> {
     Ok(format!("data:{};base64,{b64}", mime(path)))
 }
 
+/// Splits ElevenLabs-style "[shout]" tags from the words.
+pub fn delivery(text: &str) -> (Vec<&str>, String) {
+    let mut how = vec![];
+    let mut words = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find(']') else {
+            break;
+        };
+        words.push_str(&rest[..open]);
+        let tag = rest[open + 1..open + close].trim();
+        if !tag.is_empty() {
+            how.push(tag);
+        }
+        rest = &rest[open + close + 1..];
+    }
+    words.push_str(rest);
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    (how, words)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

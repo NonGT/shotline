@@ -23,9 +23,9 @@ use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use shotline_plugin::protocol::{
     Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
-    PROTOCOL_VERSION, PluginError, Quote, Request, State, Status,
+    PROTOCOL_VERSION, PluginError, Quote, Request, SpokenLine, State, Status,
 };
-use shotline_plugin::util::data_url;
+use shotline_plugin::util::{data_url, delivery};
 use shotline_plugin::{Error, Plugin, Result};
 
 pub const KEY_VAR: &str = "VENICE_API_KEY";
@@ -90,6 +90,7 @@ pub fn models() -> Vec<ModelInfo> {
         start_frame_with_refs: false,
         audio_input: true,
         audio_needs_image: true,
+        audio_mix: true,
         frame_as_reference: true,
         price: Some("by length and resolution, e.g. about $0.48 for 8 s at 480P".into()),
         params_schema: Some(json!({
@@ -608,6 +609,41 @@ fn duration(req: &Request) -> String {
     format!("{}s", req.duration.unwrap_or(5.0).round() as i64)
 }
 
+/// The audio here is the soundtrack, every line mixed in at its time, so the prompt says who in
+/// the pictures says each one and from when, for the right lips to move.
+fn spoken(prompt: Option<&str>, lines: &[SpokenLine]) -> Option<String> {
+    let lines: Vec<String> = lines
+        .iter()
+        .map(|l| {
+            let (how, words) = delivery(&l.text);
+            let mut about = vec![];
+            if !l.shown_in.is_empty() {
+                about.push(format!("in {}", l.shown_in.join(" and ")));
+            }
+            about.extend(how.iter().map(|h| h.to_string()));
+            let mut said = l.who.clone();
+            if !about.is_empty() {
+                said += &format!(" ({})", about.join(", "));
+            }
+            if let Some(at) = l.at {
+                said += &format!(" from {at:.1}s");
+            }
+            format!("{said}: \"{words}\"")
+        })
+        .collect();
+    if lines.is_empty() {
+        return prompt.map(Into::into);
+    }
+    let said = format!(
+        "{}\nThe audio holds these lines; each person's lips move only while their own line plays.",
+        lines.join("\n")
+    );
+    Some(match prompt {
+        Some(p) if !p.trim().is_empty() => format!("{}\n{said}", p.trim_end()),
+        _ => said,
+    })
+}
+
 pub fn body(req: &Request) -> Result<(Map<String, Value>, Vec<usize>)> {
     if req.op != Op::VideoGenerate {
         return Err(PluginError::new(
@@ -629,7 +665,7 @@ pub fn body(req: &Request) -> Result<(Map<String, Value>, Vec<usize>)> {
     if let Some(a) = &req.aspect {
         m.insert("aspect_ratio".into(), json!(a));
     }
-    if let Some(p) = &req.prompt {
+    if let Some(p) = spoken(req.prompt.as_deref(), &req.lines) {
         m.insert("prompt".into(), json!(p));
     }
     let mut images = vec![];

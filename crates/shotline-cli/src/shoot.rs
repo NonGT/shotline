@@ -594,7 +594,6 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
         req.references.push(Reference {
             kind: guess_kind(&path),
             path,
-            said: None,
         });
     }
     for (k, v) in &a.params {

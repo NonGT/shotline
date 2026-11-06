@@ -285,10 +285,11 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
         } else if spec.audio_needs_image && references.is_empty() {
             warnings.push(no_image_for_audio(&spec.id));
         } else if let Some(max) = spec.max_audio
+            && !spec.audio_mix
             && shot.lines.len() > max
         {
             warnings.push(format!(
-                "{} lines but {} takes at most {max} audio clips",
+                "{} lines but {} takes at most {max}, one clip a line",
                 shot.lines.len(),
                 spec.id
             ));

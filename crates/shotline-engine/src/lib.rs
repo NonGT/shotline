@@ -10,7 +10,8 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::json;
 use shotline_core::ledger::{Books, Context, Entry, Kind, is_currency, money, pricing};
 use shotline_core::protocol::{
-    Amount, ErrorKind, MediaKind, Op, PluginError, Quote, Reference, Request, Said, State, Status,
+    Amount, ErrorKind, MediaKind, Op, PluginError, Quote, Reference, Request, SpokenLine, State,
+    Status,
 };
 use shotline_core::{
     Built, Catalog, Cost, Job, JobStatus, Line, MeasuredRates, Project, ShotRef, Step, Take, build,
@@ -36,8 +37,8 @@ impl Plugins for BTreeMap<String, Box<dyn Plugin>> {
 enum StepKind {
     /// Line n of the shot, spoken.
     Line(usize),
-    /// The shot's video; `audio` sends the spoken lines along.
-    Generate { audio: bool },
+    /// The shot's video; `audio` sends the spoken lines along, `mix` as one clip.
+    Generate { audio: bool, mix: bool },
     /// Anything working on the video so far: lip sync, upscale, ... `join` mixes the lines
     /// into one clip first.
     Process { join: bool },
@@ -251,7 +252,6 @@ pub async fn plan(
             .map(|x| Reference {
                 kind: MediaKind::Image,
                 path: project.root.join(&x.path),
-                said: None,
             })
             .collect(),
         start_frame,
@@ -281,37 +281,65 @@ pub async fn plan(
                     );
                 }
                 let mut req = video.clone();
+                let info = catalog
+                    .find(&built.plugin, &built.model, &Op::VideoGenerate)
+                    .map(|m| &m.info);
+                let mix = info.is_some_and(|m| m.audio_mix);
                 if step.audio {
                     if shot.lines.is_empty() {
                         bail!(
                             "the recipe sends the lines' audio to the video model, but {r} has no lines"
                         );
                     }
-                    if req.references.is_empty()
-                        && catalog
-                            .find(&built.plugin, &built.model, &Op::VideoGenerate)
-                            .is_some_and(|m| m.info.audio_needs_image)
-                    {
+                    if req.references.is_empty() && info.is_some_and(|m| m.audio_needs_image) {
                         bail!("{}", shotline_core::no_image_for_audio(&built.model));
                     }
-                    for (i, line) in shot.lines.iter().enumerate() {
-                        let who = project
-                            .element(&line.who)
-                            .map(|e| e.name)
-                            .unwrap_or_else(|_| line.who.clone());
+                    if let Some(max) = info.and_then(|m| m.max_audio)
+                        && !mix
+                        && shot.lines.len() > max
+                    {
+                        bail!(
+                            "{r} has {} lines but {} takes at most {max}, one clip a line",
+                            shot.lines.len(),
+                            built.model
+                        );
+                    }
+                    if mix {
                         req.references.push(Reference {
                             kind: MediaKind::Audio,
-                            path: pending(project, &format!("line{i}.mp3")),
-                            said: Some(Said {
-                                who,
-                                text: line.text.clone(),
-                            }),
+                            path: pending(project, "lines.wav"),
+                        });
+                    }
+                    for (i, line) in shot.lines.iter().enumerate() {
+                        if !mix {
+                            req.references.push(Reference {
+                                kind: MediaKind::Audio,
+                                path: pending(project, &format!("line{i}.mp3")),
+                            });
+                        }
+                        req.lines.push(SpokenLine {
+                            who: project
+                                .element(&line.who)
+                                .map(|e| e.name)
+                                .unwrap_or_else(|_| line.who.clone()),
+                            text: line.text.clone(),
+                            audio: Some(if mix { 0 } else { i }),
+                            at: line.at,
+                            shown_in: built
+                                .references
+                                .iter()
+                                .filter(|x| x.handle == line.who)
+                                .map(|x| x.label.clone())
+                                .collect(),
                         });
                     }
                 }
                 req.params.append(&mut params);
                 steps.push((
-                    StepKind::Generate { audio: step.audio },
+                    StepKind::Generate {
+                        audio: step.audio,
+                        mix,
+                    },
                     "video".into(),
                     built.plugin.clone(),
                     req,
@@ -857,7 +885,10 @@ pub async fn take(
         let mut inputs = vec![];
         match sp.kind {
             StepKind::Line(_) => {}
-            StepKind::Generate { audio: with_audio } => {
+            StepKind::Generate {
+                audio: with_audio,
+                mix,
+            } => {
                 inputs = plan
                     .built
                     .references
@@ -867,7 +898,37 @@ pub async fn take(
                 if let Some(sf) = &plan.built.start_frame {
                     inputs.push(sf.path.clone());
                 }
-                if with_audio {
+                if with_audio && mix {
+                    let Some(j) = &job else {
+                        bail!("the lines' mix needs the video's job");
+                    };
+                    let out = project.job_dir(j.id).join("lines.wav");
+                    let starts = match join_lines(plan, &audio, &out) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let now = project.clock.now();
+                            let id = j.id.to_string();
+                            for h in held.iter().skip_while(|h| **h != id) {
+                                books.release(now, h, None)?;
+                            }
+                            return Err(e);
+                        }
+                    };
+                    // Where the mix put each line, for the prompt to say.
+                    for ((i, _), at) in audio.iter().zip(starts) {
+                        if let Some(l) = req.lines.get_mut(*i) {
+                            l.at = Some((at * 10.0).round() / 10.0);
+                        }
+                    }
+                    if let Some(rf) = req
+                        .references
+                        .iter_mut()
+                        .find(|x| x.kind == MediaKind::Audio)
+                    {
+                        rf.path = out;
+                    }
+                    inputs.extend(audio.values().map(|(_, id)| id.to_string()));
+                } else if with_audio {
                     let mut lines = audio.values();
                     for rf in req
                         .references
@@ -886,7 +947,7 @@ pub async fn take(
                 inputs.push(vid.to_string());
                 if join && let Some(j) = &job {
                     let out = project.job_dir(j.id).join("lines.wav");
-                    if let Err(e) = join_lines(plan, &audio, &out) {
+                    if let Err(e) = join_lines(plan, &audio, &out).map(drop) {
                         let now = project.clock.now();
                         let id = j.id.to_string();
                         for h in held.iter().skip_while(|h| **h != id) {
@@ -945,8 +1006,13 @@ pub async fn take(
     outcome(project, r, take_id, last, None)
 }
 
-/// The lines' audio as one clip for lip sync, kept in the lip sync job's folder.
-fn join_lines(plan: &Plan, audio: &BTreeMap<usize, (PathBuf, Ulid)>, out: &Path) -> Result<()> {
+/// The lines' audio as one clip, kept in the folder of the job it's for. Returns where each
+/// line starts.
+fn join_lines(
+    plan: &Plan,
+    audio: &BTreeMap<usize, (PathBuf, Ulid)>,
+    out: &Path,
+) -> Result<Vec<f64>> {
     let clips: Vec<_> = audio
         .iter()
         .map(|(i, (path, _))| shotline_media::lines::Clip {
@@ -956,8 +1022,7 @@ fn join_lines(plan: &Plan, audio: &BTreeMap<usize, (PathBuf, Ulid)>, out: &Path)
         .collect();
     shotline_media::Ffmpeg::find()?
         .join_lines(&clips, out)
-        .with_context(|| format!("joining {}'s lines for lip sync", plan.shot))?;
-    Ok(())
+        .with_context(|| format!("joining {}'s lines", plan.shot))
 }
 
 fn outcome(

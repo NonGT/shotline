@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, RichText};
+use shotline_core::protocol::Op;
 use shotline_core::{Job, Kind, Shot, ShotRef};
 use shotline_media::lines::Clip;
 use shotline_media::play::PcmPipe;
@@ -344,6 +345,26 @@ impl App {
 
     /// The framed Lines section: one row a line, a draft row while one's being added, and the
     /// scene played through.
+    /// How many lines the shot's video model takes, when the recipe sends it each line as its
+    /// own clip, and the model's name. None when it mixes them or isn't sent them.
+    fn line_room(&mut self, r: ShotRef, s: &Shot) -> Option<(usize, String)> {
+        let steps = self.project.steps(s).ok()?;
+        if !steps.iter().any(|x| x.op == Op::VideoGenerate && x.audio) {
+            return None;
+        }
+        let b = self.built(r).ok()?;
+        let m = self
+            .plugins
+            .iter()
+            .filter(|d| d.name == b.plugin)
+            .flat_map(|d| &d.models)
+            .find(|m| m.id == b.model && m.op == Op::VideoGenerate)?;
+        if m.audio_mix {
+            return None;
+        }
+        Some((m.max_audio?, b.model))
+    }
+
     pub(crate) fn lines(
         &mut self,
         ui: &mut egui::Ui,
@@ -475,9 +496,21 @@ impl App {
         self.line_rects = rects;
         self.voice_open = open;
 
+        let full = self
+            .line_room(r, s)
+            .filter(|(max, _)| s.lines.len() >= *max);
         if self.form.adding {
             any_open |= self.draft_row(ui, r, s, &cast, title, acts);
-        } else if ui.button("Add line").clicked() {
+        } else if ui
+            .add_enabled(full.is_none(), egui::Button::new("Add line"))
+            .on_disabled_hover_text(full.map_or(String::new(), |(max, model)| {
+                format!(
+                    "{model} takes at most {max} lines, one clip each; \
+                     have them lip synced after for more"
+                )
+            }))
+            .clicked()
+        {
             let f = &mut self.form;
             f.adding = true;
             if f.new.who.is_empty() || !cast.contains(&f.new.who) {
