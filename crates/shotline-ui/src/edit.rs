@@ -778,7 +778,18 @@ impl App {
             }
             Action::Select(t) => {
                 let t = p.select_take(t.shot, &t.number.to_string())?;
-                format!("{t} selected").into()
+                // Kept for Browse existing, and for the shot after if it continues from this one.
+                let video = t
+                    .output()
+                    .and_then(|j| j.outputs.first().map(|f| p.job_dir(j.id).join(f)));
+                let last = p.last_frame(&t).filter(|f| !f.is_file());
+                match (&self.ff, video, last) {
+                    (Some(ff), Some(v), Some(png)) => match ff.last_frame(&v, &png) {
+                        Ok(()) => format!("{t} selected").into(),
+                        Err(e) => format!("{t} selected; can't take its last frame: {e}").into(),
+                    },
+                    _ => format!("{t} selected").into(),
+                }
             }
             Action::RemoveTake(t) => {
                 let t = p.remove_take(t.shot, &t.number.to_string())?;

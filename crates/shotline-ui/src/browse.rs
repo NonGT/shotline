@@ -1,5 +1,6 @@
 //! Browse existing: a dropdown of pictures the film already has, anchors and every image made
-//! before, grouped by what they were for. A made one can be thrown out from it.
+//! before, grouped by what they were for, and the last frames of takes. A made one can be thrown
+//! out from it.
 
 use std::path::PathBuf;
 
@@ -33,6 +34,7 @@ pub(crate) enum Near {
 
 pub(crate) const LABEL: &str = "Browse existing";
 pub(crate) const MINE: &str = "Made for this one";
+pub(crate) const TAKES: &str = "Takes";
 
 /// The dropdown, `name`d for screen readers. `salt` keeps two on one page apart.
 pub(crate) fn dropdown(
@@ -202,6 +204,22 @@ impl App {
                     },
                 )
             })
+            .chain(self.film.last_frames.iter().map(|(t, f)| {
+                let shot = names
+                    .get(&t.shot)
+                    .map_or_else(|| t.shot.to_string(), |(_, s)| s.clone());
+                (
+                    TAKES.to_string(),
+                    shot,
+                    Entry {
+                        name: format!("Last frame of {t}"),
+                        path: f.clone(),
+                        hover: format!("the last frame of {t}'s video"),
+                        made: None,
+                        used: self.film.in_use.get(f).cloned(),
+                    },
+                )
+            }))
             .collect()
     }
 }

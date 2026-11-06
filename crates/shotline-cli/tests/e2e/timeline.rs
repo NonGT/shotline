@@ -135,10 +135,11 @@ fn chain_match_and_render() {
         .unwrap();
 
     shoot(&tmp, &t, "01-010", "rr=1:gg=0.5:bb=0.4", false);
-    // The continue shot starts on 01-010's last frame, taken on the way.
+    // The continue shot starts on 01-010's last frame, taken when it was selected; 01-020's is
+    // taken once it's selected too.
     shoot(&tmp, &t, "01-020", "rr=0.4:gg=0.6:bb=1", true);
     let last: Vec<_> = glob(&tmp.path().join("film/jobs"), "last.png");
-    assert_eq!(last.len(), 1, "{last:?}");
+    assert_eq!(last.len(), 2, "{last:?}");
 
     shotline(&tmp, &t)
         .args(["timeline", "render"])

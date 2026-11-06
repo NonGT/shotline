@@ -663,8 +663,9 @@ it names, then its own pictures (Add image… or Make image…, the same panel a
 row, each with a note of what it shows here; its tooltip shows the sentence the prompt gets. Browse
 existing sends one anchor of any element (the element goes into the shot's `elements` with its
 other anchors left out), including one left out before; Remove under an element's anchor leaves it
-out of this shot only, or adds an image made before as one of the shot's pictures. Starts sits under
-the plot; on a cut, the storyboard frame comes before the prompt with Browse existing, Add image…,
+out of this shot only, or adds an image made before as one of the shot's pictures. Continue from
+previous shot sits under the plot, and can only be ticked once the shot before has a selected
+take; left off, the storyboard frame comes before the prompt with Browse existing, Add image…,
 Make frame… and Remove. Make frame… starts from the frame prompt, with no pictures. The
 frame and each of the shot's own pictures also have Remake…, which opens the same panel filled
 from the job that made that picture: what was typed, the pictures sent along that are still
@@ -678,7 +679,9 @@ list ("@paka 2  side view") and goes when the anchor is removed.
 Every image a model makes stays in its job folder, so making a frame or an anchor again doesn't
 lose the one before. Each job records what it was for (`shot`, or the element in `who`), and every
 Browse existing (frame, References, an element's anchors, the image panel) lists them, the ones
-made for what's open first, newest first. Picking one copies it in. Remove beside one throws it
+made for what's open first, newest first, then under Takes the last frame of each take that has
+been selected (taken once, when it's first selected, into its job folder as `last.png`, the file
+a shot continuing from it sends). Picking one copies it in. Remove beside one throws it
 out (its job is marked `discarded`, the file and the ledger line stay) and can be undone. Every box typed for a model (Prompt, Frame
 prompt, Make image) offers "Translate to English first" when what's in it isn't English and the
 film's translating model has its key; the price then includes the translation. Make frame… opens the image panel with the frame

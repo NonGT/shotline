@@ -1215,8 +1215,21 @@ fn run(cli: Cli) -> Result<()> {
                 (None, Some(t)) => (shot.parse::<ShotRef>()?, t.clone()),
                 _ => bail!("give the take as `01-010 3` or `01-010#3`"),
             };
-            let t = open()?.select_take(shot, &take)?;
+            let p = open()?;
+            let t = p.select_take(shot, &take)?;
             println!("{t} selected");
+            // Kept to pick from in the app, and for a shot continuing from this one.
+            let video = t
+                .output()
+                .and_then(|j| j.outputs.first().map(|f| p.job_dir(j.id).join(f)));
+            if let (Ok(ff), Some(v), Some(png)) = (
+                shotline_media::Ffmpeg::find(),
+                video,
+                p.last_frame(&t).filter(|f| !f.is_file()),
+            ) && let Err(e) = ff.last_frame(&v, &png)
+            {
+                eprintln!("warning: can't take its last frame: {e}");
+            }
         }
 
         Cmd::Splice {

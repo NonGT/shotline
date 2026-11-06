@@ -122,10 +122,12 @@ fn edit_a_shot() {
     h.get_by_label("Copy the message").click();
     h.run();
 
-    h.get_by_label("from the shot before").click();
-    h.run();
-    h.run();
-    assert_eq!(p.shot(R).unwrap().transition, Transition::Continue);
+    // The first shot has nothing to continue from.
+    assert!(
+        h.get_by_label("Continue from previous shot")
+            .accesskit_node()
+            .is_disabled()
+    );
 
     // Lines show once they're to be spoken.
     assert!(h.query_by_label("Add line").is_none());
@@ -1529,7 +1531,8 @@ fn browse_and_select_a_take() {
 
     h.get_by_label("Use in the cut #1").click();
     h.run();
-    h.get_by_label("01-010#1 selected");
+    // Not a real video, so there's no last frame to take.
+    h.get_by_label_contains("01-010#1 selected; can't take its last frame");
     h.get_by_label("in the cut");
     assert!(h.query_by_label("Use in the cut #1").is_none());
     let p = Project::open(&tmp.path().join("film")).unwrap();
@@ -1564,6 +1567,75 @@ fn browse_and_select_a_take() {
     h.run();
     h.get_by_label("Remove #1");
     assert!(p.shot(r).unwrap().selected_take.is_some());
+}
+
+#[test]
+fn a_selected_take_s_last_frame() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let next = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                title: "Paka stops".into(),
+                ..Shot::default()
+            },
+        )
+        .unwrap();
+    let take = p.take(R, "1").unwrap();
+    let video = p.job_dir(take.output().unwrap().id).join("out.mp4");
+    if clip(&video).is_none() {
+        return;
+    }
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 1400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+
+    // Nothing to continue from until the shot before has a take in the cut.
+    h.get_by_label_contains(&format!("{next}  Paka stops")).click();
+    h.run();
+    let cont = h.get_by_label("Continue from previous shot");
+    assert!(cont.accesskit_node().is_disabled());
+
+    // Selected, its last frame is taken, once.
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    h.get_by_label("Use in the cut #1").click();
+    h.run();
+    h.get_by_label("01-010#1 selected");
+    let last = p.last_frame(&take).unwrap();
+    assert!(last.is_file());
+
+    // It's there to pick under Takes.
+    h.get_by_label_contains(&format!("{next}  Paka stops")).click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Browse existing frames")
+        .click();
+    h.run();
+    h.run();
+    h.get_by_label("Takes");
+    h.get_by_label("Last frame of 01-010#1").click();
+    h.run();
+    h.run();
+    let frame = p.shot(next).unwrap().frame.unwrap();
+    assert_eq!(
+        std::fs::read(p.root.join(frame)).unwrap(),
+        std::fs::read(&last).unwrap()
+    );
+
+    h.get_by_label("Continue from previous shot").click();
+    h.run();
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.run();
+    assert_eq!(p.shot(next).unwrap().transition, Transition::Continue);
 }
 
 /// A second of test pattern with a tone, or None without ffmpeg.

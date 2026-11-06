@@ -83,6 +83,8 @@ struct Film {
     made: usize,
     /// Every image made and not thrown out, newest first.
     images: Vec<shotline_core::MadeImage>,
+    /// Takes whose last frame was taken, with it, newest first.
+    last_frames: Vec<(Take, PathBuf)>,
     /// Made images in use somewhere, by their path: where.
     in_use: HashMap<PathBuf, String>,
 }
@@ -950,6 +952,7 @@ impl App {
             made: p.selected_take_ids()?.len(),
             in_use: HashMap::new(),
             images: p.made_images()?,
+            last_frames: p.last_frames()?,
         };
         self.film.in_use = in_use(&self.film, &self.project.root);
         self.load_takes()
@@ -2060,26 +2063,43 @@ impl App {
     }
 
     /// How the shot starts: on a cut, with its storyboard frame if it has one, or carried on
-    /// from the shot before.
+    /// from the shot before, which needs that one's selected take.
     fn start(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
-        let l = caption(ui, "Starts").id;
-        ui.horizontal(|ui| {
-            let f = &mut self.form;
-            ui.radio_value(&mut f.transition, Transition::Cut, "on a cut")
-                .labelled_by(l);
-            ui.add_space(12.0);
-            ui.radio_value(
-                &mut f.transition,
-                Transition::Continue,
-                "from the shot before",
-            );
+        let prev = self.project.previous_shot(r).ok().flatten();
+        let ready = prev.is_some_and(|p| {
+            self.film
+                .chapters
+                .iter()
+                .flat_map(|(_, s)| s)
+                .any(|(x, s)| *x == p && s.selected_take.is_some())
         });
-        if self.form.transition == Transition::Continue {
-            let why = match self.project.previous_shot(r) {
-                Ok(Some(prev)) => format!(
-                    "On the last frame of {prev}'s selected take, colour matched in the cut."
-                ),
-                _ => "It's the first shot, so there's nothing before it to carry on from.".into(),
+        let f = &mut self.form;
+        let mut on = f.transition == Transition::Continue;
+        // Left on, it can still be turned off.
+        ui.add_enabled(
+            on || ready,
+            egui::Checkbox::new(&mut on, "Continue from previous shot"),
+        )
+        .on_disabled_hover_text(match prev {
+            Some(p) => format!("{p} has no selected take yet"),
+            None => "it's the first shot".into(),
+        });
+        f.transition = if on {
+            Transition::Continue
+        } else {
+            Transition::Cut
+        };
+        if on {
+            let why = match (prev, ready) {
+                (Some(p), true) => {
+                    format!("On the last frame of {p}'s selected take, colour matched in the cut.")
+                }
+                (Some(p), false) => {
+                    format!("{p} has no selected take yet, so there's nothing to carry on from.")
+                }
+                (None, _) => {
+                    "It's the first shot, so there's nothing before it to carry on from.".into()
+                }
             };
             hint(ui, &why);
             return;
@@ -2652,16 +2672,17 @@ fn in_use(film: &Film, root: &Path) -> HashMap<PathBuf, String> {
     }
     let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
     let mut out = HashMap::new();
-    for m in &film.images {
-        let Some(len) = size(&m.path) else { continue };
+    let made = film.images.iter().map(|m| &m.path);
+    for path in made.chain(film.last_frames.iter().map(|(_, f)| f)) {
+        let Some(len) = size(path) else { continue };
         let mut bytes = None;
         for (f, what) in &used {
             if size(f) != Some(len) {
                 continue;
             }
-            let mine = bytes.get_or_insert_with(|| std::fs::read(&m.path).unwrap_or_default());
+            let mine = bytes.get_or_insert_with(|| std::fs::read(path).unwrap_or_default());
             if std::fs::read(f).is_ok_and(|b| b == *mine) {
-                out.insert(m.path.clone(), what.clone());
+                out.insert(path.clone(), what.clone());
                 break;
             }
         }

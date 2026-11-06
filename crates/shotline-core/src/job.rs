@@ -433,6 +433,35 @@ impl Project {
         Ok(takes)
     }
 
+    /// Where a take's last frame is kept; a shot continuing from the take starts on it.
+    pub fn last_frame(&self, take: &Take) -> Option<PathBuf> {
+        Some(self.job_dir(take.output()?.id).join("last.png"))
+    }
+
+    /// The takes, not thrown out, whose last frame has been taken, with it. Newest first.
+    pub fn last_frames(&self) -> Result<Vec<(Take, PathBuf)>> {
+        let mut shots = vec![];
+        for j in self.jobs()? {
+            if let Some(s) = j.shot
+                && j.take.is_some()
+                && !shots.contains(&s)
+                && self.job_dir(j.id).join("last.png").is_file()
+            {
+                shots.push(s);
+            }
+        }
+        let mut out = vec![];
+        for s in shots {
+            for t in self.takes(s)? {
+                if let Some(f) = self.last_frame(&t).filter(|f| f.is_file()) {
+                    out.push((t, f));
+                }
+            }
+        }
+        out.sort_by_key(|(t, _)| std::cmp::Reverse(t.id));
+        Ok(out)
+    }
+
     /// `3`, `#3` or a ULID prefix.
     pub fn take(&self, shot: ShotRef, spec: &str) -> Result<Take> {
         let takes = self.takes(shot)?;
