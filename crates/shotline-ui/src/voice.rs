@@ -278,9 +278,41 @@ impl App {
         match done {
             (r, i, Ok(f)) => {
                 self.info(format!("line {} of {r} recorded", i + 1));
+                self.replace_remade(r, i);
                 self.hear(&f.display().to_string(), &f);
             }
             (r, i, Err(e)) => self.error(format!("line {} of {r}: {e}", i + 1)),
+        }
+    }
+
+    /// The recording a remade line had goes, unless another line still sends it.
+    fn replace_remade(&mut self, r: ShotRef, i: usize) {
+        let Some((rr, ri, old)) = self.remaking.take() else {
+            return;
+        };
+        if (rr, ri) != (r, i) {
+            self.remaking = Some((rr, ri, old));
+            return;
+        }
+        let elsewhere = self
+            .film
+            .chapters
+            .iter()
+            .flat_map(|(_, shots)| shots)
+            .find_map(|(sr, sh)| {
+                sh.lines
+                    .iter()
+                    .enumerate()
+                    .find(|(k, l)| l.audio.as_ref() == Some(&old) && (*sr, *k) != (r, i))
+                    .map(|(k, _)| (*sr, k))
+            });
+        match elsewhere {
+            Some((sr, k)) => self.info(format!(
+                "line {} of {r} recorded; the one it had stays, line {} of {sr} sends it",
+                i + 1,
+                k + 1
+            )),
+            None => self.apply(vec![Action::DeleteRecording(r, old)]),
         }
     }
 
@@ -435,6 +467,7 @@ impl App {
         let mut open = None;
         let mut any_open = false;
         let mut rects = vec![];
+        let mut heads = vec![];
         for i in 0..n {
             // The others make room for it as it's dragged over them.
             let shift = match (lifted, to) {
@@ -458,7 +491,7 @@ impl App {
                     ui.multiply_opacity(0.0);
                 }
                 ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
+                    let head = ui.horizontal(|ui| {
                         let g = grip(ui, i)
                             .on_hover_text("drag to put it elsewhere; its start stays as it is");
                         if g.drag_started()
@@ -488,9 +521,9 @@ impl App {
                             None => {}
                         }
                     });
-                    if lifted.is_none() {
-                        self.line_player(ui, r, s, i);
-                    }
+                    heads.push(head.response.rect.height());
+                    // Kept while lines move, so they keep their height.
+                    self.line_player(ui, r, s, i);
                     // The price on its own row, as wide as the line; out of the way while
                     // lines are moved.
                     if let Some((_, cost)) = priced.as_ref().filter(|(pi, _)| *pi == i)
@@ -524,6 +557,7 @@ impl App {
             self.ghost(ui, r, s, d, t, p);
         }
         self.line_rects = rects;
+        self.line_heads = heads;
         self.voice_open = open;
 
         let full = self
@@ -558,7 +592,15 @@ impl App {
     }
 
     /// The dragged line, lifted off the list under the pointer, and the gap it would drop into.
-    fn ghost(&self, ui: &egui::Ui, r: ShotRef, s: &Shot, d: LineDrag, to: usize, p: egui::Pos2) {
+    fn ghost(
+        &mut self,
+        ui: &egui::Ui,
+        r: ShotRef,
+        s: &Shot,
+        d: LineDrag,
+        to: usize,
+        p: egui::Pos2,
+    ) {
         let (Some(from), Some(slot)) = (self.line_rects.get(d.from), self.line_rects.get(to))
         else {
             return;
@@ -595,9 +637,14 @@ impl App {
             egui::Stroke::new(1.0, theme::DUST),
             egui::StrokeKind::Inside,
         );
+        let head_h = self
+            .line_heads
+            .get(d.from)
+            .copied()
+            .unwrap_or(rect.height());
         dots(
             &painter,
-            egui::Rect::from_min_size(rect.min, egui::vec2(12.0, rect.height())),
+            egui::Rect::from_min_size(rect.min, egui::vec2(12.0, head_h)),
             theme::PAPER,
         );
         let l = &self.form.lines[d.from];
@@ -611,6 +658,7 @@ impl App {
             .and_then(|j| j.prompt)
             .unwrap_or_else(|| l.text.clone());
         let font = egui::TextStyle::Body.resolve(ui.style());
+        let head_y = rect.top() + head_h / 2.0;
         let mut x = rect.left() + 24.0;
         for (text, color) in [
             (at, theme::GRAPHITE),
@@ -620,12 +668,44 @@ impl App {
             let galley =
                 painter.layout(text, font.clone(), color, (rect.right() - x - 8.0).max(0.0));
             let w = galley.size().x;
-            painter.galley(
-                egui::pos2(x, rect.center().y - galley.size().y / 2.0),
-                galley,
-                color,
-            );
+            painter.galley(egui::pos2(x, head_y - galley.size().y / 2.0), galley, color);
             x += w + 16.0;
+        }
+        if let Some((at, len, start)) = self.player_state(r, s, d.from) {
+            // The player row as it sits under the line, without its controls working.
+            let gap = ui.spacing().item_spacing;
+            let y = rect.top() + head_h + gap.y + 12.0;
+            let mut x = rect.left() + 12.0 + gap.x;
+            let icon =
+                egui::Rect::from_center_size(egui::pos2(x + 12.0, y), egui::vec2(10.0, 10.0));
+            play_icon(&painter, icon, egui::Stroke::new(1.5, theme::PAPER));
+            x += 24.0 + gap.x;
+            let w = ui.visuals().widgets.inactive;
+            let track = egui::Rect::from_min_size(egui::pos2(x, y - 3.0), egui::vec2(180.0, 6.0));
+            painter.rect_filled(track, 3.0, ui.visuals().extreme_bg_color);
+            let handle = egui::vec2(16.0, 20.0);
+            let k = track.left()
+                + handle.x / 2.0
+                + (track.width() - handle.x) * (at / len.max(0.001)) as f32;
+            painter.rect(
+                egui::Rect::from_center_size(egui::pos2(k, y), handle),
+                4.0,
+                w.bg_fill,
+                w.fg_stroke,
+                egui::StrokeKind::Inside,
+            );
+            x += 180.0 + gap.x;
+            let small = egui::TextStyle::Small.resolve(ui.style());
+            let mut texts = vec![(format!("{at:.1} / {len:.1} s"), theme::GRAPHITE)];
+            if let Some(st) = start {
+                texts.push((format!("{:.1} s in the shot", st + at), theme::DUST));
+            }
+            for (text, color) in texts {
+                let g = painter.layout_no_wrap(text, small.clone(), color);
+                let w = g.size().x;
+                painter.galley(egui::pos2(x, y - g.size().y / 2.0), g, color);
+                x += w + gap.x;
+            }
         }
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
@@ -672,18 +752,11 @@ impl App {
             return;
         };
         let path = file(self, &j);
-        let Some(len) = self.length(&path) else {
-            return;
-        };
         let what = format!("{r} line {}", i + 1);
         let playing = self.hearing(ui.ctx(), &what);
-        let at = match (&self.hearing, &self.paused) {
-            (Some(h), _) if playing => h.from + h.started.elapsed().as_secs_f64(),
-            (_, Some((w, t))) if *w == what => *t,
-            _ => 0.0,
-        }
-        .min(len);
-        let start = self.line_starts(s).get(i).copied().flatten();
+        let Some((at, len, start)) = self.player_state(r, s, i) else {
+            return;
+        };
         let mut click = false;
         let mut to = at;
         let mut moved = None;
@@ -747,6 +820,22 @@ impl App {
         }
     }
 
+    /// Where line `i`'s player is, how long its recording is, and where the line starts in the
+    /// shot if that's known. None without a recording of known length.
+    fn player_state(&mut self, r: ShotRef, s: &Shot, i: usize) -> Option<(f64, f64, Option<f64>)> {
+        let j = self.picked(s, i)?;
+        let len = self.length(&file(self, &j))?;
+        let what = format!("{r} line {}", i + 1);
+        let at = match (&self.hearing, &self.paused) {
+            (Some(h), _) if h.what == what => h.from + h.started.elapsed().as_secs_f64(),
+            (_, Some((w, t))) if *w == what => *t,
+            _ => 0.0,
+        }
+        .min(len);
+        let start = self.line_starts(s).get(i).copied().flatten();
+        Some((at, len, start))
+    }
+
     /// The recording line `i` sends, among its speaker's.
     fn picked(&self, s: &Shot, i: usize) -> Option<Job> {
         let line = s.lines.get(i)?;
@@ -773,22 +862,52 @@ impl App {
         starts(ui, &mut self.form.lines[i]);
         who(ui, i, &mut self.form.lines[i], cast);
         let picked = self.picked(s, i);
+        // Only on the line that still has the recording being replaced, or is being recorded;
+        // once lines move it's left alone.
+        let saying = self.say.lock().unwrap().line() == Some((r, i));
+        let remaking = self.remaking.as_ref().is_some_and(|(rr, ri, old)| {
+            (*rr, *ri) == (r, i) && (saying || s.lines[i].audio.as_ref() == Some(old))
+        });
         // Kept as a dropdown while it's open, even once its pick is deleted.
-        let recorded = picked.is_some() || self.voice_open == Some((r, i));
+        let recorded = (picked.is_some() && !remaking) || self.voice_open == Some((r, i));
         let who = s.lines[i].who.clone();
         let mut open = None;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if remove_button(ui).clicked() {
                 acts.push(Action::RemoveLine(r, i));
             }
+            if remaking {
+                if ui
+                    .button("Cancel")
+                    .on_hover_text("keep the recording it has")
+                    .clicked()
+                {
+                    self.remaking = None;
+                }
+            } else if let Some(j) = picked.as_ref().filter(|_| recorded) {
+                let busy = self.say.lock().unwrap().busy();
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Remake…"))
+                    .on_hover_text(
+                        "record it again, the words changed first if you like; the new one \
+                         replaces this one once it's made",
+                    )
+                    .on_disabled_hover_text("still recording another line")
+                    .clicked()
+                {
+                    self.remaking = Some((r, i, j.id.to_string()));
+                }
+            }
             if recorded {
                 open = self
                     .recordings(ui, r, i, &who, picked.as_ref(), false, acts)
                     .then_some(true);
             } else {
-                open = self
-                    .recordings(ui, r, i, &who, None, true, acts)
-                    .then_some(false);
+                if !remaking {
+                    open = self
+                        .recordings(ui, r, i, &who, None, true, acts)
+                        .then_some(false);
+                }
                 let has = !self.form.lines[i].text.trim().is_empty();
                 self.record_button(ui, r, i, has);
                 ui.add(

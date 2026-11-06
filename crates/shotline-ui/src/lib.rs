@@ -252,9 +252,13 @@ pub struct App {
     drags: u64,
     /// Where each line's row was last laid out, to tell where a dragged one lands.
     line_rects: Vec<egui::Rect>,
+    /// How tall each line's own row is, without the player under it.
+    line_heads: Vec<f32>,
     hearing: Option<voice::Hearing>,
     /// A line's recording stopped part way, and where.
     paused: Option<(String, f64)>,
+    /// A line being recorded again, and the recording the new one replaces.
+    remaking: Option<(ShotRef, usize, String)>,
     /// Recordings' lengths, as ffprobe gave them.
     lengths: HashMap<PathBuf, f64>,
     /// timeline.toml as edited, saved once nothing has focus.
@@ -525,8 +529,10 @@ impl App {
             line_drag: None,
             drags: 0,
             line_rects: vec![],
+            line_heads: vec![],
             hearing: None,
             paused: None,
+            remaking: None,
             lengths: HashMap::new(),
             timeline_form: Timeline::default(),
             render: Arc::default(),

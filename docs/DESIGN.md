@@ -689,7 +689,8 @@ which prices first. Once recorded, the words give way to a dropdown of everythin
 has recorded: this shot's first, other shots behind Show all, under chapter and shot headers
 that stay put while the list scrolls. Each has play and delete; one another line sends says
 how many lines use it and can't be deleted, its ✕ turned into a way to that line's shot. New
-recording goes back to the words. Lines are dragged into order by their grip. Play the scene puts the picked recordings at
+recording goes back to the words. Remake… does too, but the new recording replaces the old one
+once it's made (kept if another line sends it); Cancel keeps the old one. Lines are dragged into order by their grip. Play the scene puts the picked recordings at
 their start times. A Shoot section above Takes says what might go wrong, shows the prompt as the
 model gets it, and has Shoot a take…, which asks the price first and spends only on a
 second click, like `take`.

@@ -2220,6 +2220,60 @@ fn a_take_in_its_popup() {
 }
 
 #[test]
+fn remake_replaces_a_line_s_recording() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
+    let mut s = p.shot(R).unwrap();
+    s.recipe = Some("spoken".into());
+    p.save_shot(R, &s).unwrap();
+    TestHost.say(&p.root, R, 0, "0.02 USD").unwrap();
+    let old = p.shot(R).unwrap().lines[0].audio.clone().unwrap();
+
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+
+    // Back to the words, without ▼ to pick another; Cancel keeps what it had.
+    h.get_by_label("Remake…").click();
+    h.run();
+    assert_eq!(field(&h, Role::TextInput, "Line 1"), "ไปกันเถอะ");
+    assert!(h.query_by_label("Pick a recording for line 1").is_none());
+    h.get_by_label("Cancel").click();
+    h.run();
+    h.get_by_role_and_label(Role::ComboBox, "Line 1");
+
+    // Recorded again, the new one takes the old one's place.
+    h.get_by_label("Remake…").click();
+    h.run();
+    let words = h.get_by_role_and_label(Role::TextInput, "Line 1");
+    words.focus();
+    words.type_text(" [whispers]");
+    h.run();
+    h.get_by_label("Record…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Record it for 0.02 USD")
+        .is_some()));
+    h.get_by_label("Record it for 0.02 USD").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::ComboBox, "Line 1")
+        .is_some()));
+    h.run();
+    let line = p.shot(R).unwrap().lines[0].clone();
+    assert_eq!(line.text, "ไปกันเถอะ [whispers]");
+    assert_ne!(line.audio.as_deref(), Some(old.as_str()));
+    assert!(p.job(&old).is_err(), "the old recording is still there");
+}
+
+#[test]
 fn a_line_recorded_and_picked() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
@@ -2924,6 +2978,30 @@ fn a_recorded_line_has_a_player_under_it() {
     let words = h.get_by_role_and_label(Role::ComboBox, "Line 2").rect();
     assert!(who.right() <= words.left(), "{who:?} {words:?}");
     assert!(words.width() > 150.0, "{words:?}");
+
+    // Picked up, the players stay, so nothing below jumps.
+    let below = h.get_by_label("Play line 2").rect();
+    let grip = h.get_by_label("Move line 1").rect().center();
+    h.event(egui::Event::PointerMoved(grip));
+    h.event(egui::Event::PointerButton {
+        pos: grip,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    h.step();
+    h.event(egui::Event::PointerMoved(grip + egui::vec2(0.0, 4.0)));
+    h.event(egui::Event::PointerMoved(grip + egui::vec2(0.0, 4.0)));
+    h.step();
+    h.step();
+    assert_eq!(h.get_by_label("Play line 2").rect(), below);
+    h.event(egui::Event::PointerButton {
+        pos: grip + egui::vec2(0.0, 4.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    h.run();
     // Both together: the second ends at 1.8 s.
     h.get_by_label("1.8 s");
 
