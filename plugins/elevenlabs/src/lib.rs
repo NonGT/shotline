@@ -284,7 +284,10 @@ impl ElevenLabs {
             .send()
             .await
             .map_err(|e| {
-                PluginError::new(ErrorKind::Other, format!("can't reach ElevenLabs: {e}"))
+                PluginError::new(
+                    ErrorKind::Other,
+                    format!("can't reach ElevenLabs: {}", shotline_plugin::util::why(&e)),
+                )
             })?;
         let status = r.status().as_u16();
         let v: Value = r.json().await.unwrap_or(Value::Null);
@@ -349,7 +352,10 @@ impl Plugin for ElevenLabs {
             .send()
             .await
             .map_err(|e| {
-                PluginError::new(ErrorKind::Other, format!("can't reach ElevenLabs: {e}"))
+                PluginError::new(
+                    ErrorKind::Other,
+                    format!("can't reach ElevenLabs: {}", shotline_plugin::util::why(&e)),
+                )
             })?;
         let status = r.status().as_u16();
         let bytes = r

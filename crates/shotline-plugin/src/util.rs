@@ -50,6 +50,20 @@ pub fn data_url(path: &Path, field: &str) -> Result<String, PluginError> {
     Ok(format!("data:{};base64,{b64}", mime(path)))
 }
 
+/// An error with what caused it, since reqwest's "error sending request" alone says nothing.
+pub fn why(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut at = e.source();
+    while let Some(c) = at {
+        let c_s = c.to_string();
+        if !out.contains(&c_s) {
+            out = format!("{out}: {c_s}");
+        }
+        at = c.source();
+    }
+    out
+}
+
 /// Splits ElevenLabs-style "[shout]" tags from the words.
 pub fn delivery(text: &str) -> (Vec<&str>, String) {
     let mut how = vec![];
@@ -74,6 +88,26 @@ pub fn delivery(text: &str) -> (Vec<&str>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn why_says_the_cause() {
+        let inner = std::io::Error::other("connection reset by peer");
+        let outer = std::io::Error::other(Wrap(inner));
+        assert_eq!(why(&outer), "sending: connection reset by peer");
+    }
+
+    #[derive(Debug)]
+    struct Wrap(std::io::Error);
+    impl std::fmt::Display for Wrap {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("sending")
+        }
+    }
+    impl std::error::Error for Wrap {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
 
     #[test]
     fn data_urls() {

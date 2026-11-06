@@ -164,7 +164,12 @@ impl Fal {
             .header("Authorization", auth)
             .send()
             .await
-            .map_err(|e| PluginError::new(ErrorKind::Other, format!("can't reach fal: {e}")))?;
+            .map_err(|e| {
+                PluginError::new(
+                    ErrorKind::Other,
+                    format!("can't reach fal: {}", shotline_plugin::util::why(&e)),
+                )
+            })?;
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));

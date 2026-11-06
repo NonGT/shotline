@@ -151,11 +151,12 @@ impl WaveSpeed {
                 format!("{KEY_VAR} isn't set"),
             ))
         })?;
-        let r = rb
-            .bearer_auth(key)
-            .send()
-            .await
-            .map_err(|e| other(format!("can't reach WaveSpeed: {e}")))?;
+        let r = rb.bearer_auth(key).send().await.map_err(|e| {
+            other(format!(
+                "can't reach WaveSpeed: {}",
+                shotline_plugin::util::why(&e)
+            ))
+        })?;
         let status = r.status().as_u16();
         let v: Value = r.json().await.unwrap_or(Value::Null);
         if status >= 300 {

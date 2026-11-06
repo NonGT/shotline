@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
@@ -30,6 +31,8 @@ use shotline_plugin::{Error, Plugin, Result};
 
 pub const KEY_VAR: &str = "VENICE_API_KEY";
 const BASE: &str = "https://api.venice.ai/api/v1";
+/// Goes at a request, the first and three more when the connection drops.
+const TRIES: u64 = 4;
 
 const WIDE: &[&str] = &["1:1", "3:2", "16:9", "21:9", "9:16", "2:3", "3:4", "4:5"];
 
@@ -223,11 +226,27 @@ impl Venice {
                 format!("{KEY_VAR} isn't set"),
             ))
         })?;
-        let r = rb
-            .bearer_auth(key)
-            .send()
-            .await
-            .map_err(|e| other(format!("can't reach Venice: {e}")))?;
+        let mut rb = rb.bearer_auth(key);
+        // Venice sometimes drops the connection mid-upload (TLS BadRecordMac) and the same
+        // request goes through a moment later. Never after a timeout: that one may have landed.
+        let mut tries = 0;
+        let r = loop {
+            tries += 1;
+            let again = rb.try_clone();
+            match rb.send().await {
+                Ok(r) => break r,
+                Err(e) if tries < TRIES && !e.is_timeout() && again.is_some() => {
+                    tokio::time::sleep(Duration::from_millis(1000 * tries)).await;
+                    rb = again.unwrap();
+                }
+                Err(e) => {
+                    return Err(other(format!(
+                        "can't reach Venice: {}",
+                        shotline_plugin::util::why(&e)
+                    )));
+                }
+            }
+        };
         let status = r.status().as_u16();
         let header = |k: &str| {
             r.headers()

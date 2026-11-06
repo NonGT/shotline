@@ -427,3 +427,39 @@ fn seedream_pro_charges_per_resolution_and_extra_reference() {
     let three = venice::image_price(&edit_list(), "seedream-v5-pro-edit", Some("2K"), 3).unwrap();
     assert!((three - 0.1169).abs() < 1e-9, "{three}");
 }
+
+/// Hangs up on the first `drop` connections, then answers every request with `body`.
+async fn flaky(drop: usize, body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut n = 0;
+        loop {
+            let (mut c, _) = l.accept().await.unwrap();
+            n += 1;
+            if n <= drop {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            let _ = c.read(&mut buf).await;
+            let r = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = c.write_all(r.as_bytes()).await;
+        }
+    });
+    at
+}
+
+#[tokio::test]
+async fn a_dropped_connection_is_tried_again() {
+    let body = r#"{"data":{"balances":{"USD":1.5}}}"#;
+    let v = Venice::new(Some("k".into()), &flaky(2, body).await);
+    assert_eq!(v.balance().await.unwrap().balances.len(), 1);
+
+    let v = Venice::new(Some("k".into()), &flaky(9, body).await);
+    let e = v.balance().await.unwrap_err();
+    assert!(e.to_string().contains("can't reach Venice"), "{e}");
+}
