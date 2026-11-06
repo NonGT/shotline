@@ -4499,6 +4499,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "image",
  "serde",
  "serde_json",
  "shotline-protocol",

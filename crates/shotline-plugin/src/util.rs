@@ -50,6 +50,34 @@ pub fn data_url(path: &Path, field: &str) -> Result<String, PluginError> {
     Ok(format!("data:{};base64,{b64}", mime(path)))
 }
 
+/// A picture as a `data:` URL, shrunk to `side` px on its long edge and sent as JPEG when it's
+/// big. Venice drops the connection on large video requests, and a video model doesn't need
+/// more than its own frame size anyway.
+pub fn picture_url(path: &Path, field: &str, side: u32) -> Result<String, PluginError> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        PluginError::new(ErrorKind::Validation, format!("{}: {e}", path.display())).field(field)
+    })?;
+    let Ok(img) = image::load_from_memory(&bytes) else {
+        return data_url(path, field);
+    };
+    if bytes.len() < 400_000 && img.width().max(img.height()) <= side {
+        return data_url(path, field);
+    }
+    let img = if img.width().max(img.height()) > side {
+        img.resize(side, side, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let mut jpg = vec![];
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 90)
+        .encode_image(&img.to_rgb8())
+        .map_err(|e| {
+            PluginError::new(ErrorKind::Other, format!("{}: {e}", path.display())).field(field)
+        })?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(jpg);
+    Ok(format!("data:image/jpeg;base64,{b64}"))
+}
+
 /// An error with what caused it, since reqwest's "error sending request" alone says nothing.
 pub fn why(e: &dyn std::error::Error) -> String {
     let mut out = e.to_string();
@@ -88,6 +116,34 @@ pub fn delivery(text: &str) -> (Vec<&str>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_pictures_go_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.png");
+        image::RgbImage::from_fn(3000, 1500, |x, y| {
+            image::Rgb([(x % 256) as u8, (y % 256) as u8, 7])
+        })
+        .save(&p)
+        .unwrap();
+        let url = picture_url(&p, "x", 1920).unwrap();
+        let b64 = url.strip_prefix("data:image/jpeg;base64,").unwrap();
+        let back = image::load_from_memory(
+            &base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!((back.width(), back.height()), (1920, 960));
+
+        let small = dir.path().join("b.png");
+        image::RgbImage::new(8, 8).save(&small).unwrap();
+        assert!(
+            picture_url(&small, "x", 1920)
+                .unwrap()
+                .starts_with("data:image/png;")
+        );
+    }
 
     #[test]
     fn why_says_the_cause() {

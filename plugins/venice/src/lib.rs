@@ -26,7 +26,7 @@ use shotline_plugin::protocol::{
     Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
     PROTOCOL_VERSION, PluginError, Quote, Request, SpokenLine, State, Status,
 };
-use shotline_plugin::util::{data_url, delivery};
+use shotline_plugin::util::{data_url, delivery, picture_url};
 use shotline_plugin::{Error, Plugin, Result};
 
 pub const KEY_VAR: &str = "VENICE_API_KEY";
@@ -694,7 +694,7 @@ pub fn body(req: &Request) -> Result<(Map<String, Value>, Vec<usize>)> {
         let f = format!("references[{i}]");
         match r.kind {
             MediaKind::Image => {
-                images.push(data_url(&r.path, &f)?);
+                images.push(picture_url(&r.path, &f, 1920)?);
                 refs.push(i);
             }
             MediaKind::Audio if audio.is_none() => audio = Some(data_url(&r.path, &f)?),
@@ -734,7 +734,7 @@ pub fn body(req: &Request) -> Result<(Map<String, Value>, Vec<usize>)> {
                 .field(name)
                 .into());
             }
-            m.insert(key.into(), json!(data_url(p, name)?));
+            m.insert(key.into(), json!(picture_url(p, name, 1920)?));
         }
     }
     for (k, v) in &req.params {
