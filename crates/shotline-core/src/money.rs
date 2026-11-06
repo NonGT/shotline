@@ -32,6 +32,37 @@ impl UserConfig {
         }
         fsx::read_toml(&path)
     }
+
+    /// Sets the daily limit across all films, leaving the rest of config.toml as it was.
+    pub fn set_per_day(user_dir: &Path, per_day: Option<f64>) -> Result<()> {
+        if per_day.is_some_and(|v| !v.is_finite() || v < 0.0) {
+            return invalid("a budget can't be below zero");
+        }
+        let path = user_dir.join("config.toml");
+        let mut t: toml::Table = if path.exists() {
+            fsx::read_toml(&path)?
+        } else {
+            toml::Table::new()
+        };
+        let b = t
+            .entry("budget")
+            .or_insert_with(|| toml::Table::new().into());
+        let Some(b) = b.as_table_mut() else {
+            return invalid("[budget] in config.toml isn't a table");
+        };
+        match per_day {
+            Some(v) => {
+                b.insert("per_day".into(), v.into());
+            }
+            None => {
+                b.remove("per_day");
+            }
+        }
+        if b.is_empty() {
+            t.remove("budget");
+        }
+        fsx::write_toml(&path, &t)
+    }
 }
 
 /// `~/.config/shotline/measured-rates.toml`: what units turned out to cost, worked out from

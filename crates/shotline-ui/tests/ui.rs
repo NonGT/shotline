@@ -2553,6 +2553,56 @@ fn default_models_in_preferences() {
 }
 
 #[test]
+fn budget_in_preferences() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let home = tmp.path().join("home");
+    let shell = Shell::new(Some(p.clone()), home.clone(), tmp.path())
+        .with_plugins(vec![], Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    h.state_mut().command(MenuCommand::Preferences);
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Budget").click();
+    h.run();
+
+    let set = |h: &mut Harness<Shell>, name: &str, to: &str| {
+        h.get_by_role_and_label(Role::TextInput, name).focus();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run();
+        h.key_press(egui::Key::Backspace);
+        if !to.is_empty() {
+            h.get_by_role_and_label(Role::TextInput, name).type_text(to);
+        }
+        h.run();
+    };
+    set(&mut h, "Per day", "abc");
+    h.get_by_label("OK").click();
+    h.run();
+    h.get_by_label("Per day: \"abc\" isn't an amount; leave it empty for no limit");
+
+    set(&mut h, "Per day", "30");
+    set(&mut h, "Per take", "");
+    set(&mut h, "Per day, all films", "50");
+    h.get_by_label("OK").click();
+    h.run();
+    let budget = || Project::open(&p.root).unwrap().config.budget;
+    assert_eq!(budget().per_day, Some(30.0));
+    assert_eq!(budget().per_take, None);
+    let user = UserConfig::load(&home).unwrap();
+    assert_eq!(user.budget.per_day, Some(50.0));
+
+    h.state_mut().command(MenuCommand::Undo);
+    h.run();
+    assert_ne!(budget().per_day, Some(30.0));
+}
+
+#[test]
 fn a_take_from_pieces() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());

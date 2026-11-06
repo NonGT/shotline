@@ -530,6 +530,30 @@ impl Project {
         self.reread()
     }
 
+    /// Sets the film's spending limits, leaving the rest of shotline.toml as it was.
+    pub fn set_budget(&mut self, b: &Budgets) -> Result<()> {
+        if [b.per_job, b.per_take, b.per_chapter, b.per_day, b.total]
+            .into_iter()
+            .flatten()
+            .any(|v| !v.is_finite() || v < 0.0)
+        {
+            return invalid("a budget can't be below zero");
+        }
+        let path = self.root.join(CONFIG_FILE);
+        let mut t: toml::Table = fsx::read_toml(&path)?;
+        let v = toml::Value::try_from(b).map_err(|e| Error::Invalid(e.to_string()))?;
+        match v {
+            toml::Value::Table(x) if !x.is_empty() => {
+                t.insert("budget".into(), x.into());
+            }
+            _ => {
+                t.remove("budget");
+            }
+        }
+        fsx::write_toml(&path, &t)?;
+        self.reread()
+    }
+
     /// Opens the project containing `start`, looking upwards.
     pub fn discover(start: &Path) -> Result<Project> {
         let mut dir = Some(start);

@@ -217,6 +217,7 @@ pub(crate) enum Action {
     },
     /// The film's default model for a job; None takes it out where it can be.
     Model(Task, Option<ModelRef>),
+    Budget(shotline_core::ledger::Budgets),
     AddChapter(String),
     RenameChapter(u32, String),
     /// A new shot at the end of the chapter, or after the given number.
@@ -270,6 +271,7 @@ impl Action {
             Action::Format(_) => "the format".into(),
             Action::Param { model, key, .. } => format!("{key} for {model}"),
             Action::Model(task, _) => format!("the {} model", task_name(*task)),
+            Action::Budget(_) => "the budget".into(),
             Action::AddChapter(t) => format!("chapter {t}"),
             Action::RenameChapter(n, _) => format!("chapter {n:02}'s title"),
             Action::AddShot(..) => "a new shot".into(),
@@ -340,7 +342,7 @@ impl Action {
                 .collect(),
             Action::Story(_) => vec![p.root.join("story.md")],
             Action::Style(_) => vec![p.root.join("style.md")],
-            Action::Format(_) | Action::Param { .. } | Action::Model(..) => {
+            Action::Format(_) | Action::Param { .. } | Action::Model(..) | Action::Budget(_) => {
                 vec![p.root.join(CONFIG_FILE)]
             }
             Action::SaveElement(el) => vec![p.element_file(el.kind, &el.handle)],
@@ -815,6 +817,10 @@ impl App {
                     None => format!("no {} model of its own", task_name(task)),
                 }
                 .into()
+            }
+            Action::Budget(b) => {
+                Project::open(&p.root)?.set_budget(&b)?;
+                String::from("the budget is saved").into()
             }
             Action::RenameChapter(n, t) => {
                 let c = p.rename_chapter(&n.to_string(), &t)?;

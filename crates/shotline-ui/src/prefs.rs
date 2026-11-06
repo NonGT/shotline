@@ -66,8 +66,8 @@ pub(crate) struct Prefs {
     list: Vec<PluginInfo>,
     problems: Vec<String>,
     page: usize,
-    /// Default Models is open rather than a plugin's page.
-    models_page: bool,
+    /// Which page is open: a plugin's, or one of the film's.
+    on: Page,
     /// The film's default models as opened, and as changed; None with no film open.
     models: Option<(Models, Models)>,
     /// By plugin, in the order it lists them.
@@ -80,6 +80,62 @@ pub(crate) struct Prefs {
     typed: HashMap<(String, String, String), String>,
     checks: Arc<Mutex<HashMap<String, Check>>>,
     note: Option<(String, bool)>,
+    user_dir: PathBuf,
+    /// The film's limits as opened, and as typed; None with no film open.
+    budget: Option<([String; 5], [String; 5])>,
+    film_currency: String,
+    /// The daily limit across all films, as opened and as typed, and its currency.
+    daily: (String, String),
+    user_currency: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Plugin,
+    Models,
+    Budget,
+}
+
+/// The film's limits, in the order they're shown: (name, what it stops).
+const LIMITS: [(&str, &str); 5] = [
+    ("Per job", "one video, voice line or picture"),
+    ("Per take", "all the steps of one take together"),
+    ("Per chapter", "everything made for one chapter"),
+    ("Per day", "everything this film spends in a day"),
+    ("Total", "everything this film ever spends"),
+];
+
+fn amount(v: Option<f64>) -> String {
+    v.map(|v| v.to_string()).unwrap_or_default()
+}
+
+/// Empty is no limit.
+fn parse_amount(name: &str, t: &str) -> Result<Option<f64>, String> {
+    let t = t.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    match t.parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => Ok(Some(v)),
+        _ => Err(format!(
+            "{name}: \"{t}\" isn't an amount; leave it empty for no limit"
+        )),
+    }
+}
+
+fn budget_text(b: &shotline_core::ledger::Budgets) -> [String; 5] {
+    [b.per_job, b.per_take, b.per_chapter, b.per_day, b.total].map(amount)
+}
+
+fn budget_of(t: &[String; 5]) -> Result<shotline_core::ledger::Budgets, String> {
+    let v = |i: usize| parse_amount(LIMITS[i].0, &t[i]);
+    Ok(shotline_core::ledger::Budgets {
+        per_job: v(0)?,
+        per_take: v(1)?,
+        per_chapter: v(2)?,
+        per_day: v(3)?,
+        total: v(4)?,
+    })
 }
 
 /// The labels' column, so the controls line up on its right edge.
@@ -98,7 +154,7 @@ impl Prefs {
             list: vec![],
             problems: vec![],
             page: 0,
-            models_page: false,
+            on: Page::Plugin,
             models: film.map(|c| {
                 let m: Models = Task::ALL.iter().map(|t| (*t, c.model_set(*t))).collect();
                 (m.clone(), m)
@@ -109,7 +165,19 @@ impl Prefs {
             typed: HashMap::new(),
             checks: Arc::default(),
             note: None,
+            user_dir: user_dir.to_path_buf(),
+            budget: film.map(|c| {
+                let t = budget_text(&c.budget);
+                (t.clone(), t)
+            }),
+            film_currency: film.map(|c| c.money.currency.clone()).unwrap_or_default(),
+            daily: Default::default(),
+            user_currency: String::new(),
         };
+        let user = shotline_core::UserConfig::load(user_dir).unwrap_or_default();
+        let d = amount(user.budget.per_day);
+        p.daily = (d.clone(), d);
+        p.user_currency = user.money.currency;
         p.read(host);
         if let Some(i) = plugin.and_then(|n| p.list.iter().position(|x| x.name == n)) {
             p.page = i;
@@ -167,12 +235,32 @@ impl Prefs {
             || !self.pins.is_empty()
             || self.params.as_ref().is_some_and(|(was, now)| was != now)
             || self.models.as_ref().is_some_and(|(was, now)| was != now)
+            || self.budget.as_ref().is_some_and(|(was, now)| was != now)
+            || self.daily.0 != self.daily.1
     }
 
     /// Writes the keys and the kept programs; the film's options go back to the app.
     fn save(&mut self, host: Option<&Arc<dyn Host>>, done: &mut Done) -> bool {
         let mut said = vec![];
         let mut failed = None;
+        // Checked before anything's written, so a typo doesn't leave half of it saved.
+        let budget = match &self.budget {
+            Some((was, now)) if was != now => match budget_of(now) {
+                Ok(b) => Some(b),
+                Err(e) => return self.bad(e),
+            },
+            _ => None,
+        };
+        let daily = match parse_amount("Per day, all films", &self.daily.1) {
+            Ok(d) => d,
+            Err(e) => return self.bad(e),
+        };
+        if self.daily.0 != self.daily.1 {
+            match shotline_core::UserConfig::set_per_day(&self.user_dir, daily) {
+                Ok(()) => self.daily.0 = self.daily.1.clone(),
+                Err(e) => failed = Some(e.to_string()),
+            }
+        }
         for k in self.keys.values().flatten() {
             if let Some(value) = k.change() {
                 match dotenv::set(&self.file, &k.var, value.as_deref()) {
@@ -204,6 +292,9 @@ impl Prefs {
         if let Some((was, now)) = &self.params {
             done.film.extend(param_changes(was, now));
         }
+        if let Some(b) = budget {
+            done.film.push(Action::Budget(b));
+        }
         if done.keys_changed || done.plugins_changed {
             self.read(host);
             self.checks.lock().unwrap().clear();
@@ -215,6 +306,11 @@ impl Prefs {
             }
             None => true,
         }
+    }
+
+    fn bad(&mut self, e: String) -> bool {
+        self.note = Some((e, true));
+        false
     }
 
     fn check(&self, ctx: &egui::Context, host: Option<Arc<dyn Host>>, plugin: &str) {
@@ -257,8 +353,10 @@ impl Prefs {
                             for p in &self.problems {
                                 ui.label(RichText::new(p).color(theme::FLAG));
                             }
-                            if self.models_page {
+                            if self.on == Page::Models {
                                 self.models_page(ui);
+                            } else if self.on == Page::Budget {
+                                self.budget_page(ui);
                             } else if self.list.is_empty() {
                                 hint(ui, "No plugins found.");
                             } else {
@@ -323,7 +421,7 @@ impl Prefs {
                     }
                     Ok(_) => None,
                 };
-                let on = i == self.page && !self.models_page;
+                let on = i == self.page && self.on == Page::Plugin;
                 let r = side_item(ui, on, &p.name);
                 let r = match &trouble {
                     Some(t) => {
@@ -335,14 +433,17 @@ impl Prefs {
                 };
                 if r.clicked() {
                     self.page = i;
-                    self.models_page = false;
+                    self.on = Page::Plugin;
                 }
             }
             ui.add_space(12.0);
             ui.label(RichText::new("This film").small().color(theme::DUST));
             ui.add_space(2.0);
-            if side_item(ui, self.models_page, "Default Models").clicked() {
-                self.models_page = true;
+            if side_item(ui, self.on == Page::Models, "Default Models").clicked() {
+                self.on = Page::Models;
+            }
+            if side_item(ui, self.on == Page::Budget, "Budget").clicked() {
+                self.on = Page::Budget;
             }
         });
     }
@@ -371,6 +472,47 @@ impl Prefs {
                 let pick = now.get_mut(t).expect("every task");
                 task_row(ui, list, *t, pick);
             }
+        });
+    }
+
+    /// The film's spending limits, and the daily one across all films.
+    fn budget_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Budget")
+                .text_style(egui::TextStyle::Heading)
+                .color(theme::PAPER),
+        );
+        ui.add_space(8.0);
+        match &mut self.budget {
+            Some((_, now)) => {
+                let about = format!(
+                    "This film's, saved in its shotline.toml, in {}. A job that would go past \
+                     one isn't sent; money held for jobs still running counts. Empty is no limit.",
+                    self.film_currency
+                );
+                let cur = &self.film_currency;
+                group(ui, "This film", &about, |ui| {
+                    for (i, (name, what)) in LIMITS.iter().enumerate() {
+                        amount_row(ui, name, what, &mut now[i], cur);
+                    }
+                });
+            }
+            None => hint(ui, "Each film has its own; open one to set them."),
+        }
+        let about = format!(
+            "Saved in config.toml in your shotline folder, in {}. Stops spending on every film \
+             once a day's total would pass it, since they all draw on the same accounts.",
+            self.user_currency
+        );
+        let (daily, cur) = (&mut self.daily.1, &self.user_currency);
+        group(ui, "All films", &about, |ui| {
+            amount_row(
+                ui,
+                "Per day, all films",
+                "everything every film spends in a day",
+                daily,
+                cur,
+            );
         });
     }
 
@@ -547,6 +689,21 @@ fn label(ui: &mut egui::Ui, text: &str, about: &str) -> egui::Response {
         },
     )
     .inner
+}
+
+/// A limit: its name, a box for the amount, and the currency.
+fn amount_row(ui: &mut egui::Ui, name: &str, what: &str, text: &mut String, currency: &str) {
+    ui.horizontal(|ui| {
+        let l = label(ui, name, what);
+        ui.add(
+            egui::TextEdit::singleline(text)
+                .desired_width(90.0)
+                .hint_text("no limit"),
+        )
+        .labelled_by(l.id);
+        ui.label(RichText::new(currency).color(theme::GRAPHITE));
+        ui.label(RichText::new(what).small().color(theme::DUST));
+    });
 }
 
 /// One key: its name, a hidden box to type it, and where it's set now.

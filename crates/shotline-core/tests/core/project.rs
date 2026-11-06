@@ -113,6 +113,35 @@ fn an_anchor_s_label_goes_with_it() {
 }
 
 #[test]
+fn budgets_are_set_and_cleared() {
+    let (dir, mut p) = new_project();
+    assert_eq!(p.config.budget.per_day, Some(10.0));
+    let b = shotline_core::ledger::Budgets {
+        per_day: Some(30.0),
+        ..Default::default()
+    };
+    p.set_budget(&b).unwrap();
+    assert_eq!(p.config.budget.per_day, Some(30.0));
+    assert_eq!(p.config.budget.per_take, None);
+    p.set_budget(&Default::default()).unwrap();
+    let text = fs::read_to_string(dir.path().join("shotline.toml")).unwrap();
+    assert!(!text.contains("[budget]"), "{text}");
+    let bad = shotline_core::ledger::Budgets {
+        total: Some(-1.0),
+        ..Default::default()
+    };
+    assert!(p.set_budget(&bad).is_err());
+
+    let home = dir.path().join("home");
+    shotline_core::UserConfig::set_per_day(&home, Some(40.0)).unwrap();
+    let u = shotline_core::UserConfig::load(&home).unwrap();
+    assert_eq!(u.budget.per_day, Some(40.0));
+    shotline_core::UserConfig::set_per_day(&home, None).unwrap();
+    let u = shotline_core::UserConfig::load(&home).unwrap();
+    assert_eq!(u.budget.per_day, None);
+}
+
+#[test]
 fn a_chapter_s_title_changes_but_not_its_folder() {
     let (_dir, p) = new_project();
     let ch = p.add_chapter("Into the Forest").unwrap();

@@ -501,6 +501,7 @@ Hard stops, in the project currency: `per_job`, `per_take`, `per_chapter`, `per_
 under `[budget]`. Money held by running jobs counts. Every line is also written to
 `~/.config/shotline/spend.jsonl`, and `[budget] per_day` in `~/.config/shotline/config.toml` (in
 that file's `[money] currency`) stops spending across all films, since it's all the same wallet.
+Preferences has a Budget page for both. New films start with `per_take = 2` and `per_day = 10`.
 
 ### Reports
 
