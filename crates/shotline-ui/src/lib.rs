@@ -1018,6 +1018,9 @@ impl App {
         if let Some(d) = &mut self.deck {
             if !d.show(ui, self.audio.as_ref()) {
                 self.deck = None;
+            } else if d.is_playing() {
+                // It took the sound over.
+                self.hearing = None;
             }
             ui.separator();
         }

@@ -388,6 +388,8 @@ pub struct Deck {
     max_height: f32,
     /// Answers Space; off for one under a popup.
     pub keys: bool,
+    /// What it last told the sound output, so a paused deck leaves a line's playback alone.
+    sounding: Option<bool>,
 }
 
 fn clock(t: f64) -> String {
@@ -405,6 +407,7 @@ impl Deck {
             bare: false,
             max_height: 420.0,
             keys: true,
+            sounding: None,
         }
     }
 
@@ -442,6 +445,7 @@ impl Deck {
 
     pub fn pause(&mut self, audio: Option<&Audio>) {
         self.playing = false;
+        self.sounding = Some(false);
         if let Some(a) = audio {
             a.set_playing(false);
         }
@@ -458,8 +462,12 @@ impl Deck {
         let now = Instant::now();
         // Quiet while the slider is dragged.
         let scrubbing = self.players.iter().any(|p| p.scrubbing.is_some());
-        if let Some(a) = audio {
-            a.set_playing(self.playing && !scrubbing);
+        let sound = self.playing && !scrubbing;
+        if let Some(a) = audio
+            && self.sounding != Some(sound)
+        {
+            a.set_playing(sound);
+            self.sounding = Some(sound);
         }
         let mut running = false;
         for p in &mut self.players {
