@@ -452,3 +452,47 @@ fn a_sequence_made_into_a_preview() {
     let again = at(1.75);
     assert!(again[0] > again[2], "red again {again:?}");
 }
+
+#[test]
+fn a_match_lut_brings_the_next_clip_closer() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let a = clip(dir.path(), "a.mp4", RED, false);
+    let b = clip(dir.path(), "b.mp4", BLUE, false);
+    let cube = dir.path().join("luts/b.cube");
+    ff.match_lut((&a, 1.0), (&b, 0.0), 5, 1.0, &cube).unwrap();
+    let text = std::fs::read_to_string(&cube).unwrap();
+    assert!(text.contains("LUT_3D_SIZE 33"));
+    assert_eq!(text.lines().count(), 2 + 33 * 33 * 33);
+    let graded = dir.path().join("b-graded.mp4");
+    let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    assert!(
+        Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&b)
+            .arg("-vf")
+            .arg(format!("lut3d=file={}", cube.display()))
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&graded)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let first = |f: &Path| {
+        let info = ff.probe(f).unwrap();
+        ff.frames(f, info.width, info.height, &info.fps, Some(1))
+            .unwrap()
+            .next()
+            .unwrap()
+    };
+    let last_a = {
+        let info = ff.probe(&a).unwrap();
+        ff.frames(&a, info.width, info.height, &info.fps, None)
+            .unwrap()
+            .last()
+            .unwrap()
+    };
+    let before = distance(mean(&last_a), mean(&first(&b)));
+    let after = distance(mean(&last_a), mean(&first(&graded)));
+    assert!(after < before / 2.0, "{before} -> {after}");
+}

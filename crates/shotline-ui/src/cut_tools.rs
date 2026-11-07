@@ -218,8 +218,9 @@ impl App {
                 "its first frame was the last one before it; a colour match hides the seam",
             );
         }
+        let film = self.project.root.clone();
         let ask = |change| EditParams {
-            film: self.project.root.clone(),
+            film: film.clone(),
             file: file.to_path_buf(),
             sequence: seq.name.clone(),
             clip: b.id.clone(),
@@ -238,6 +239,56 @@ impl App {
                 to: b.start - frame,
             };
             start = Some((format!("colour match of {nb}"), ask(change)));
+        }
+        let files = a
+            .file
+            .clone()
+            .zip(b.file.clone())
+            .filter(|(x, y)| x.is_file() && y.is_file());
+        let lut = ui
+            .add_enabled(
+                free && files.is_some() && self.ff.is_some(),
+                egui::Button::new("Match with shotline's LUT"),
+            )
+            .on_hover_text(
+                "shotline's own colour match (as in its renders, with the Joins settings) as an \
+                 input LUT on the clip",
+            )
+            .on_disabled_hover_text("needs both clips' files, and ffmpeg");
+        if lut.clicked()
+            && let Some((fa, fb)) = files
+        {
+            let m = &self.timeline_form.colormatch;
+            let (frames, strength) = (m.frames, m.strength);
+            let cube = self.project.root.join(".shotline/cache/luts").join(format!(
+                "{}-{}.cube",
+                b.id,
+                jiff::Timestamp::now().as_millisecond()
+            ));
+            let prev = (fa, a.from + a.length * a.speed);
+            let next = (fb, b.from);
+            let ff = self.ff.clone().unwrap();
+            let make = move || {
+                ff.match_lut(
+                    (&prev.0, prev.1),
+                    (&next.0, next.1),
+                    frames,
+                    strength,
+                    &cube,
+                )
+                .map(|()| Change::Lut { file: Some(cube) })
+                .map_err(|e| e.to_string())
+            };
+            let what = format!("shotline's colour match on {nb}");
+            let undo = Undo {
+                plugin: plugin.to_string(),
+                file: file.to_path_buf(),
+                sequence: seq.name.clone(),
+                what: what.clone(),
+                steps: serde_json::Value::Null,
+            };
+            let a = ask(Change::Lut { file: None });
+            self.start_made_change(ui.ctx(), plugin, what, a, undo, make);
         }
         ui.separator();
         ui.add(
@@ -418,6 +469,41 @@ impl App {
         self.changing = Some(Changing {
             what,
             undo,
+            ask,
+            plugin: plugin.to_string(),
+            slot,
+        });
+    }
+
+    /// Like `start_change`, with the change worked out first, off the UI thread.
+    fn start_made_change(
+        &mut self,
+        ctx: &egui::Context,
+        plugin: &str,
+        what: String,
+        mut ask: EditParams,
+        undo: Undo,
+        make: impl FnOnce() -> Result<Change, String> + Send + 'static,
+    ) {
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        let slot: Arc<Mutex<Option<_>>> = Arc::default();
+        let (s, p, mut a, ctx) = (slot.clone(), plugin.to_string(), ask.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let got = make().and_then(|change| {
+                a.change = change;
+                host.edit_clip(&p, &a).map_err(|e| format!("{e:#}"))
+            });
+            *s.lock().unwrap() = Some(got);
+            ctx.request_repaint();
+        });
+        ask.change = Change::Undo {
+            steps: serde_json::Value::Null,
+        };
+        self.changing = Some(Changing {
+            what,
+            undo: Some(undo),
             ask,
             plugin: plugin.to_string(),
             slot,

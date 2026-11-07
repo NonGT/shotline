@@ -151,6 +151,31 @@ impl Transform {
         Transform { m, offset }
     }
 
+    /// As a 3D LUT in the .cube format, `size` points a side, for editors to apply.
+    pub fn cube(&self, size: usize) -> String {
+        let size = size.max(2);
+        let (m, o) = (&self.m, &self.offset);
+        let mut out = format!("TITLE \"shotline colour match\"\nLUT_3D_SIZE {size}\n");
+        let step = 1.0 / (size - 1) as f32;
+        // Red changes fastest.
+        for b in 0..size {
+            for g in 0..size {
+                for r in 0..size {
+                    let x = [r as f32 * step, g as f32 * step, b as f32 * step];
+                    let y: Vec<String> = (0..3)
+                        .map(|i| {
+                            let v = m[i][0] * x[0] + m[i][1] * x[1] + m[i][2] * x[2] + o[i];
+                            format!("{:.6}", v.clamp(0.0, 1.0))
+                        })
+                        .collect();
+                    out += &y.join(" ");
+                    out.push('\n');
+                }
+            }
+        }
+        out
+    }
+
     /// Changes an RGB24 frame in place.
     pub fn apply(&self, frame: &mut [u8]) {
         let (m, o) = (&self.m, &self.offset);
@@ -186,6 +211,25 @@ mod tests {
     fn square_root() {
         let r = sqrtm_psd(&COV);
         assert!(close(&mul(&r, &r), &COV));
+    }
+
+    #[test]
+    fn a_cube_does_what_the_transform_does() {
+        let t = Transform {
+            m: [[0.5, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            offset: [0.0, 0.1, 0.0],
+        };
+        let cube = t.cube(2);
+        let rows: Vec<&str> = cube.lines().skip(2).collect();
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[0], "0.000000 0.100000 0.000000");
+        // r = 1, g = 0, b = 0: red halved.
+        assert_eq!(rows[1], "0.500000 0.100000 0.000000");
+        // g = 1 goes past 1 and is held there.
+        assert_eq!(rows[2], "0.000000 1.000000 0.000000");
+        let mut px = [255u8, 0, 0];
+        t.apply(&mut px);
+        assert_eq!(px, [128, 26, 0]);
     }
 
     #[test]

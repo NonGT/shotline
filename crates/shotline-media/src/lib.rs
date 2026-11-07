@@ -131,6 +131,47 @@ impl Ffmpeg {
     }
 
     /// Writes the last frame of `video` as a PNG.
+    /// shotline's colour match for a join as a .cube LUT for the clip after it: its first
+    /// `frames` from `next_start` onto the last ones of `prev` before `prev_end` (seconds into
+    /// each file).
+    pub fn match_lut(
+        &self,
+        (prev, prev_end): (&Path, f64),
+        (next, next_start): (&Path, f64),
+        frames: usize,
+        strength: f64,
+        out: &Path,
+    ) -> Result<()> {
+        let info = self.probe(prev)?;
+        let fps = info.fps_value().max(1.0);
+        let n = frames.max(1);
+        // Small is plenty for stats, and keeps the aspect so no bars count.
+        let w = 160u32;
+        let h =
+            ((w as f64 * info.height.max(1) as f64 / info.width.max(1) as f64) as u32).max(2) & !1;
+        let fps_s = format!("{fps}");
+        let from = (prev_end - n as f64 / fps).max(0.0);
+        let tail: Vec<Vec<u8>> = self
+            .frames_from(prev, from, w, h, &fps_s, Some(n))?
+            .collect();
+        let head: Vec<Vec<u8>> = self
+            .frames_from(next, next_start, w, h, &fps_s, Some(n))?
+            .collect();
+        if tail.is_empty() || head.is_empty() {
+            return Err(Error::Invalid("no frames to match".into()));
+        }
+        let t = colour::Transform::between(
+            colour::stats(head.iter().map(|f| &f[..])),
+            colour::stats(tail.iter().map(|f| &f[..])),
+            strength,
+        );
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(out, t.cube(33))?;
+        Ok(())
+    }
+
     /// `length` seconds of `video` from `from`, cut on the frame (so encoded again).
     pub fn part(&self, video: &Path, from: f64, length: f64, out: &Path) -> Result<()> {
         if let Some(dir) = out.parent() {

@@ -2118,6 +2118,40 @@ fn processes_the_used_part_of_a_clip() {
 }
 
 #[test]
+fn matches_a_join_with_shotlines_lut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    if clip(&video).is_none() || clip(&third).is_none() {
+        return;
+    }
+    let mut first = editor_clip("7", &video, 0.0);
+    first.from = 0.0;
+    let mut second = editor_clip("8", &third, 1.0);
+    second.from = 0.0;
+    write_edits(&p, vec![first, second], vec![]);
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    h.get_by_label("Join 01-010#1 to 01-010#3").click();
+    h.run();
+    h.get_by_label("Match with shotline's LUT").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let ask = &lines()[0];
+    assert_eq!(ask.clip, "8");
+    let Change::Lut { file: Some(cube) } = &ask.change else {
+        panic!("{:?}", ask.change);
+    };
+    assert!(cube.starts_with(p.root.join(".shotline/cache/luts")));
+    assert!(
+        std::fs::read_to_string(cube)
+            .unwrap()
+            .contains("LUT_3D_SIZE 33")
+    );
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Undo shotline's colour match on 01-010#3")
+        .is_some()));
+}
+
+#[test]
 fn shows_an_editor_warning_whole() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
