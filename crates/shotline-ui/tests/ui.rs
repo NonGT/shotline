@@ -2984,6 +2984,7 @@ fn a_take_from_pieces() {
     assert!(wait_for(&mut h, |h| h
         .query_by_label_contains("2. #3  0.00–1.00s")
         .is_some()));
+    wait(&mut h, 0.1);
     h.get_by_label_contains("2. #3  0.00–1.00s").click();
     wait(&mut h, 0.1);
     h.get_by_label("changing piece 2");
