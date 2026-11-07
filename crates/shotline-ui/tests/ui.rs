@@ -9,8 +9,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{
-    ClipInfo, Description, EditInfo, ModelInfo, Op, OpenParams, Quote, SequenceInfo, TrackInfo,
-    VoiceInfo,
+    Change, ClipInfo, Description, EditInfo, EditParams, Edited, ModelInfo, Op, OpenParams, Quote,
+    SequenceInfo, TrackInfo, VoiceInfo,
 };
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
 use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
@@ -469,7 +469,25 @@ impl Host for TestHost {
         let edits = std::fs::read_to_string(film.join("shared/edits.json"))
             .map(|t| serde_json::from_str(&t).unwrap())
             .unwrap_or_default();
-        (edits, vec![])
+        let warnings = std::fs::read_to_string(film.join("editor-warnings.txt"))
+            .map(|t| t.lines().map(String::from).collect())
+            .unwrap_or_default();
+        (edits, warnings)
+    }
+
+    /// Notes each change asked for, a line each; a change can be taken back with ["back"].
+    fn edit_clip(&self, plugin: &str, ask: &EditParams) -> anyhow::Result<Edited> {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(ask.film.join(format!("edited-by-{plugin}.jsonl")))?;
+        writeln!(f, "{}", serde_json::to_string(ask)?)?;
+        let undo = match ask.change {
+            Change::Undo { .. } => None,
+            _ => Some(serde_json::json!(["back"])),
+        };
+        Ok(Edited { undo, saved: true })
     }
 
     /// Notes what it was asked, in the film's folder.
@@ -1793,6 +1811,142 @@ fn editor_plugin() -> Description {
         editor: true,
         app: "FilmCraft".into(),
     }
+}
+
+#[test]
+fn swaps_a_take_in_an_editor_and_takes_it_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    let mut j = Job::new(Op::VideoGenerate, "fake", "fake/video");
+    j.shot = Some(R);
+    j.take = Some(p.new_take_id());
+    let mut j = p.create_job(j).unwrap();
+    std::fs::write(p.job_dir(j.id).join("out.mp4"), "mp4").unwrap();
+    j.outputs = vec!["out.mp4".into()];
+    j.status = JobStatus::Done;
+    p.save_job(&j).unwrap();
+    let third = p.job_dir(j.id).join("out.mp4");
+    let clip = ClipInfo {
+        id: "7".into(),
+        name: "out.mp4".into(),
+        file: Some(video),
+        start: 0.0,
+        length: 1.0,
+        from: 0.25,
+        speed: 1.0,
+        enabled: true,
+    };
+    let edits = vec![EditInfo {
+        file: p.root.join("shared/edit.fcproj"),
+        name: "Rain edit".into(),
+        app: "FilmCraft".into(),
+        plugin: "filmcraft".into(),
+        error: None,
+        sequences: vec![SequenceInfo {
+            name: "Main edit".into(),
+            width: 720,
+            height: 1280,
+            fps: 24.0,
+            video: vec![TrackInfo {
+                name: "1".into(),
+                enabled: true,
+                clips: vec![clip],
+            }],
+            audio: vec![],
+        }],
+    }];
+    std::fs::create_dir_all(p.root.join("shared")).unwrap();
+    std::fs::write(
+        p.root.join("shared/edits.json"),
+        serde_json::to_string(&edits).unwrap(),
+    )
+    .unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Main edit")
+        .is_some()));
+    h.get_by_label("Main edit").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::Button, "01-010#1")
+        .is_some()));
+    // A clip with the editor's id is picked rather than opened.
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    h.run();
+    assert_eq!(h.state().tab(), Tab::Cut);
+    h.get_by_label("Open the shot");
+    assert!(
+        h.query_by_label("Match colour to the clip before")
+            .is_some()
+    );
+    h.get_by_label("Swap take").click();
+    h.run();
+    h.get_by_label("01-010#3").click();
+    let asked = p.root.join("edited-by-filmcraft.jsonl");
+    let lines = || -> Vec<EditParams> {
+        std::fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let ask = &lines()[0];
+    assert_eq!(
+        (ask.clip.as_str(), ask.sequence.as_str()),
+        ("7", "Main edit")
+    );
+    assert_eq!(ask.file, p.root.join("shared/edit.fcproj"));
+    assert_eq!(
+        ask.change,
+        Change::Replace {
+            file: third,
+            from: 0.25
+        }
+    );
+    let undo = "Undo swap 01-010#1 for 01-010#3";
+    assert!(wait_for(&mut h, |h| h.query_by_label(undo).is_some()));
+    h.get_by_label(undo).click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    assert_eq!(
+        lines()[1].change,
+        Change::Undo {
+            steps: serde_json::json!(["back"])
+        }
+    );
+    assert!(wait_for(&mut h, |h| h.query_by_label(undo).is_none()));
+}
+
+#[test]
+fn shows_an_editor_warning_whole() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let says = "filmcraft: filmcraft-cli 0.17.2 doesn't match FilmCraft 0.18.0, so shotline won't \
+                change the project while FilmCraft is closed. To update it, get \
+                filmcraft-cli-0.18.0-macos-universal.zip from \
+                https://github.com/storytold/filmcraft/releases/tag/v0.18.0";
+    std::fs::write(p.root.join("editor-warnings.txt"), says).unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label(says).is_some()));
 }
 
 #[test]

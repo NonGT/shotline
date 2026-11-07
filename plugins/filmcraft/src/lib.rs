@@ -70,8 +70,13 @@ impl Plugin for FilmCraft {
     }
 
     async fn sequences(&self, film: &Path) -> Result<Sequences> {
+        let warnings = editor::cli_program()
+            .and_then(|cli| editor::mismatch(&cli))
+            .into_iter()
+            .collect();
         Ok(Sequences {
             edits: shared_edits(film),
+            warnings,
         })
     }
 

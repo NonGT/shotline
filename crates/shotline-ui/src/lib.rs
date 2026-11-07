@@ -6,6 +6,7 @@ mod anchor;
 mod browse;
 mod cost;
 mod cut;
+mod cut_tools;
 mod edit;
 mod git;
 mod grouped;
@@ -110,6 +111,14 @@ pub trait Host: Send + Sync {
     /// Free.
     fn sequences(&self, _film: &Path) -> (Vec<EditInfo>, Vec<String>) {
         (vec![], vec![])
+    }
+    /// Changes a clip of an editor's sequence through its plugin, and says how to undo it.
+    fn edit_clip(
+        &self,
+        plugin: &str,
+        _ask: &shotline_core::protocol::EditParams,
+    ) -> anyhow::Result<shotline_core::protocol::Edited> {
+        anyhow::bail!("{plugin} can't change clips")
     }
     /// Opens the film's project in an editor plugin's app, made from the cut if there's none.
     fn open_edit(&self, plugin: &str, _ask: &OpenParams) -> anyhow::Result<()> {
@@ -242,6 +251,11 @@ pub struct App {
     seq_playing: Option<(PathBuf, Vec<String>)>,
     /// An editor being asked to open a project: what to call it, and how that went.
     edit_opening: Option<(String, Opened)>,
+    /// The editor clip picked on the Cut page, by the editor's id.
+    clip_pick: Option<String>,
+    changing: Option<cut_tools::Changing>,
+    /// Undo for clip changes made from here, read from the film's cache when first needed.
+    undo: Option<Vec<cut_tools::Undo>>,
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
@@ -546,6 +560,9 @@ impl App {
             seq_making: None,
             seq_playing: None,
             edit_opening: None,
+            clip_pick: None,
+            changing: None,
+            undo: None,
             shot: None,
             takes: vec![],
             status: None,

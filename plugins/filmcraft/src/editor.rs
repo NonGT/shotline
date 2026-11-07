@@ -254,6 +254,53 @@ pub(crate) fn running_apps() -> Vec<u32> {
     }
 }
 
+/// What `exe --version` says, e.g. "0.18.0" from "filmcraft-cli 0.18.0".
+fn version_of(exe: &Path) -> Option<String> {
+    let out = Command::new(exe).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v = text.split_whitespace().last()?.trim_start_matches('v');
+    v.starts_with(|c: char| c.is_ascii_digit())
+        .then(|| v.to_string())
+}
+
+fn numbers(v: &str) -> Vec<u64> {
+    v.split(['.', '-']).map_while(|n| n.parse().ok()).collect()
+}
+
+/// When the CLI and the app aren't the same version, what to do about it. The CLI is then left
+/// alone: one from another version could read or write the project the app's way wrongly.
+pub fn mismatch(cli: &Path) -> Option<String> {
+    let app = version_of(&control::program())?;
+    let got = version_of(cli)?;
+    (app != got).then(|| upgrade(&app, &got, cli))
+}
+
+fn upgrade(app: &str, cli_version: &str, cli: &Path) -> String {
+    let releases = "https://github.com/storytold/filmcraft/releases";
+    let head = format!(
+        "filmcraft-cli {cli_version} doesn't match FilmCraft {app}, so shotline won't change the \
+         project while FilmCraft is closed."
+    );
+    if numbers(cli_version) < numbers(app) {
+        let how = if cfg!(target_os = "macos") {
+            format!(
+                "get filmcraft-cli-{app}-macos-universal.zip from {releases}/tag/v{app} and put \
+                 the filmcraft-cli in it in place of {}",
+                cli.display()
+            )
+        } else {
+            format!(
+                "reinstall FilmCraft {app} from {releases}/tag/v{app}, which comes with its \
+                 filmcraft-cli ({} is the old one)",
+                cli.display()
+            )
+        };
+        format!("{head} To update it, {how}.")
+    } else {
+        format!("{head} Update FilmCraft to {cli_version} from {releases}/tag/v{cli_version}.")
+    }
+}
+
 /// How to edit `project` now, or why it has to wait.
 pub fn for_project(film: &Path, project: &Path) -> Result<Editor, String> {
     let ours = Session::load(film).filter(Session::alive);
@@ -275,7 +322,12 @@ pub fn for_project(film: &Path, project: &Path) -> Result<Editor, String> {
         );
     }
     match cli_program() {
-        Some(exe) => Ok(Editor::cli(exe, project.to_path_buf(), film)),
+        Some(exe) => {
+            if let Some(why) = mismatch(&exe) {
+                return Err(why);
+            }
+            Ok(Editor::cli(exe, project.to_path_buf(), film))
+        }
         None => Err("FilmCraft is closed and filmcraft-cli isn't installed".into()),
     }
 }
@@ -337,6 +389,30 @@ mod tests {
         assert!(!names.contains(&"fan-0000000001005.fcproj".to_string()));
         assert!(names.contains(&"fan-0000000001006.fcproj".to_string()));
         assert!(names.contains(&"other-1.fcproj".to_string()));
+    }
+
+    #[test]
+    fn older_cli_says_how_to_update_it() {
+        let cli = Path::new("/home/me/.local/bin/filmcraft-cli");
+        let says = upgrade("0.18.0", "0.17.2", cli);
+        assert!(
+            says.starts_with("filmcraft-cli 0.17.2 doesn't match FilmCraft 0.18.0"),
+            "{says}"
+        );
+        assert!(says.contains("releases/tag/v0.18.0"), "{says}");
+        assert!(says.contains("/home/me/.local/bin/filmcraft-cli"), "{says}");
+        let says = upgrade("0.18.0", "0.19.1", cli);
+        assert!(says.contains("Update FilmCraft to 0.19.1"), "{says}");
+        assert!(numbers("0.10.0") > numbers("0.9.3"));
+    }
+
+    #[test]
+    fn reads_a_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = fake(tmp.path(), "echo 'filmcraft-cli 0.18.0'");
+        assert_eq!(version_of(&exe).as_deref(), Some("0.18.0"));
+        let exe = fake(tmp.path(), "echo 'no idea'");
+        assert_eq!(version_of(&exe), None);
     }
 
     #[test]

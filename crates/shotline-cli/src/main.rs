@@ -627,6 +627,14 @@ impl shotline_ui::Host for Plugins {
         plugins::sequences(&plugins::load(), film)
     }
 
+    fn edit_clip(
+        &self,
+        plugin: &str,
+        ask: &shotline_core::protocol::EditParams,
+    ) -> Result<shotline_core::protocol::Edited> {
+        plugins::edit_clip(&plugins::load(), plugin, ask)
+    }
+
     fn open_edit(&self, plugin: &str, ask: &shotline_core::protocol::OpenParams) -> Result<()> {
         plugins::open_edit(&plugins::load(), plugin, ask)
     }

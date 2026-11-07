@@ -174,6 +174,8 @@ impl App {
                 hover: hover.join("\n"),
                 enabled: true,
                 shot: Some(c.shot),
+                id: None,
+                picked: false,
             });
             end += length;
         }
@@ -201,6 +203,8 @@ impl App {
                     hover: format!("volume {:.2}", tr.volume),
                     enabled: tr.volume > 0.0,
                     shot: None,
+                    id: None,
+                    picked: false,
                 }],
                 sound: true,
                 enabled: true,
@@ -225,7 +229,7 @@ impl App {
                 self.tab = crate::Tab::Shots;
                 self.open_shot(r);
             }
-            None => {}
+            Some(Hit::Pick(_)) | None => {}
         }
     }
 
@@ -327,9 +331,9 @@ impl App {
     fn cut_switch(&mut self, ui: &mut egui::Ui) {
         self.refresh_edits(ui.ctx());
         self.editor_opened();
+        // Whole, so a fix's link and steps can be read and copied.
         for p in &self.edits.1 {
-            ui.label(RichText::new(short(p, 100)).color(theme::FLAG))
-                .on_hover_text(p);
+            ui.label(RichText::new(p).color(theme::FLAG));
         }
         let editors: Vec<(String, String)> = self
             .plugins
@@ -453,7 +457,7 @@ impl App {
         hint(
             ui,
             &format!(
-                "{} · {} × {} · {fps} fps · {}. Read only: it's edited in its own app.",
+                "{} · {} × {} · {fps} fps · {}",
                 self.project.rel(file),
                 seq.width,
                 seq.height,
@@ -470,7 +474,14 @@ impl App {
                     blocks: t
                         .clips
                         .iter()
-                        .map(|c| self.edit_block(&ctx, c, sound))
+                        .map(|c| {
+                            let mut b = self.edit_block(&ctx, c, sound);
+                            if !sound && !c.id.is_empty() {
+                                b.picked = self.clip_pick.as_ref() == Some(&c.id);
+                                b.id = Some(c.id.clone());
+                            }
+                            b
+                        })
                         .collect(),
                     sound,
                     enabled: t.enabled,
@@ -542,8 +553,12 @@ impl App {
                 }
             }
             Some(Hit::Seek(t)) if !making => self.play_sequence(&ctx, &title, seq, &out, t),
+            Some(Hit::Pick(id)) => {
+                self.clip_pick = (self.clip_pick.as_ref() != Some(&id)).then_some(id);
+            }
             _ => {}
         }
+        self.clip_tools(ui, file, seq);
     }
 
     /// Asks the editor plugin to open the film's project there, at the sequence shown, or to
@@ -756,6 +771,8 @@ impl App {
             hover: hover.join("\n"),
             enabled: c.enabled,
             shot: take.map(|t| t.shot),
+            id: None,
+            picked: false,
         }
     }
 

@@ -406,6 +406,9 @@ pub struct OpenParams {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Sequences {
     pub edits: Vec<EditInfo>,
+    /// Something to fix on the editor's side, shown on the Cut page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// One editor project, or why it couldn't be read.

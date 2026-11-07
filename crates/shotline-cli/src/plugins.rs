@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use shotline_builtin::fal::{self, Fal};
 use shotline_core::protocol::{
-    Description, EditInfo, ImportParams, OpenParams, TakeFile, VoiceInfo,
+    Description, EditInfo, EditParams, Edited, ImportParams, OpenParams, TakeFile, VoiceInfo,
 };
 use shotline_core::{Catalog, Project, user_dir};
 use shotline_plugin::conformance::{self, Options};
@@ -349,10 +349,13 @@ pub fn sequences(installed: &Installed, film: &Path) -> (Vec<EditInfo>, Vec<Stri
                 .map_err(|e| anyhow::anyhow!("{}: {e}", p.name))
         });
         match got {
-            Ok(s) => edits.extend(s.edits.into_iter().map(|mut e| {
-                e.plugin = p.name.clone();
-                e
-            })),
+            Ok(s) => {
+                problems.extend(s.warnings.iter().map(|w| format!("{}: {w}", p.name)));
+                edits.extend(s.edits.into_iter().map(|mut e| {
+                    e.plugin = p.name.clone();
+                    e
+                }));
+            }
             Err(e) => problems.push(e.to_string()),
         }
     }
@@ -394,6 +397,15 @@ pub fn open_edit(installed: &Installed, name: &str, ask: &OpenParams) -> Result<
     match runtime().block_on(plugin.open(ask)) {
         Ok(()) => Ok(()),
         Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't open its projects"),
+        Err(e) => bail!("{name}: {e}"),
+    }
+}
+
+pub fn edit_clip(installed: &Installed, name: &str, ask: &EditParams) -> Result<Edited> {
+    let plugin = open(installed, name)?;
+    match runtime().block_on(plugin.edit(ask)) {
+        Ok(e) => Ok(e),
+        Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't change clips"),
         Err(e) => bail!("{name}: {e}"),
     }
 }

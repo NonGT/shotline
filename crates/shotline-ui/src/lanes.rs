@@ -1,6 +1,7 @@
 //! A cut drawn the way editors draw one: a time ruler, video tracks stacked above the audio
 //! tracks (the highest V on top, A1 right under V1), each clip a block as long as it lasts, and a
-//! playhead. Read only; clicking or dragging along the ruler moves the playhead.
+//! playhead. Clicking or dragging along the ruler moves the playhead; clicking a clip opens its
+//! shot, or picks it when it can be changed.
 
 use std::path::PathBuf;
 
@@ -28,11 +29,15 @@ pub(crate) struct Block {
     pub enabled: bool,
     /// A take's shot, to open on click.
     pub shot: Option<ShotRef>,
+    /// The editor's id for it, when it can be picked to change it; a click picks it instead.
+    pub id: Option<String>,
+    pub picked: bool,
 }
 
 pub(crate) enum Hit {
     Seek(f64),
     Open(ShotRef),
+    Pick(String),
 }
 
 const HEAD: f32 = 36.0;
@@ -129,7 +134,7 @@ pub(crate) fn show(
             let resp = ui.interact(
                 r,
                 id.with((&lane.name, i)),
-                if b.shot.is_some() {
+                if b.shot.is_some() || b.id.is_some() {
                     Sense::click()
                 } else {
                     Sense::hover()
@@ -142,18 +147,18 @@ pub(crate) fn show(
                 (false, true) => theme::VIDEO_CLIP,
                 (true, true) => theme::AUDIO_CLIP,
             };
-            let fill = if resp.hovered() && b.shot.is_some() {
+            let fill = if resp.hovered() && (b.shot.is_some() || b.id.is_some()) {
                 fill.gamma_multiply(1.25)
             } else {
                 fill
             };
             p.rect_filled(r, 2.0, fill);
-            p.rect_stroke(
-                r,
-                2.0,
-                Stroke::new(1.0, theme::LINE),
-                egui::StrokeKind::Inside,
-            );
+            let (width, colour) = if b.picked {
+                (2.0, theme::TUNGSTEN)
+            } else {
+                (1.0, theme::LINE)
+            };
+            p.rect_stroke(r, 2.0, Stroke::new(width, colour), egui::StrokeKind::Inside);
             let inner = r.shrink(3.0);
             let p = p.with_clip_rect(inner);
             let mut text_left = inner.left();
@@ -176,10 +181,12 @@ pub(crate) fn show(
             if !b.hover.is_empty() {
                 resp.clone().on_hover_text(&b.hover);
             }
-            if resp.clicked()
-                && let Some(s) = b.shot
-            {
-                hit = Some(Hit::Open(s));
+            if resp.clicked() {
+                hit = match (&b.id, b.shot) {
+                    (Some(id), _) => Some(Hit::Pick(id.clone())),
+                    (None, Some(s)) => Some(Hit::Open(s)),
+                    (None, None) => hit,
+                };
             }
         }
         y += h + GAP;
