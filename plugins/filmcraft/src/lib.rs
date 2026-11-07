@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use shotline_plugin::protocol::{
     ClipInfo, Description, EditInfo, EditParams, Edited, ErrorKind, ImportParams, Imported,
     OpenParams, Outputs, PROTOCOL_VERSION, PluginError, Quote, Request, SequenceInfo, Sequences,
-    Status, TakeFile, TrackInfo,
+    Status, TakeFile, TrackInfo, TransitionInfo,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
@@ -451,6 +451,20 @@ struct RawTrack {
     enabled: bool,
     #[serde(default)]
     muted: bool,
+    #[serde(default)]
+    transitions: Vec<RawTransition>,
+}
+
+#[derive(Deserialize)]
+struct RawTransition {
+    id: u64,
+    effect: Value,
+    start: i64,
+    duration: i64,
+    #[serde(default)]
+    from: Option<u64>,
+    #[serde(default)]
+    to: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -526,6 +540,18 @@ pub fn read_edit(path: &Path) -> std::result::Result<EditInfo, String> {
             )
         })?;
         let track = |t: RawTrack, video: bool| TrackInfo {
+            transitions: t
+                .transitions
+                .iter()
+                .map(|x| TransitionInfo {
+                    id: x.id.to_string(),
+                    name: x.effect["effect"].as_str().unwrap_or_default().into(),
+                    from: x.from.map(|i| i.to_string()).unwrap_or_default(),
+                    to: x.to.map(|i| i.to_string()).unwrap_or_default(),
+                    start: secs(x.start),
+                    length: secs(x.duration),
+                })
+                .collect(),
             name: t.name,
             enabled: if video { t.enabled } else { !t.muted },
             clips: t
@@ -802,6 +828,15 @@ mod tests {
         assert_eq!(sequence_id(&root, "Nope"), None);
     }
 
+    /// Asks the test's FilmCraft to quit when the test ends, passed or not.
+    struct Quit(control::Session);
+
+    impl Drop for Quit {
+        fn drop(&mut self) {
+            let _ = self.0.call("app.quit", json!({}));
+        }
+    }
+
     fn colour_clip(path: &Path, colour: &str, secs: u32, sound: bool) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut c = std::process::Command::new("ffmpeg");
@@ -849,6 +884,7 @@ mod tests {
             name: name.into(),
             enabled: true,
             clips: pieces.clone(),
+            transitions: vec![],
         };
         let cut = SequenceInfo {
             name: "cut".into(),
@@ -867,6 +903,7 @@ mod tests {
             .await
             .unwrap();
         let s = control::Session::load(&film).unwrap();
+        let _quit = Quit(s.clone());
         let project = own_dir(&film).join("fan.fcproj");
         let seq = || shared_edits(&film)[0].sequences[0].clone();
         let at = |t: f64| {
@@ -950,6 +987,29 @@ mod tests {
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         assert!(!lumetri_on(&v.id));
 
+        // A dissolve into it, a shorter one over that, and both taken back.
+        let fades = || seq().video[0].transitions.clone();
+        let half = FilmCraft
+            .edit(&ask(&v.id, Change::Crossfade { frames: 12 }))
+            .await
+            .unwrap();
+        let t = fades();
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            (t[0].to.as_str(), t[0].name.as_str()),
+            (v.id.as_str(), "cross_dissolve")
+        );
+        assert!((t[0].length - 0.5).abs() < 0.01, "{}", t[0].length);
+        let quarter = FilmCraft
+            .edit(&ask(&v.id, Change::Crossfade { frames: 6 }))
+            .await
+            .unwrap();
+        assert!((fades()[0].length - 0.25).abs() < 0.01);
+        FilmCraft.edit(&ask("", undo(&quarter))).await.unwrap();
+        assert!((fades()[0].length - 0.5).abs() < 0.01, "{:?}", fades());
+        FilmCraft.edit(&ask("", undo(&half))).await.unwrap();
+        assert!(fades().is_empty());
+
         let _ = s.call("app.quit", json!({}));
         let pid = s.pid.unwrap();
         assert!((0..80).any(|_| {
@@ -995,6 +1055,30 @@ mod tests {
         assert_eq!(at(3.0).0.file.as_ref(), Some(&c));
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+
+        // Taken off and put back, through the CLI.
+        let fades = || seq().video[0].transitions.clone();
+        let blue = at(3.0).0.id;
+        FilmCraft
+            .edit(&ask(&blue, Change::Crossfade { frames: 12 }))
+            .await
+            .unwrap();
+        let off = FilmCraft
+            .edit(&ask(&blue, Change::Crossfade { frames: 0 }))
+            .await
+            .unwrap();
+        assert!(fades().is_empty());
+        FilmCraft.edit(&ask("", undo(&off))).await.unwrap();
+        let t = fades();
+        assert_eq!(t.len(), 1);
+        assert!((t[0].length - 0.5).abs() < 0.01, "{t:?}");
+        assert!(
+            FilmCraft
+                .edit(&ask(&at(0.0).0.id, Change::Crossfade { frames: 0 }))
+                .await
+                .is_err(),
+            "nothing goes into the first clip"
+        );
     }
 
     /// Starts the real FilmCraft: makes the film's project from a cut, opens it again, and
@@ -1035,6 +1119,7 @@ mod tests {
                 name: "V1".into(),
                 enabled: true,
                 clips: vec![piece(0.0), piece(2.0)],
+                transitions: vec![],
             }],
             audio: vec![],
         };

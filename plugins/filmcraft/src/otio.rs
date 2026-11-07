@@ -172,11 +172,13 @@ mod tests {
                     c("01-010#2", Some("/f/a.mp4"), 0.0, 2.0, 0.0),
                     c("title", None, 4.0, 1.0, 0.0),
                 ],
+                transitions: vec![],
             }],
             audio: vec![TrackInfo {
                 name: "A1".into(),
                 enabled: true,
                 clips: vec![c("music.wav", Some("/f/music.wav"), 0.0, 4.0, 0.0)],
+                transitions: vec![],
             }],
         };
         let t = timeline("fan", &cut);

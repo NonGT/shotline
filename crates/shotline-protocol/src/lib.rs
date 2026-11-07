@@ -459,6 +459,21 @@ pub struct TrackInfo {
     /// Shown (video) or not muted (audio).
     pub enabled: bool,
     pub clips: Vec<ClipInfo>,
+    /// Dissolves and the like where two clips meet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transitions: Vec<TransitionInfo>,
+}
+
+/// A transition between two clips of a track, by their ids. Times in seconds.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TransitionInfo {
+    pub id: String,
+    /// "cross_dissolve".
+    pub name: String,
+    pub from: String,
+    pub to: String,
+    pub start: f64,
+    pub length: f64,
 }
 
 /// A clip on a track. Times in seconds.
@@ -507,6 +522,9 @@ pub enum Change {
     },
     /// Matches the clip's colour to the sequence's frame at `to` seconds.
     Match { to: f64 },
+    /// A dissolve this many frames long into the clip from the one before it, centred on the
+    /// cut; 0 takes the one there off.
+    Crossfade { frames: u32 },
     /// Takes an earlier change back: its `undo`, as the plugin gave it.
     Undo { steps: serde_json::Value },
 }

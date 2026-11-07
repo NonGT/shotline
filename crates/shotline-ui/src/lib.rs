@@ -253,6 +253,10 @@ pub struct App {
     edit_opening: Option<(String, Opened)>,
     /// The editor clip picked on the Cut page, by the editor's id.
     clip_pick: Option<String>,
+    /// The join picked instead, by the editor's id for the clip after it.
+    join_pick: Option<String>,
+    /// How long a dissolve put on a join is, in frames.
+    fade_frames: u32,
     changing: Option<cut_tools::Changing>,
     /// Undo for clip changes made from here, read from the film's cache when first needed.
     undo: Option<Vec<cut_tools::Undo>>,
@@ -561,6 +565,8 @@ impl App {
             seq_playing: None,
             edit_opening: None,
             clip_pick: None,
+            join_pick: None,
+            fade_frames: 12,
             changing: None,
             undo: None,
             shot: None,

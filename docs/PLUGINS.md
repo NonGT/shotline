@@ -232,6 +232,9 @@ film, read only, for the Cut page. It must be free to call.
    "audio": []}]}]}
 ```
 
+A track may also list `transitions`, each `{"id", "name", "from", "to", "start", "length"}` with
+`from` and `to` the ids of the clips it joins, so the Cut page can show them.
+
 Times are seconds. `video` starts at V1, `audio` at A1. A clip that isn't a file (a title, a
 nested sequence) has no `file`; one in a take's job folder shows as that take. A project that
 can't be read comes back with an `error` and no sequences, so the others still show. shotline
@@ -275,6 +278,8 @@ itself (never by writing its project file). Params:
   same place and length; the clip's sound stays when the file has none
 - `{"kind": "lut", "file"}`: the clip's input LUT (`.cube`); without `file` it comes off
 - `{"kind": "match", "to"}`: the clip's colour matched to the sequence's frame at `to` seconds
+- `{"kind": "crossfade", "frames"}`: a dissolve that many frames long into the clip from the one
+  before, centred on the cut; 0 takes the one there off
 - `{"kind": "undo", "steps"}`: takes an earlier change back
 
 Returns `{"undo": ..., "saved": true}`. `undo` is whatever the plugin needs to take the change

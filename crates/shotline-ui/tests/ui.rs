@@ -10,7 +10,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{
     Change, ClipInfo, Description, EditInfo, EditParams, Edited, ModelInfo, Op, OpenParams, Quote,
-    SequenceInfo, TrackInfo, VoiceInfo,
+    SequenceInfo, TrackInfo, TransitionInfo, VoiceInfo,
 };
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
 use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
@@ -1729,6 +1729,7 @@ fn an_editor_s_sequence_on_the_cut_page() {
         name: "1".into(),
         enabled: true,
         clips,
+        transitions: vec![],
     };
     let edits = vec![
         EditInfo {
@@ -1813,10 +1814,8 @@ fn editor_plugin() -> Description {
     }
 }
 
-#[test]
-fn swaps_a_take_in_an_editor_and_takes_it_back() {
-    let tmp = tempfile::tempdir().unwrap();
-    let p = film(tmp.path());
+/// A third take of the shot, done, with a video; the first take's video and the new one's.
+fn another_take(p: &Project) -> (PathBuf, PathBuf) {
     let first = p.take(R, "1").unwrap();
     let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
     let mut j = Job::new(Op::VideoGenerate, "fake", "fake/video");
@@ -1827,17 +1826,24 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
     j.outputs = vec!["out.mp4".into()];
     j.status = JobStatus::Done;
     p.save_job(&j).unwrap();
-    let third = p.job_dir(j.id).join("out.mp4");
-    let clip = ClipInfo {
-        id: "7".into(),
+    (video, p.job_dir(j.id).join("out.mp4"))
+}
+
+fn editor_clip(id: &str, file: &Path, start: f64) -> ClipInfo {
+    ClipInfo {
+        id: id.into(),
         name: "out.mp4".into(),
-        file: Some(video),
-        start: 0.0,
+        file: Some(file.into()),
+        start,
         length: 1.0,
         from: 0.25,
         speed: 1.0,
         enabled: true,
-    };
+    }
+}
+
+/// What the editor plugin reads: one project with "Main edit", these clips on V1.
+fn write_edits(p: &Project, clips: Vec<ClipInfo>, transitions: Vec<TransitionInfo>) {
     let edits = vec![EditInfo {
         file: p.root.join("shared/edit.fcproj"),
         name: "Rain edit".into(),
@@ -1852,7 +1858,8 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
             video: vec![TrackInfo {
                 name: "1".into(),
                 enabled: true,
-                clips: vec![clip],
+                clips,
+                transitions,
             }],
             audio: vec![],
         }],
@@ -1863,7 +1870,11 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
         serde_json::to_string(&edits).unwrap(),
     )
     .unwrap();
-    let mut app = App::new(p.clone(), tmp.path().join("home"))
+}
+
+/// The Cut page showing "Main edit", and the changes the plugin was asked for.
+fn on_main_edit(tmp: &Path, p: &Project) -> (Harness<'static, App>, impl Fn() -> Vec<EditParams>) {
+    let mut app = App::new(p.clone(), tmp.join("home"))
         .with_viewer(None)
         .silent();
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
@@ -1880,6 +1891,24 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::Button, "01-010#1")
         .is_some()));
+    let asked = p.root.join("edited-by-filmcraft.jsonl");
+    let lines = move || -> Vec<EditParams> {
+        std::fs::read_to_string(&asked)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    (h, lines)
+}
+
+#[test]
+fn swaps_a_take_in_an_editor_and_takes_it_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
     // A clip with the editor's id is picked rather than opened.
     h.get_by_role_and_label(Role::Button, "01-010#1").click();
     h.run();
@@ -1892,14 +1921,6 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
     h.get_by_label("Swap take").click();
     h.run();
     h.get_by_label("01-010#3").click();
-    let asked = p.root.join("edited-by-filmcraft.jsonl");
-    let lines = || -> Vec<EditParams> {
-        std::fs::read_to_string(&asked)
-            .unwrap_or_default()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect()
-    };
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let ask = &lines()[0];
     assert_eq!(
@@ -1925,6 +1946,44 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
         }
     );
     assert!(wait_for(&mut h, |h| h.query_by_label(undo).is_none()));
+}
+
+#[test]
+fn dissolves_a_join_in_an_editor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    let clips = vec![editor_clip("7", &video, 0.0), editor_clip("8", &third, 1.0)];
+    write_edits(&p, clips.clone(), vec![]);
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    h.get_by_label("Join 01-010#1 to 01-010#3").click();
+    h.run();
+    h.get_by_label("Match colour to 01-010#1");
+    assert!(h.query_by_label("Straight cut").is_none());
+    h.get_by_label("Dissolve").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    assert_eq!(lines()[0].clip, "8");
+    assert_eq!(lines()[0].change, Change::Crossfade { frames: 12 });
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Undo 12-frame dissolve into 01-010#3")
+        .is_some()));
+    // Once the editor has it, it can come off again.
+    let fade = TransitionInfo {
+        id: "10".into(),
+        name: "cross_dissolve".into(),
+        from: "7".into(),
+        to: "8".into(),
+        start: 0.75,
+        length: 0.5,
+    };
+    write_edits(&p, clips, vec![fade]);
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Straight cut")
+        .is_some()));
+    h.get_by_label("Change dissolve");
+    h.get_by_label("Straight cut").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    assert_eq!(lines()[1].change, Change::Crossfade { frames: 0 });
 }
 
 #[test]
@@ -3497,6 +3556,7 @@ fn plays_an_editor_sequence() {
         name: "1".into(),
         enabled: true,
         clips,
+        transitions: vec![],
     };
     let edits = vec![EditInfo {
         file: p.root.join("shared/edit.fcproj"),

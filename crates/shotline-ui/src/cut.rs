@@ -184,6 +184,7 @@ impl App {
             blocks,
             sound: false,
             enabled: true,
+            joins: vec![],
         }];
         let tracks = self.timeline_form.tracks.clone();
         let mut audio = vec![];
@@ -208,6 +209,7 @@ impl App {
                 }],
                 sound: true,
                 enabled: true,
+                joins: vec![],
             });
         }
         let playhead = self
@@ -229,7 +231,7 @@ impl App {
                 self.tab = crate::Tab::Shots;
                 self.open_shot(r);
             }
-            Some(Hit::Pick(_)) | None => {}
+            Some(Hit::Pick(_) | Hit::PickJoin(_)) | None => {}
         }
     }
 
@@ -485,6 +487,11 @@ impl App {
                         .collect(),
                     sound,
                     enabled: t.enabled,
+                    joins: if sound {
+                        vec![]
+                    } else {
+                        self.joins_of(t, seq.fps)
+                    },
                 })
                 .collect()
         };
@@ -554,7 +561,12 @@ impl App {
             }
             Some(Hit::Seek(t)) if !making => self.play_sequence(&ctx, &title, seq, &out, t),
             Some(Hit::Pick(id)) => {
+                self.join_pick = None;
                 self.clip_pick = (self.clip_pick.as_ref() != Some(&id)).then_some(id);
+            }
+            Some(Hit::PickJoin(id)) => {
+                self.clip_pick = None;
+                self.join_pick = (self.join_pick.as_ref() != Some(&id)).then_some(id);
             }
             _ => {}
         }
@@ -1082,6 +1094,7 @@ fn own_cut(
         name: name.into(),
         enabled: true,
         clips,
+        transitions: vec![],
     };
     cut.video.push(track("V1", v1));
     cut.audio.push(track("A1", a1));

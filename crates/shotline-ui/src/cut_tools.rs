@@ -7,11 +7,18 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 use serde::{Deserialize, Serialize};
-use shotline_core::protocol::{Change, ClipInfo, EditParams, Edited, SequenceInfo};
+use shotline_core::protocol::{
+    Change, ClipInfo, EditParams, Edited, SequenceInfo, TrackInfo, TransitionInfo,
+};
 
 use crate::{App, short, theme};
 
 const KEPT: usize = 30;
+
+/// `a` ends where `b` starts, give or take half a frame.
+fn meet(a: &ClipInfo, b: &ClipInfo, fps: f64) -> bool {
+    (a.start + a.length - b.start).abs() < 0.5 / fps.max(1.0)
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Undo {
@@ -78,19 +85,43 @@ impl App {
         if picked.is_none() {
             self.clip_pick = None;
         }
+        let join = self.join_pick.as_ref().and_then(|id| {
+            seq.video.iter().find_map(|t| {
+                let i = t.clips.iter().position(|c| c.id == *id)?;
+                let after = &t.clips[i];
+                let before = t
+                    .clips
+                    .iter()
+                    .find(|c| meet(c, after, seq.fps) && c.id != after.id)?;
+                let fade = t.transitions.iter().find(|x| x.to == *id).cloned();
+                Some((before.clone(), after.clone(), fade))
+            })
+        });
+        if join.is_none() {
+            self.join_pick = None;
+        }
         ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            match &picked {
-                Some(c) => self.picked_tools(ui, &plugin, file, seq, c, busy.is_none()),
-                None => {
-                    ui.weak("Click a clip to change it from here.");
-                }
-            }
-            if let Some(what) = &busy {
-                ui.spinner();
-                ui.weak(what);
+        ui.horizontal_wrapped(|ui| match (&picked, &join) {
+            (Some(c), _) => self.picked_tools(ui, &plugin, file, seq, c, busy.is_none()),
+            (None, Some((a, b, fade))) => self.join_tools(
+                ui,
+                &plugin,
+                file,
+                seq,
+                (a, b),
+                fade.as_ref(),
+                busy.is_none(),
+            ),
+            (None, None) => {
+                ui.weak("Click a clip, or the mark where two meet, to change it from here.");
             }
         });
+        if let Some(what) = &busy {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak(what);
+            });
+        }
         let undo = self
             .undo
             .get_or_insert_with(|| load_undo(&self.project.root))
@@ -119,6 +150,135 @@ impl App {
                 };
                 self.start_change(ui.ctx(), &plugin, format!("undoing {}", u.what), ask, None);
             }
+        }
+    }
+
+    /// The places on a video track where two clips the editor can change meet.
+    pub(crate) fn joins_of(&self, t: &TrackInfo, fps: f64) -> Vec<crate::lanes::Join> {
+        let name = |c: &ClipInfo| {
+            c.file
+                .as_ref()
+                .and_then(|f| self.edit_takes.get(f))
+                .map_or(c.name.clone(), |t| t.to_string())
+        };
+        let mut clips: Vec<&ClipInfo> = t.clips.iter().filter(|c| !c.id.is_empty()).collect();
+        clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        clips
+            .windows(2)
+            .filter(|w| meet(w[0], w[1], fps))
+            .map(|w| crate::lanes::Join {
+                at: w[1].start,
+                id: w[1].id.clone(),
+                name: format!("{} to {}", name(w[0]), name(w[1])),
+                picked: self.join_pick.as_ref() == Some(&w[1].id),
+                fade: t
+                    .transitions
+                    .iter()
+                    .find(|x| x.to == w[1].id)
+                    .map(|x| (x.start, x.length)),
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn join_tools(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin: &str,
+        file: &Path,
+        seq: &SequenceInfo,
+        (a, b): (&ClipInfo, &ClipInfo),
+        fade: Option<&TransitionInfo>,
+        free: bool,
+    ) {
+        let take_of = |c: &ClipInfo| {
+            c.file
+                .as_ref()
+                .and_then(|f| self.edit_takes.get(f))
+                .cloned()
+        };
+        let name = |c: &ClipInfo| take_of(c).map_or(c.name.clone(), |t| t.to_string());
+        let (na, nb) = (name(a), name(b));
+        ui.label(
+            RichText::new(format!("{na} to {nb}"))
+                .strong()
+                .color(theme::PAPER),
+        );
+        let continues = take_of(b).is_some_and(|t| {
+            self.film
+                .cut
+                .iter()
+                .any(|c| c.shot == t.shot && c.transition == shotline_core::Transition::Continue)
+        });
+        if continues {
+            ui.weak("continues from the shot before").on_hover_text(
+                "its first frame was the last one before it; a colour match hides the seam",
+            );
+        }
+        let ask = |change| EditParams {
+            film: self.project.root.clone(),
+            file: file.to_path_buf(),
+            sequence: seq.name.clone(),
+            clip: b.id.clone(),
+            change,
+        };
+        let mut start = None;
+        let frame = 1.0 / seq.fps.max(1.0);
+        if ui
+            .add_enabled(free, egui::Button::new(format!("Match colour to {na}")))
+            .on_hover_text(format!(
+                "the editor's colour match on {nb}, to the last frame of {na}"
+            ))
+            .clicked()
+        {
+            let change = Change::Match {
+                to: b.start - frame,
+            };
+            start = Some((format!("colour match of {nb}"), ask(change)));
+        }
+        ui.separator();
+        ui.add(
+            egui::DragValue::new(&mut self.fade_frames)
+                .range(1..=240)
+                .suffix(" frames"),
+        )
+        .on_hover_text(format!("{:.2} s", self.fade_frames as f64 * frame));
+        let label = if fade.is_some() {
+            "Change dissolve"
+        } else {
+            "Dissolve"
+        };
+        if ui
+            .add_enabled(free, egui::Button::new(label))
+            .on_hover_text("a cross dissolve centred on the cut")
+            .clicked()
+        {
+            let frames = self.fade_frames;
+            start = Some((
+                format!("{frames}-frame dissolve into {nb}"),
+                ask(Change::Crossfade { frames }),
+            ));
+        }
+        if let Some(f) = fade
+            && ui
+                .add_enabled(free, egui::Button::new("Straight cut"))
+                .on_hover_text(format!("takes the {:.2} s {} off", f.length, f.name))
+                .clicked()
+        {
+            start = Some((
+                format!("straight cut into {nb}"),
+                ask(Change::Crossfade { frames: 0 }),
+            ));
+        }
+        if let Some((what, ask)) = start {
+            let undo = Undo {
+                plugin: plugin.to_string(),
+                file: file.to_path_buf(),
+                sequence: seq.name.clone(),
+                what: what.clone(),
+                steps: serde_json::Value::Null,
+            };
+            self.start_change(ui.ctx(), plugin, what, ask, Some(undo));
         }
     }
 

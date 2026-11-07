@@ -17,6 +17,19 @@ pub(crate) struct Lane {
     pub sound: bool,
     /// Shown (video) or heard (audio).
     pub enabled: bool,
+    /// Where two of its clips meet, when they can be picked.
+    pub joins: Vec<Join>,
+}
+
+pub(crate) struct Join {
+    pub at: f64,
+    /// The editor's id for the clip after it.
+    pub id: String,
+    /// "01-010#1 to 01-020#1".
+    pub name: String,
+    pub picked: bool,
+    /// A transition across it: where it starts and how long it lasts.
+    pub fade: Option<(f64, f64)>,
 }
 
 pub(crate) struct Block {
@@ -38,6 +51,8 @@ pub(crate) enum Hit {
     Seek(f64),
     Open(ShotRef),
     Pick(String),
+    /// A join, by the clip after it.
+    PickJoin(String),
 }
 
 const HEAD: f32 = 36.0;
@@ -187,6 +202,45 @@ pub(crate) fn show(
                     (None, Some(s)) => Some(Hit::Open(s)),
                     (None, None) => hit,
                 };
+            }
+        }
+        for (i, j) in lane.joins.iter().enumerate() {
+            if let Some((start, length)) = j.fade {
+                let band = Rect::from_min_max(
+                    pos2(x_of(start), row.top() + 4.0),
+                    pos2(x_of(start + length), row.bottom() - 4.0),
+                )
+                .intersect(span);
+                p.rect_filled(band, 2.0, theme::TUNGSTEN.gamma_multiply(0.35));
+            }
+            let x = x_of(j.at);
+            let mark = Rect::from_center_size(pos2(x, row.bottom() - 8.0), vec2(14.0, 16.0));
+            let resp = ui.interact(mark, id.with((&lane.name, "join", i)), Sense::click());
+            resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Join {}", j.name))
+            });
+            let colour = if j.picked || resp.hovered() {
+                theme::TUNGSTEN
+            } else {
+                theme::PAPER
+            };
+            let c = mark.center();
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(c.x, c.y - 6.0),
+                    pos2(c.x + 5.0, c.y),
+                    pos2(c.x, c.y + 6.0),
+                    pos2(c.x - 5.0, c.y),
+                ],
+                colour,
+                Stroke::new(1.0, theme::LINE),
+            ));
+            let resp = resp.on_hover_text(match j.fade {
+                Some((_, l)) => format!("{}: dissolve, {l:.2} s", j.name),
+                None => format!("{}: a straight cut", j.name),
+            });
+            if resp.clicked() {
+                hit = Some(Hit::PickJoin(j.id.clone()));
             }
         }
         y += h + GAP;

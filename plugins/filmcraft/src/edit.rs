@@ -12,6 +12,57 @@ use crate::editor::{self, Editor};
 
 const TICKS_PER_SECOND: f64 = 254_016_000_000.0;
 
+/// Undo steps of ours, for the transition into `clip` as it is when the undo runs.
+const INTO_OFF: &str = "shotline.removeTransitionInto";
+const INTO_SET: &str = "shotline.setTransitionInto";
+
+/// Our steps as FilmCraft commands, against the project as it is now. One whose transition is
+/// gone already is left out.
+fn resolve(e: &Editor, film: &Path, project: &Path, steps: &[Value]) -> Result<Vec<Value>, String> {
+    if !steps
+        .iter()
+        .any(|s| s["id"] == INTO_OFF || s["id"] == INTO_SET)
+    {
+        return Ok(steps.to_vec());
+    }
+    let snap = snapshot(e, film, project)?;
+    let into = |clip: &Value| -> Option<Value> {
+        let items = snap["project"]["items"].as_object()?;
+        items.values().find_map(|i| {
+            let seq = &i["kind"]["Sequence"];
+            seq["video_tracks"].as_array()?.iter().find_map(|t| {
+                t["transitions"]
+                    .as_array()?
+                    .iter()
+                    .find(|x| x["to"] == *clip)
+                    .map(|x| x["id"].clone())
+            })
+        })
+    };
+    let mut out = vec![];
+    for s in steps {
+        let p = &s["params"];
+        if s["id"] == INTO_OFF {
+            if let Some(id) = into(&p["clip"]) {
+                out.push(step(
+                    "sequence.removeTransition",
+                    json!({"transitions": [id]}),
+                ));
+            }
+        } else if s["id"] == INTO_SET {
+            if let Some(id) = into(&p["clip"]) {
+                out.push(step(
+                    "sequence.setTransition",
+                    json!({"transition": id, "duration": p["duration"], "start": p["start"]}),
+                ));
+            }
+        } else {
+            out.push(s.clone());
+        }
+    }
+    Ok(out)
+}
+
 fn ticks(seconds: f64) -> i64 {
     (seconds * TICKS_PER_SECOND).round() as i64
 }
@@ -41,6 +92,9 @@ struct Found {
     sequence: u64,
     clip: Value,
     track: u64,
+    /// The video track's transitions.
+    transitions: Vec<Value>,
+    fps: f64,
     /// The sound that goes with it: same item, same place, on an audio track.
     sound: Option<(Value, u64)>,
 }
@@ -76,6 +130,14 @@ fn find(snap: &Value, sequence: &str, clip: &str) -> Result<Found, String> {
             sequence,
             clip: c.clone(),
             track: t["id"].as_u64().ok_or("a track without an id")?,
+            transitions: t["transitions"].as_array().cloned().unwrap_or_default(),
+            fps: {
+                let r = &seq["settings"]["frame_rate"];
+                match (r["num"].as_f64(), r["den"].as_f64()) {
+                    (Some(n), Some(d)) if d > 0.0 => n / d,
+                    _ => 24.0,
+                }
+            },
             sound,
         });
     }
@@ -169,7 +231,7 @@ pub fn edit(ask: &EditParams) -> Result<Edited, String> {
     let undo = match &ask.change {
         Change::Undo { steps } => {
             let steps = steps.as_array().ok_or("nothing to undo")?;
-            e.batch(steps)?;
+            e.batch(&resolve(&e, &ask.film, &ask.file, steps)?)?;
             None
         }
         change => Some(Value::Array(apply(&e, ask, change)?)),
@@ -228,8 +290,63 @@ fn apply(e: &Editor, ask: &EditParams, change: &Change) -> Result<Vec<Value>, St
             e.batch(&[open.clone(), step("lumetri.applyMatch", p)])?;
             colour_undo(e, ask, &f, clip, open)
         }
+        Change::Crossfade { frames } => crossfade(e, &f, clip, *frames, open),
         Change::Undo { .. } => unreachable!("undo has no snapshot"),
     }
+}
+
+/// Puts back a transition as it was, into `clip`.
+fn transition_back(clip: u64, old: &Value, fps: f64) -> Value {
+    let align = match old["align"].as_str().unwrap_or("") {
+        "StartAtCut" => "start",
+        "EndAtCut" => "end",
+        _ => "center",
+    };
+    let frames = (old["duration"].as_f64().unwrap_or(0.0) / TICKS_PER_SECOND * fps).round();
+    step(
+        "sequence.applyVideoTransition",
+        json!({"clip": clip, "edge": "in", "effect": old["effect"]["effect"],
+               "frames": frames as i64, "align": align}),
+    )
+}
+
+fn crossfade(
+    e: &Editor,
+    f: &Found,
+    clip: u64,
+    frames: u32,
+    open: Value,
+) -> Result<Vec<Value>, String> {
+    let old = f
+        .transitions
+        .iter()
+        .find(|t| t["to"].as_u64() == Some(clip))
+        .cloned();
+    // A transition gets a new id each time one is put over it, so undo names it by its clip.
+    let remove = |id: &Value| step("sequence.removeTransition", json!({"transitions": [id]}));
+    let remove_into = step(INTO_OFF, json!({"clip": clip}));
+    if frames == 0 {
+        let old = old.ok_or("there's no transition into it")?;
+        e.batch(&[open.clone(), remove(&old["id"])])?;
+        return Ok(vec![open, transition_back(clip, &old, f.fps)]);
+    }
+    let put = step(
+        "sequence.applyVideoTransition",
+        json!({"clip": clip, "edge": "in", "effect": "cross_dissolve", "frames": frames,
+               "align": "center"}),
+    );
+    e.batch(&[open.clone(), put])?;
+    Ok(match old {
+        None => vec![open, remove_into],
+        Some(old) if old["effect"]["effect"] == "cross_dissolve" => vec![
+            open,
+            step(
+                INTO_SET,
+                json!({"clip": clip, "duration": old["duration"], "start": old["start"]}),
+            ),
+        ],
+        Some(old) => vec![open, remove_into, transition_back(clip, &old, f.fps)],
+    })
 }
 
 fn colour_undo(
