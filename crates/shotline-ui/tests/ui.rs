@@ -2980,7 +2980,10 @@ fn a_take_from_pieces() {
         .click();
     wait(&mut h, 0.2);
     h.get_by_label("Add piece").click();
-    wait(&mut h, 0.1);
+    // Its length comes from probing the file on another thread.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("2. #3  0.00–1.00s")
+        .is_some()));
     h.get_by_label_contains("2. #3  0.00–1.00s").click();
     wait(&mut h, 0.1);
     h.get_by_label("changing piece 2");
