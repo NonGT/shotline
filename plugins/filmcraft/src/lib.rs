@@ -414,6 +414,50 @@ struct Proj {
     name: String,
     root: Bin,
     items: BTreeMap<String, Item>,
+    /// LUTs put on clips, copied in whole; clips name them "lib:<id>".
+    #[serde(default)]
+    luts: Vec<Lut>,
+}
+
+#[derive(Deserialize, Default)]
+struct Lut {
+    id: String,
+    #[serde(default)]
+    source_path: Option<PathBuf>,
+    #[serde(default)]
+    format: String,
+    #[serde(default)]
+    text: String,
+}
+
+impl Lut {
+    /// A file with it in: where it came from while that's unchanged, otherwise a copy.
+    fn file(&self) -> Option<PathBuf> {
+        if self.text.is_empty() {
+            return None;
+        }
+        if let Some(p) = &self.source_path
+            && std::fs::read_to_string(p).is_ok_and(|t| t == self.text)
+        {
+            return Some(p.clone());
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.text.hash(&mut h);
+        let ext = if self.format.is_empty() {
+            "cube"
+        } else {
+            &self.format
+        };
+        let out = std::env::temp_dir()
+            .join("shotline-filmcraft-luts")
+            .join(format!("{:016x}.{ext}", h.finish()));
+        if !out.is_file() {
+            std::fs::create_dir_all(out.parent()?).ok()?;
+            std::fs::write(&out, &self.text).ok()?;
+        }
+        Some(out)
+    }
 }
 
 #[derive(Deserialize)]
@@ -484,6 +528,42 @@ struct RawClip {
     speed: f64,
     #[serde(default = "yes")]
     enabled: bool,
+    #[serde(default)]
+    effects: Vec<Value>,
+}
+
+/// Lumetri's input and look LUTs as files, through the project's own copies; any other name
+/// as it is.
+fn luts(effects: &[Value], dir: &Path, table: &[Lut]) -> Vec<PathBuf> {
+    effects
+        .iter()
+        .filter(|e| e["effect"] == "lumetri" && e["enabled"] != false)
+        .flat_map(|e| {
+            ["input_lut", "look_lut"].map(|k| {
+                e["params"][k]["value"]["Text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+        })
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            if let Some(f) = l
+                .strip_prefix("lib:")
+                .and_then(|id| table.iter().find(|t| t.id == id))
+                .and_then(Lut::file)
+            {
+                return f;
+            }
+            // One letter before a colon is a drive.
+            let named = l.split_once(':').is_some_and(|(a, _)| a.len() > 1);
+            if named && !Path::new(&l).is_absolute() {
+                PathBuf::from(l)
+            } else {
+                dir.join(l)
+            }
+        })
+        .collect()
 }
 
 fn yes() -> bool {
@@ -570,6 +650,7 @@ pub fn read_edit(path: &Path) -> std::result::Result<EditInfo, String> {
                     from: secs(c.source_in),
                     speed: c.speed,
                     enabled: c.enabled,
+                    luts: luts(&c.effects, dir, &p.luts),
                 })
                 .collect(),
         };
@@ -639,6 +720,33 @@ fn media_file(items: &BTreeMap<String, Item>, id: u64, dir: &Path) -> Option<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clip_s_luts_are_files_by_the_project() {
+        let v = |t: &str| json!({"value": {"Text": t}});
+        let effects = vec![
+            json!({"effect": "motion", "params": {}}),
+            json!({"effect": "lumetri", "params": {
+                "input_lut": v("luts/match.cube"), "look_lut": v("lib:lut14")}}),
+            json!({"effect": "lumetri", "enabled": false, "params": {"input_lut": v("/off.cube")}}),
+        ];
+        assert_eq!(
+            luts(&effects, Path::new("/film/shared"), &[]),
+            [
+                PathBuf::from("/film/shared/luts/match.cube"),
+                PathBuf::from("lib:lut14")
+            ]
+        );
+        // The project's own copy, written out since where it came from is gone.
+        let table = [Lut {
+            id: "lut14".into(),
+            source_path: Some("/gone.cube".into()),
+            format: "cube".into(),
+            text: "LUT_3D_SIZE 2\n".into(),
+        }];
+        let got = luts(&effects, Path::new("/film/shared"), &table);
+        assert_eq!(std::fs::read_to_string(&got[1]).unwrap(), "LUT_3D_SIZE 2\n");
+    }
     use shotline_plugin::protocol::Change;
 
     const T: i64 = 254_016_000_000;
@@ -730,6 +838,7 @@ mod tests {
         assert_eq!(
             v1.clips[0],
             ClipInfo {
+                luts: vec![],
                 id: "29".into(),
                 name: "01-010#1".into(),
                 file: Some(take_file()),
@@ -1069,11 +1178,17 @@ mod tests {
         std::fs::write(&cube, text).unwrap();
         let (red, _) = at(0.0);
         let done = FilmCraft
-            .edit(&ask(&red.id, Change::Lut { file: Some(cube) }))
+            .edit(&ask(
+                &red.id,
+                Change::Lut {
+                    file: Some(cube.clone()),
+                },
+            ))
             .await
             .unwrap();
         assert!(done.saved);
         assert!(lumetri_on(&red.id));
+        assert_eq!(at(0.0).0.luts, std::slice::from_ref(&cube));
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         assert!(!lumetri_on(&red.id));
         let (blue, _) = at(3.0);
@@ -1142,6 +1257,7 @@ mod tests {
             .unwrap();
         assert!(ok.success());
         let piece = |start: f64| ClipInfo {
+            luts: vec![],
             id: String::new(),
             name: "01-010#1".into(),
             file: Some(clip.clone()),

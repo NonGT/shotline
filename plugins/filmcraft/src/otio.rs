@@ -150,6 +150,7 @@ mod tests {
     #[test]
     fn a_cut_with_gaps_and_music() {
         let c = |name: &str, file: Option<&str>, start: f64, length: f64, from: f64| ClipInfo {
+            luts: vec![],
             id: String::new(),
             name: name.into(),
             file: file.map(Into::into),

@@ -455,10 +455,11 @@ an editor project, its sequence is the film's cut: the Cut page shows it in plac
 (the project shotline made first, with a picker when there's more than one sequence). shotline's
 cut, with its joins, music and render, only shows while there's no editor project, and is what
 starts one. `timeline.toml` stays as it was, so taking the project away brings it back. A clip from a take's
-job folder is named by its take. A sequence plays from a preview
-ffmpeg makes into `.shotline/cache/sequences/`: the top enabled clip at each moment and the audio
-tracks mixed, without effects or transitions. The page watches `shared/` and reads it again when
-the editor saves.
+job folder is named by its take. The Cut page's player shows a preview ffmpeg makes into
+`.shotline/cache/sequences/` whenever the sequence changes: the top enabled clip at each moment
+with its LUT files and dissolves, the audio tracks mixed. Other effects, Lumetri's sliders and
+built-in LUTs are left out; Render has the editor make the real thing. The page watches `shared/`
+and reads it again when the editor saves.
 
 What's sent: "Open in FilmCraft" on the Cut page opens the film's project, or makes it when
 there's none. shotline sends its cut (the selected takes back to back on V1, their sound on A1,

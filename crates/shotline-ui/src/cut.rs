@@ -731,11 +731,15 @@ impl App {
     fn preview_of(&self, seq: &SequenceInfo) -> PathBuf {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
+        // Up when previews are made differently, so old ones aren't shown.
+        2u32.hash(&mut h);
         serde_json::to_string(seq).unwrap_or_default().hash(&mut h);
         for c in seq.video.iter().chain(&seq.audio).flat_map(|t| &t.clips) {
-            if let Some(m) = c.file.as_ref().and_then(|f| f.metadata().ok()) {
-                m.len().hash(&mut h);
-                m.modified().ok().hash(&mut h);
+            for f in c.file.iter().chain(&c.luts) {
+                if let Ok(m) = f.metadata() {
+                    m.len().hash(&mut h);
+                    m.modified().ok().hash(&mut h);
+                }
             }
         }
         self.project
@@ -1287,23 +1291,12 @@ fn left_out(seq: &SequenceInfo) -> Vec<String> {
 
 /// Lowest video track first, so higher ones cover it; tracks and clips turned off left out.
 fn to_media(seq: &SequenceInfo) -> shotline_media::sequence::Sequence {
-    use shotline_media::sequence::{Piece, Sequence};
-    let pieces = |tracks: &[TrackInfo]| -> Vec<Piece> {
+    use shotline_media::sequence::Sequence;
+    let pieces = |tracks: &[TrackInfo], video: bool| {
         tracks
             .iter()
             .filter(|t| t.enabled)
-            .flat_map(|t| &t.clips)
-            .filter(|c| c.enabled)
-            .filter_map(|c| {
-                Some(Piece {
-                    path: c.file.clone()?,
-                    label: c.name.clone(),
-                    start: c.start,
-                    length: c.length,
-                    from: c.from,
-                    speed: c.speed,
-                })
-            })
+            .flat_map(|t| track_pieces(t, video))
             .collect()
     };
     Sequence {
@@ -1311,9 +1304,67 @@ fn to_media(seq: &SequenceInfo) -> shotline_media::sequence::Sequence {
         height: seq.height,
         fps: seq.fps,
         length: seq.length(),
-        video: pieces(&seq.video),
-        audio: pieces(&seq.audio),
+        video: pieces(&seq.video, true),
+        audio: pieces(&seq.audio, false),
     }
+}
+
+/// A track's clips to preview. On video, each dissolve runs the clip it leads into back to
+/// where it starts and fades it in over the one before, which runs on to where it ends; with
+/// nothing before or after, it fades from or to what's under it.
+fn track_pieces(t: &TrackInfo, video: bool) -> Vec<shotline_media::sequence::Piece> {
+    use shotline_media::sequence::Piece;
+    let mut ps: Vec<(&str, Piece)> = t
+        .clips
+        .iter()
+        .filter(|c| c.enabled)
+        .filter_map(|c| {
+            Some((
+                c.id.as_str(),
+                Piece {
+                    path: c.file.clone()?,
+                    label: c.name.clone(),
+                    start: c.start,
+                    length: c.length,
+                    from: c.from,
+                    speed: c.speed,
+                    luts: if video { c.luts.clone() } else { vec![] },
+                    ..Piece::default()
+                },
+            ))
+        })
+        .collect();
+    if !video {
+        return ps.into_iter().map(|(_, p)| p).collect();
+    }
+    let at = |ps: &[(&str, Piece)], id: &str| {
+        (!id.is_empty())
+            .then(|| ps.iter().position(|(i, _)| *i == id))
+            .flatten()
+    };
+    for tr in t.transitions.iter().filter(|tr| tr.length > 0.0) {
+        let (a, b) = (at(&ps, &tr.from), at(&ps, &tr.to));
+        let end = tr.start + tr.length;
+        if let Some(a) = a {
+            let p = &mut ps[a].1;
+            p.length = p.length.max(end - p.start);
+            if b.is_none() {
+                p.fade_out = Some((tr.start, tr.length));
+            }
+        }
+        if let Some(b) = b {
+            let p = &mut ps[b].1;
+            // As far back as the file goes.
+            let early = (p.start - tr.start)
+                .max(0.0)
+                .min(p.from / p.speed.max(1e-9));
+            p.start -= early;
+            p.from -= early * p.speed;
+            p.length += early;
+            p.fade_in = Some((tr.start, tr.length));
+        }
+    }
+    ps.into_iter().map(|(_, p)| p).collect()
 }
 
 fn heading(ui: &mut egui::Ui, text: &str) {
@@ -1338,4 +1389,65 @@ fn is_video(f: &Path) -> bool {
         ["mp4", "mov", "m4v", "webm", "mkv", "avi", "mxf"]
             .contains(&x.to_ascii_lowercase().as_str())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shotline_core::protocol::TransitionInfo;
+
+    fn clip(id: &str, start: f64, from: f64) -> ClipInfo {
+        ClipInfo {
+            id: id.into(),
+            name: id.into(),
+            file: Some(format!("/{id}.mp4").into()),
+            start,
+            length: 2.0,
+            from,
+            speed: 1.0,
+            enabled: true,
+            ..ClipInfo::default()
+        }
+    }
+
+    fn dissolve(from: &str, to: &str, start: f64, length: f64) -> TransitionInfo {
+        TransitionInfo {
+            id: "t".into(),
+            name: "cross_dissolve".into(),
+            from: from.into(),
+            to: to.into(),
+            start,
+            length,
+        }
+    }
+
+    #[test]
+    fn a_dissolve_overlaps_the_clips_around_it() {
+        let t = TrackInfo {
+            clips: vec![
+                clip("1", 0.0, 0.0),
+                clip("2", 2.0, 1.0),
+                clip("3", 4.0, 0.2),
+            ],
+            transitions: vec![
+                dissolve("1", "2", 1.5, 1.0),
+                // Only 0.2 s of the file before where it's cut in.
+                dissolve("2", "3", 3.5, 1.0),
+                dissolve("3", "", 5.5, 0.5),
+            ],
+            enabled: true,
+            ..TrackInfo::default()
+        };
+        let ps = track_pieces(&t, true);
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let (one, two, three) = (&ps[0], &ps[1], &ps[2]);
+        assert!(close(one.length, 2.5) && one.fade_in.is_none() && one.fade_out.is_none());
+        assert!(close(two.start, 1.5) && close(two.from, 0.5) && close(two.length, 3.0));
+        assert_eq!(two.fade_in, Some((1.5, 1.0)));
+        assert!(close(three.start, 3.8) && close(three.from, 0.0) && close(three.length, 2.2));
+        assert_eq!(three.fade_in, Some((3.5, 1.0)));
+        assert_eq!(three.fade_out, Some((5.5, 0.5)));
+        // Sound is left as it is.
+        assert!(close(track_pieces(&t, false)[1].start, 2.0));
+    }
 }

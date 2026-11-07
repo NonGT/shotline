@@ -421,6 +421,7 @@ fn a_sequence_made_into_a_preview() {
         length,
         from,
         speed: 1.0,
+        ..Piece::default()
     };
     let seq = Sequence {
         width: 320,
@@ -451,6 +452,58 @@ fn a_sequence_made_into_a_preview() {
     assert!(black.iter().all(|c| *c < 20.0), "a gap is black {black:?}");
     let again = at(1.75);
     assert!(again[0] > again[2], "red again {again:?}");
+}
+
+#[test]
+fn a_preview_has_luts_and_dissolves() {
+    use shotline_media::sequence::{Piece, Sequence};
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let red = clip(dir.path(), "red.mp4", RED, false);
+    let blue = clip(dir.path(), "blue.mp4", BLUE, false);
+    // Everything to green, somewhere a filter graph has to be careful with.
+    let cube = dir.path().join("my luts, v1 [x]/green's.cube");
+    std::fs::create_dir_all(cube.parent().unwrap()).unwrap();
+    std::fs::write(&cube, format!("LUT_3D_SIZE 2\n{}", "0 1 0\n".repeat(8))).unwrap();
+    let seq = Sequence {
+        width: 320,
+        height: 180,
+        fps: 24.0,
+        length: 1.5,
+        // Green from the LUT, then blue dissolving in over its last half second.
+        video: vec![
+            Piece {
+                path: red.clone(),
+                label: "red".into(),
+                length: 1.0,
+                speed: 1.0,
+                luts: vec![cube.clone(), dir.path().join("gone.cube")],
+                ..Piece::default()
+            },
+            Piece {
+                path: blue.clone(),
+                label: "blue".into(),
+                start: 0.5,
+                length: 1.0,
+                speed: 1.0,
+                fade_in: Some((0.5, 0.5)),
+                ..Piece::default()
+            },
+        ],
+        audio: vec![],
+    };
+    let out = dir.path().join("seq.mp4");
+    let skipped = ff.sequence_preview(&seq, &out).unwrap();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    let frames: Vec<Vec<u8>> = ff.frames(&out, 320, 180, "24/1", None).unwrap().collect();
+    let at = |t: f64| mean(&frames[(t * 24.0) as usize]);
+    let (g, mix, b) = (at(0.2), at(0.75), at(1.25));
+    assert!(g[1] > 0.6 && g[0] < 0.25 && g[2] < 0.25, "green {g:?}");
+    assert!(
+        mix[1] > 0.45 && mix[1] < 0.85 && mix[2] > 0.15,
+        "half way {mix:?}"
+    );
+    assert!(b[2] > b[1] && b[1] < 0.4, "blue {b:?}");
 }
 
 #[test]

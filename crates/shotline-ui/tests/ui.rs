@@ -1859,6 +1859,7 @@ fn another_take(p: &Project) -> (PathBuf, PathBuf) {
 
 fn editor_clip(id: &str, file: &Path, start: f64) -> ClipInfo {
     ClipInfo {
+        luts: vec![],
         id: id.into(),
         name: "out.mp4".into(),
         file: Some(file.into()),

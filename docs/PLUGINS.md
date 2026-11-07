@@ -240,7 +240,9 @@ nested sequence) has no `file`; one in a take's job folder shows as that take. A
 can't be read comes back with an `error` and no sequences, so the others still show. shotline
 asks again when the film is read again or a file in `shared/` (or a project's own file)
 changes. `app` names the editor for people, as in the Cut page's "Open in FilmCraft". `id` is the
-editor's own name for a clip, for `edit`; leave it out if the editor can't be told to change one. A
+editor's own name for a clip, for `edit`; leave it out if the editor can't be told to change one.
+A clip's `luts` lists the LUTs the editor puts on it, in order: .cube files, or the editor's own
+name for a built-in one (the preview leaves those out). A
 `warnings` list next to `edits` (strings) shows on the Cut page as is, for problems on the
 editor's side the user has to fix, like a filmcraft-cli that doesn't match the app's version.
 

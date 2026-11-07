@@ -493,6 +493,10 @@ pub struct ClipInfo {
     pub from: f64,
     pub speed: f64,
     pub enabled: bool,
+    /// LUTs the editor puts on it, in the order it applies them: .cube files, or the editor's
+    /// own names for ones it has built in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub luts: Vec<PathBuf>,
 }
 
 /// Params of `edit`: one change to a clip of an editor's sequence.
