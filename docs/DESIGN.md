@@ -451,8 +451,10 @@ into it would be lost on the next save. Changes go through the editor's own comm
 handed to the editor (`cut.otio`) sit next to it.
 
 What's read: `sequences` gives each project's sequences, tracks and clips in seconds. Once there's
-an editor project, its sequence is the film's cut: the Cut page opens on it (the project shotline
-made first), drawn the same way as shotline's own cut, which is still there to switch to. A clip from a take's
+an editor project, its sequence is the film's cut: the Cut page shows it in place of shotline's own
+(the project shotline made first, with a picker when there's more than one sequence). shotline's
+cut, with its joins, music and render, only shows while there's no editor project, and is what
+starts one. `timeline.toml` stays as it was, so taking the project away brings it back. A clip from a take's
 job folder is named by its take. A sequence plays from a preview
 ffmpeg makes into `.shotline/cache/sequences/`: the top enabled clip at each moment and the audio
 tracks mixed, without effects or transitions. The page watches `shared/` and reads it again when

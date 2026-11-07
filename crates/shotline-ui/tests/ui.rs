@@ -1795,16 +1795,14 @@ fn an_editor_s_sequence_on_the_cut_page() {
     assert!(wait_for(&mut h, |h| h
         .query_by_label("broken.fcproj can't be read")
         .is_some()));
-    h.get_by_label("edit.fcproj · Main edit").click();
-    h.run();
-    h.get_by_label_contains("shared/edit.fcproj · 720 × 1280 · 24 fps");
+    // The editor's cut is the film's cut now: shown in place of shotline's, with nothing to
+    // switch to while it's the only sequence.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("shared/edit.fcproj · 720 × 1280 · 24 fps")
+        .is_some()));
     h.get_by_role_and_label(Role::Button, "rain.wav");
-    // Back and forth between the two.
-    h.get_by_label("This film's cut").click();
-    h.run();
-    assert!(h.query_by_label("rain.wav").is_none());
-    h.get_by_label("edit.fcproj · Main edit").click();
-    h.run();
+    assert!(h.query_by_label("This film's cut").is_none());
+    assert!(h.query_by_label("edit.fcproj · Main edit").is_none());
     // Saved again in the editor, it's read again without asking.
     let mut edits = edits;
     edits[1].sequences[0].audio[0]
@@ -1936,10 +1934,6 @@ fn on_main_edit_with(
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Main edit")
-        .is_some()));
-    h.get_by_label("Main edit").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::Button, take)
         .is_some()));
@@ -2152,7 +2146,7 @@ fn matches_a_join_with_shotlines_lut() {
 }
 
 #[test]
-fn opens_on_the_editor_cut_shotline_made() {
+fn shows_the_editor_cut_shotline_made_first() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     let seq = |name: &str| SequenceInfo {
@@ -2197,13 +2191,14 @@ fn opens_on_the_editor_cut_shotline_made() {
     assert!(wait_for(&mut h, |h| h
         .query_by_label_contains(shown)
         .is_some()));
-    // Once the film's own is asked for, it stays, even when the editor saves again.
-    h.get_by_label("This film's cut").click();
+    assert!(h.query_by_label("This film's cut").is_none());
+    // Two sequences to pick from; the pick stays when the editor saves again.
+    h.get_by_label("other.fcproj · Someone's").click();
     h.run();
-    assert!(h.query_by_label_contains(shown).is_none());
+    h.get_by_label_contains("shared/other.fcproj · 720 × 1280");
     write();
     wait(&mut h, 1.5);
-    assert!(h.query_by_label_contains(shown).is_none());
+    h.get_by_label_contains("shared/other.fcproj · 720 × 1280");
 }
 
 #[test]
@@ -2250,7 +2245,7 @@ fn starts_an_editor_project_from_the_cut() {
     h.get_by_label("Cut").click();
     wait(&mut h, 0.1);
     // No project yet: the button is there anyway, and makes one from this cut.
-    h.get_by_label_contains("Its sequences show here once it's saved");
+    h.get_by_label_contains("the editor's cut is the film's cut");
     h.get_by_label("Open in FilmCraft").click();
     let opened = p.root.join("opened-by-filmcraft.json");
     assert!(wait_for(&mut h, |_| opened.is_file()));
@@ -3829,10 +3824,8 @@ fn plays_an_editor_sequence() {
     h.run();
     h.get_by_label("Cut").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Main edit")
+        .query_by_label("Play the sequence")
         .is_some()));
-    h.get_by_label("Main edit").click();
-    h.run();
 
     // A preview is made first, then it plays.
     h.get_by_label("Play the sequence").click();

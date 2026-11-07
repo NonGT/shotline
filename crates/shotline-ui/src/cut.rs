@@ -38,6 +38,17 @@ impl App {
                         self.edit_lanes(ui, &file, &seq);
                         return;
                     }
+                    // Not shotline's cut for a moment while the editor's is still being read.
+                    if self.edits.0.is_empty()
+                        && self.edits_asked.is_some()
+                        && self.plugins.iter().any(|d| d.editor)
+                    {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.weak("reading the editor's project…");
+                        });
+                        return;
+                    }
                     if self.film.cut.is_empty() {
                         hint(ui, "No shots yet. Add some in Shots.");
                         return;
@@ -356,35 +367,29 @@ impl App {
             ui.add_space(6.0);
             return;
         }
-        // With an editor project, its cut is the film's cut: shown first, until the film's own
-        // is asked for.
-        if self.cut_view.is_none()
-            && !self.own_cut_asked
-            && let Some(main) = main_sequence(&self.project.root, edits)
-        {
-            self.cut_view = Some(main);
+        // With an editor project, its cut is the film's cut; shotline's own only starts it.
+        let main = main_sequence(&self.project.root, edits);
+        if self.edit_sequence().is_none() {
+            self.cut_view = main.clone();
         }
         let edits = &self.edits.0;
         let several = edits.len() > 1;
+        let sequences = edits.iter().map(|e| e.sequences.len()).sum::<usize>();
         let now = self.edit_sequence().map(|(f, s)| (f, s.name));
         let mut pick = None;
         let mut open = None;
         ui.horizontal_wrapped(|ui| {
-            if !edits.is_empty() {
-                if ui
-                    .selectable_label(now.is_none(), "This film's cut")
-                    .on_hover_text("the selected takes in shot order, as shotline renders them")
-                    .clicked()
-                {
-                    pick = Some(None);
-                }
-                ui.separator();
-            }
             for e in edits {
                 let file = e.file.file_name().unwrap_or_default().to_string_lossy();
                 if let Some(why) = &e.error {
                     ui.label(RichText::new(format!("{file} can't be read")).color(theme::FLAG))
                         .on_hover_text(why);
+                    continue;
+                }
+                if e.sequences.is_empty() {
+                    ui.weak(format!("{file} has no sequences"));
+                }
+                if sequences < 2 {
                     continue;
                 }
                 for seq in &e.sequences {
@@ -401,14 +406,9 @@ impl App {
                         .on_hover_text(format!("{} in {}", seq.name, self.project.rel(&e.file)))
                         .clicked()
                     {
-                        pick = Some(Some((e.file.clone(), seq.name.clone())));
+                        pick = Some((e.file.clone(), seq.name.clone()));
                     }
                 }
-                if e.sequences.is_empty() {
-                    ui.weak(format!("{file} has no sequences"));
-                }
-            }
-            if !edits.is_empty() {
                 ui.separator();
             }
             let opening = self.edit_opening.is_some();
@@ -441,10 +441,9 @@ impl App {
             }
         });
         if let Some(p) = pick {
-            self.own_cut_asked = p.is_none();
-            self.cut_view = p;
+            self.cut_view = Some(p);
         }
-        let none_yet = edits.is_empty();
+        let none_yet = main.is_none();
         if let Some((plugin, app, shown)) = open {
             self.open_in_editor(ui.ctx(), plugin, app, shown);
         }
@@ -452,7 +451,8 @@ impl App {
             ui.add_space(4.0);
             hint(
                 ui,
-                "Its sequences show here once it's saved in the film's shared/ folder.",
+                "Once it's saved in the film's shared/ folder, the editor's cut is the film's \
+                 cut: it shows here in place of this one, and both change it.",
             );
         }
         ui.add_space(10.0);
