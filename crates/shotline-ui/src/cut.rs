@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
-use shotline_core::protocol::{ClipInfo, OpenParams, SequenceInfo, TakeFile, TrackInfo};
+use shotline_core::protocol::{
+    ClipInfo, ExportParams, OpenParams, SequenceInfo, TakeFile, TrackInfo,
+};
 use shotline_core::{MatchAt, ShotRef, Transition};
 
 use crate::edit::Action;
@@ -547,6 +549,36 @@ impl App {
         );
         self.take_sync(ui, &app, seq);
         let out = self.preview_of(seq);
+        let full = full_of(&out);
+        let making = self.full_making.as_ref().is_some_and(|(f, _)| *f == full);
+        let failed = self.full_failed.as_ref().filter(|(f, _)| *f == full);
+        ui.horizontal(|ui| {
+            // Always there, so the page doesn't move when it says something.
+            // A spinner is as tall as a button.
+            ui.set_min_height(ui.spacing().interact_size.y);
+            if full.is_file() {
+                ui.weak(format!("Preview rendered by {app}"));
+            } else if out.is_file() {
+                ui.weak("Quick preview: LUTs and dissolves, no other effects")
+                    .on_hover_text(format!(
+                        "{app} renders the whole thing once the sequence stays the same for a \
+                         few seconds while shotline is in front"
+                    ));
+            }
+            if making {
+                ui.spinner();
+                ui.weak(format!("{app} is rendering the full preview…"));
+            } else if let Some((_, e)) = failed {
+                ui.label(
+                    RichText::new(format!(
+                        "{app} couldn't render a preview: {}",
+                        short(e, 160)
+                    ))
+                    .color(theme::FLAG),
+                )
+                .on_hover_text(e.as_str());
+            }
+        });
         if let Some((_, skipped)) = self.seq_playing.as_ref().filter(|(p, _)| *p == out)
             && !skipped.is_empty()
         {
@@ -599,8 +631,12 @@ impl App {
         let title = seq_title(file, seq);
         // The player shows a preview: made once for what the sequence is now, and in the
         // meantime the one before, if any.
+        let full = full_of(&out);
+        self.full_preview(&ctx, &plugin_of(&self.edits.0, file), file, seq, &out);
         let mut note = None;
-        if out.is_file() {
+        if full.is_file() {
+            self.cut_deck_on(&title, std::slice::from_ref(&full));
+        } else if out.is_file() {
             self.cut_deck_on(&title, std::slice::from_ref(&out));
         } else {
             let failed = self
@@ -767,6 +803,79 @@ impl App {
             *slot.lock().unwrap() = Some(r);
             ctx.request_repaint();
         });
+    }
+
+    /// Has the editor render the sequence as the player's preview, once it has stayed the same
+    /// for a few seconds while shotline is in front (so not while it's being worked on in the
+    /// editor), and nothing else is asking the editor for something.
+    fn full_preview(
+        &mut self,
+        ctx: &egui::Context,
+        plugin: &str,
+        file: &Path,
+        seq: &SequenceInfo,
+        out: &Path,
+    ) {
+        let full = full_of(out);
+        let done = self
+            .full_making
+            .as_ref()
+            .and_then(|(f, slot)| Some((f.clone(), slot.lock().unwrap().take()?)));
+        if let Some((f, r)) = done {
+            self.full_making = None;
+            match r {
+                Ok(()) => prune(f.parent().unwrap_or(Path::new(".")), &[&f, out]),
+                Err(e) => self.full_failed = Some((f, e)),
+            }
+        }
+        let now = std::time::Instant::now();
+        if self.seq_seen.as_ref().is_none_or(|(f, _)| *f != full) {
+            self.seq_seen = Some((full.clone(), now));
+        }
+        let quiet = self
+            .seq_seen
+            .as_ref()
+            .map(|(_, t)| now - *t)
+            .unwrap_or_default();
+        let wanted = !full.is_file()
+            && !plugin.is_empty()
+            && seq.length() > 0.0
+            && self.full_failed.as_ref().is_none_or(|(f, _)| *f != full);
+        let free = self.host.is_some()
+            && self.full_making.is_none()
+            && self.edit_rendering.is_none()
+            && self.changing.is_none();
+        if !wanted || !free || !ctx.input(|i| i.focused) {
+            return;
+        }
+        if quiet < FULL_AFTER {
+            ctx.request_repaint_after(FULL_AFTER - quiet);
+            return;
+        }
+        let part = full.with_extension("part.mp4");
+        let ask = ExportParams {
+            film: self.project.root.clone(),
+            file: file.to_path_buf(),
+            sequence: seq.name.clone(),
+            out: part.clone(),
+        };
+        let slot: FullSlot = Arc::default();
+        let (s, host, p, ctx, to) = (
+            slot.clone(),
+            self.host.clone().expect("checked"),
+            plugin.to_string(),
+            ctx.clone(),
+            full.clone(),
+        );
+        std::thread::spawn(move || {
+            let r = host
+                .export_edit(&p, &ask)
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|_| std::fs::rename(&part, &to).map_err(|e| e.to_string()));
+            *s.lock().unwrap() = Some(r);
+            ctx.request_repaint();
+        });
+        self.full_making = Some((full, slot));
     }
 
     /// Notes what a preview that's just been made left out; the player picks it up.
@@ -1170,6 +1279,47 @@ fn main_sequence(
         .find(|e| !e.plugin.is_empty() && e.file.starts_with(film.join("shared").join(&e.plugin)));
     let e = own.or_else(|| readable().next())?;
     Some((e.file.clone(), e.sequences[0].name.clone()))
+}
+
+pub(crate) type FullSlot = Arc<Mutex<Option<Result<(), String>>>>;
+
+/// How long a sequence stays the same before the editor renders it.
+const FULL_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// The editor's own render of what `quick` previews.
+fn full_of(quick: &Path) -> PathBuf {
+    let stem = quick.file_stem().unwrap_or_default().to_string_lossy();
+    quick.with_file_name(format!("{stem}-full.mp4"))
+}
+
+fn plugin_of(edits: &[shotline_core::protocol::EditInfo], file: &Path) -> String {
+    edits
+        .iter()
+        .find(|e| e.file == file)
+        .map(|e| e.plugin.clone())
+        .unwrap_or_default()
+}
+
+/// Keeps the newest previews and the ones in use; a sequence changed back and forth still finds
+/// its recent ones. The editor's are full size, so fewer of those.
+fn prune(dir: &Path, keep: &[&Path]) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "mp4"))
+        .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+        .collect();
+    files.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let full = |p: &PathBuf| p.to_string_lossy().ends_with("-full.mp4");
+    let (big, small): (Vec<_>, Vec<_>) = files.into_iter().partition(|(_, p)| full(p));
+    for (_, p) in big.into_iter().skip(3).chain(small.into_iter().skip(16)) {
+        if !keep.contains(&p.as_path()) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 /// A screen with nothing to show yet, the same size as the monitor, saying why.

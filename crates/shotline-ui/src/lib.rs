@@ -282,6 +282,11 @@ pub struct App {
     cut_deck: Option<(String, Result<Deck, String>)>,
     /// A preview that couldn't be made, and why.
     seq_failed: Option<(PathBuf, String)>,
+    /// The editor rendering a preview, into this file.
+    full_making: Option<(PathBuf, cut::FullSlot)>,
+    full_failed: Option<(PathBuf, String)>,
+    /// The editor preview wanted now, and since when.
+    seq_seen: Option<(PathBuf, std::time::Instant)>,
     /// The editor clip picked on the Cut page, by the editor's id.
     clip_pick: Option<String>,
     /// The join picked instead, by the editor's id for the clip after it.
@@ -600,6 +605,9 @@ impl App {
             edit_opening: None,
             cut_deck: None,
             seq_failed: None,
+            full_making: None,
+            full_failed: None,
+            seq_seen: None,
             clip_pick: None,
             join_pick: None,
             fade_frames: 12,

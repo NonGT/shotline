@@ -2084,6 +2084,29 @@ fn renders_an_editor_sequence() {
 }
 
 #[test]
+fn the_editor_renders_the_preview_once_it_stays_the_same() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, _) = another_take(&p);
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    let full = || {
+        std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with("-full.mp4"))
+    };
+    wait(&mut h, 2.0);
+    assert!(!full(), "not straight away");
+    wait(&mut h, 3.0);
+    assert!(wait_for(&mut h, |_| full()));
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("Preview rendered by")
+        .is_some()));
+}
+
+#[test]
 fn processes_the_used_part_of_a_clip() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
@@ -2326,10 +2349,14 @@ fn wait_for(h: &mut Harness<App>, done: impl Fn(&Harness<App>) -> bool) -> bool 
 }
 
 /// Steps the app for a while in real time, as playback needs.
+/// At least a few frames too: a panel takes its new size a frame later, and a slow machine may
+/// draw only one in the time.
 fn wait(h: &mut Harness<App>, secs: f64) {
     let until = Instant::now() + Duration::from_secs_f64(secs);
-    while Instant::now() < until {
+    let mut frames = 0;
+    while Instant::now() < until || frames < 4 {
         h.step();
+        frames += 1;
         std::thread::sleep(Duration::from_millis(10));
     }
 }

@@ -458,8 +458,12 @@ starts one. `timeline.toml` stays as it was, so taking the project away brings i
 job folder is named by its take. The Cut page's player shows a preview ffmpeg makes into
 `.shotline/cache/sequences/` whenever the sequence changes: the top enabled clip at each moment
 with its LUT files and dissolves, the audio tracks mixed. Other effects, Lumetri's sliders and
-built-in LUTs are left out; Render has the editor make the real thing. The page watches `shared/`
-and reads it again when the editor saves.
+built-in LUTs are left out. Once the sequence has stayed the same for 4 seconds while shotline's
+window is in front (so not while it's being cut in the editor), the editor plugin's `export`
+renders it into the same folder (`<key>-full.mp4`) and the player swaps to that, keeping its place.
+The folder keeps the 16 newest quick previews and the 3 newest full ones (about 100 MB each
+for 37 s at 1024 × 768). Render makes the same into `renders/` to keep. The page
+watches `shared/` and reads it again when the editor saves.
 
 What's sent: "Open in FilmCraft" on the Cut page opens the film's project, or makes it when
 there's none. shotline sends its cut (the selected takes back to back on V1, their sound on A1,
