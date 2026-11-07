@@ -12,13 +12,14 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use shotline_plugin::protocol::{
-    ClipInfo, Description, EditInfo, ErrorKind, ImportParams, Imported, OpenParams, Outputs,
-    PROTOCOL_VERSION, PluginError, Quote, Request, SequenceInfo, Sequences, Status, TakeFile,
-    TrackInfo,
+    ClipInfo, Description, EditInfo, EditParams, Edited, ErrorKind, ImportParams, Imported,
+    OpenParams, Outputs, PROTOCOL_VERSION, PluginError, Quote, Request, SequenceInfo, Sequences,
+    Status, TakeFile, TrackInfo,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
 pub mod control;
+mod edit;
 pub mod editor;
 mod otio;
 
@@ -76,6 +77,10 @@ impl Plugin for FilmCraft {
 
     async fn open(&self, ask: &OpenParams) -> Result<()> {
         open_in_filmcraft(ask).map_err(|e| fail(ErrorKind::Other, e))
+    }
+
+    async fn edit(&self, ask: &EditParams) -> Result<Edited> {
+        edit::edit(ask).map_err(|e| fail(ErrorKind::Other, e))
     }
 
     async fn import(&self, ask: &ImportParams) -> Result<Imported> {
@@ -445,6 +450,8 @@ struct RawTrack {
 
 #[derive(Deserialize)]
 struct RawClip {
+    #[serde(default)]
+    id: u64,
     item: u64,
     name: String,
     start: i64,
@@ -520,6 +527,7 @@ pub fn read_edit(path: &Path) -> std::result::Result<EditInfo, String> {
                 .items
                 .into_iter()
                 .map(|c| ClipInfo {
+                    id: c.id.to_string(),
                     file: media_file(&p.items, c.item, dir),
                     name: c.name,
                     start: secs(c.start),
@@ -596,6 +604,7 @@ fn media_file(items: &BTreeMap<String, Item>, id: u64, dir: &Path) -> Option<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shotline_plugin::protocol::Change;
 
     const T: i64 = 254_016_000_000;
 
@@ -686,6 +695,7 @@ mod tests {
         assert_eq!(
             v1.clips[0],
             ClipInfo {
+                id: "29".into(),
                 name: "01-010#1".into(),
                 file: Some(take_file()),
                 start: 0.0,
@@ -787,9 +797,205 @@ mod tests {
         assert_eq!(sequence_id(&root, "Nope"), None);
     }
 
+    fn colour_clip(path: &Path, colour: &str, secs: u32, sound: bool) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut c = std::process::Command::new("ffmpeg");
+        c.args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg(format!("color=c={colour}:s=720x1280:r=24:d={secs}"));
+        if sound {
+            c.args(["-f", "lavfi", "-i"])
+                .arg(format!("sine=f=440:d={secs}"))
+                .args(["-c:a", "aac", "-shortest"]);
+        }
+        let ok = c
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+    }
+
+    /// Changes clips with the real FilmCraft open, then with it closed through filmcraft-cli,
+    /// and takes each change back. Run as `with_filmcraft` says.
+    #[tokio::test]
+    #[ignore]
+    async fn edits_with_filmcraft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let film = tmp.path().join("fan");
+        let (a, b, c) = (
+            film.join("jobs/a/out.mp4"),
+            film.join("jobs/b/out.mp4"),
+            film.join("jobs/c/out.mp4"),
+        );
+        colour_clip(&a, "red", 3, true);
+        colour_clip(&b, "blue", 3, true);
+        colour_clip(&c, "green", 4, false);
+        let piece = |name: &str, file: &Path, start: f64| ClipInfo {
+            name: name.into(),
+            file: Some(file.into()),
+            start,
+            length: 3.0,
+            speed: 1.0,
+            enabled: true,
+            ..ClipInfo::default()
+        };
+        let pieces = vec![piece("01-010#1", &a, 0.0), piece("01-020#1", &b, 3.0)];
+        let track = |name: &str| TrackInfo {
+            name: name.into(),
+            enabled: true,
+            clips: pieces.clone(),
+        };
+        let cut = SequenceInfo {
+            name: "cut".into(),
+            width: 720,
+            height: 1280,
+            fps: 24.0,
+            video: vec![track("V1")],
+            audio: vec![track("A1")],
+        };
+        FilmCraft
+            .open(&OpenParams {
+                film: film.clone(),
+                cut: Some(cut),
+                ..OpenParams::default()
+            })
+            .await
+            .unwrap();
+        let s = control::Session::load(&film).unwrap();
+        let project = own_dir(&film).join("fan.fcproj");
+        let seq = || shared_edits(&film)[0].sequences[0].clone();
+        let at = |t: f64| {
+            let s = seq();
+            let v = s.video[0]
+                .clips
+                .iter()
+                .find(|c| c.start == t)
+                .cloned()
+                .unwrap();
+            let a = s.audio[0]
+                .clips
+                .iter()
+                .find(|c| c.start == t)
+                .cloned()
+                .unwrap();
+            (v, a)
+        };
+        let lumetri_on = |id: &str| {
+            let text = std::fs::read_to_string(&project).unwrap();
+            let v: Value = serde_json::from_str(&text).unwrap();
+            let mut found = None;
+            fn walk<'a>(v: &'a Value, id: &str, found: &mut Option<&'a Value>) {
+                match v {
+                    Value::Object(m) => {
+                        if m.get("id").map(|x| x.to_string()) == Some(id.into())
+                            && m.contains_key("source_in")
+                        {
+                            *found = Some(v);
+                        }
+                        m.values().for_each(|x| walk(x, id, found));
+                    }
+                    Value::Array(a) => a.iter().for_each(|x| walk(x, id, found)),
+                    _ => {}
+                }
+            }
+            walk(&v, id, &mut found);
+            found.unwrap()["effects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["effect"] == "lumetri")
+        };
+        let ask = |clip: &str, change: Change| EditParams {
+            film: film.clone(),
+            file: project.clone(),
+            sequence: "fan".into(),
+            clip: clip.into(),
+            change,
+        };
+        let undo = |e: &Edited| Change::Undo {
+            steps: e.undo.clone().unwrap(),
+        };
+
+        // With FilmCraft open: the green take over 01-020#1, its sound left as it was.
+        let (blue, _) = at(3.0);
+        let done = FilmCraft
+            .edit(&ask(
+                &blue.id,
+                Change::Replace {
+                    file: c.clone(),
+                    from: 0.5,
+                },
+            ))
+            .await
+            .unwrap();
+        assert!(done.saved, "nothing else was waiting, so it's saved");
+        let (v, snd) = at(3.0);
+        assert_eq!((v.file.as_ref(), v.from, v.length), (Some(&c), 0.5, 3.0));
+        assert_eq!(snd.file.as_ref(), Some(&b));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        let (v, _) = at(3.0);
+        assert_eq!((v.file.as_ref(), v.from), (Some(&b), 0.0));
+
+        // A colour match adds a Lumetri; undo takes it off again.
+        let done = FilmCraft
+            .edit(&ask(&v.id, Change::Match { to: 2.9 }))
+            .await
+            .unwrap();
+        assert!(lumetri_on(&v.id));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert!(!lumetri_on(&v.id));
+
+        let _ = s.call("app.quit", json!({}));
+        let pid = s.pid.unwrap();
+        assert!((0..80).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            !editor::running_apps().contains(&pid)
+        }));
+        if editor::cli_program().is_none() {
+            eprintln!("no filmcraft-cli; the rest is skipped");
+            return;
+        }
+
+        // Closed: the same through filmcraft-cli, with a LUT this time.
+        let cube = film.join("half.cube");
+        let mut text = String::from("LUT_3D_SIZE 2\n");
+        for b in [0, 1] {
+            for g in [0, 1] {
+                for r in [0, 1] {
+                    text += &format!("{} {g} {b}\n", r as f64 * 0.5);
+                }
+            }
+        }
+        std::fs::write(&cube, text).unwrap();
+        let (red, _) = at(0.0);
+        let done = FilmCraft
+            .edit(&ask(&red.id, Change::Lut { file: Some(cube) }))
+            .await
+            .unwrap();
+        assert!(done.saved);
+        assert!(lumetri_on(&red.id));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert!(!lumetri_on(&red.id));
+        let (blue, _) = at(3.0);
+        let done = FilmCraft
+            .edit(&ask(
+                &blue.id,
+                Change::Replace {
+                    file: c.clone(),
+                    from: 0.0,
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(at(3.0).0.file.as_ref(), Some(&c));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+    }
+
     /// Starts the real FilmCraft: makes the film's project from a cut, opens it again, and
     /// quits it. Run with FILMCRAFT_DATA_DIR set to a scratch folder to keep it apart from
-    /// yours: `cargo test -p shotline-plugin-filmcraft -- --ignored`.
+    /// yours: `cargo test -p shotline-plugin-filmcraft -- --ignored --test-threads=1` (one
+    /// FilmCraft at a time, or each sees the other's as one shotline didn't start).
     #[tokio::test]
     #[ignore]
     async fn with_filmcraft() {
@@ -806,6 +1012,7 @@ mod tests {
             .unwrap();
         assert!(ok.success());
         let piece = |start: f64| ClipInfo {
+            id: String::new(),
             name: "01-010#1".into(),
             file: Some(clip.clone()),
             start,

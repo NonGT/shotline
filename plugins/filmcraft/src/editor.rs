@@ -64,6 +64,78 @@ impl Editor {
             Editor::Cli(c) => cli(&c.exe, &c.project, false, command, params),
         }
     }
+
+    /// Commands (`{"id", "params"}`) one after another, stopping at the first that fails. The
+    /// CLI runs them in one go, so what one sets up (an open sequence) holds for the next.
+    pub fn batch(&self, steps: &[Value]) -> Result<Vec<Value>, String> {
+        match self {
+            Editor::App(_) => steps
+                .iter()
+                .map(|s| {
+                    let id = s["id"].as_str().ok_or("a step without a command")?;
+                    self.exec(id, s["params"].clone())
+                })
+                .collect(),
+            Editor::Cli(c) => {
+                if !c.backed_up.get() {
+                    back_up(&c.project, &c.backups)
+                        .map_err(|e| format!("can't back the project up first: {e}"))?;
+                    c.backed_up.set(true);
+                }
+                cli_run(&c.exe, &c.project, steps)
+            }
+        }
+    }
+}
+
+fn cli_run(exe: &Path, project: &Path, steps: &[Value]) -> Result<Vec<Value>, String> {
+    use std::io::Write;
+    let mut child = Command::new(exe)
+        .arg("--project")
+        .arg(project)
+        .args(["--compact", "--save", "run", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("can't run {}: {e}", exe.display()))?;
+    let script: String = steps.iter().map(|s| format!("{s}\n")).collect();
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let mut results = vec![];
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v["ok"] != true {
+            return Err(format!(
+                "{}: {}",
+                v["id"].as_str().unwrap_or("a step"),
+                v["error"].as_str().unwrap_or("failed")
+            ));
+        }
+        results.push(v["result"].clone());
+    }
+    if !out.status.success() || results.len() != steps.len() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        return Err(format!(
+            "filmcraft-cli ran {} of {} steps ({}) {}",
+            results.len(),
+            steps.len(),
+            out.status,
+            last.trim()
+        ));
+    }
+    Ok(results)
 }
 
 /// Keeps a copy of `project` as `<name>-<unix ms>.fcproj`, and only the last few.
