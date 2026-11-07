@@ -92,6 +92,8 @@ struct Film {
 
 /// Editor projects, and problems asking the plugins for them.
 type Edits = (Vec<EditInfo>, Vec<String>);
+/// Filled once an editor was asked to open a project.
+type Opened = Arc<Mutex<Option<Result<(), String>>>>;
 
 /// What the app asks of installed plugins. The CLI provides it; the app calls it off the UI thread.
 pub trait Host: Send + Sync {
@@ -108,6 +110,10 @@ pub trait Host: Send + Sync {
     /// Free.
     fn sequences(&self, _film: &Path) -> (Vec<EditInfo>, Vec<String>) {
         (vec![], vec![])
+    }
+    /// Opens one of those projects in its editor, through the plugin that read it.
+    fn open_edit(&self, plugin: &str, _file: &Path, _sequence: Option<&str>) -> anyhow::Result<()> {
+        anyhow::bail!("{plugin} can't open its projects")
     }
     /// What a new anchor image would cost, e.g. "$0.04". Free.
     fn anchor_quote(&self, film: &Path, ask: &AnchorAsk) -> anyhow::Result<String>;
@@ -228,10 +234,14 @@ pub struct App {
     edits_asked: Option<Arc<Mutex<Option<Edits>>>>,
     /// The film was read again, so the editors are asked again.
     edits_stale: bool,
+    /// What shared/ and the editors' files looked like when last checked, and when that was.
+    edits_seen: Option<(u64, std::time::Instant)>,
     /// A sequence's preview being made, and where to start playing it once it's there.
     seq_making: Option<crate::cut::Making>,
     /// The preview the deck plays, and the clips left out of it.
     seq_playing: Option<(PathBuf, Vec<String>)>,
+    /// An editor being asked to open a project: what to call it, and how that went.
+    edit_opening: Option<(String, Opened)>,
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
@@ -532,8 +542,10 @@ impl App {
             edit_takes: HashMap::new(),
             edits_asked: None,
             edits_stale: true,
+            edits_seen: None,
             seq_making: None,
             seq_playing: None,
+            edit_opening: None,
             shot: None,
             takes: vec![],
             status: None,

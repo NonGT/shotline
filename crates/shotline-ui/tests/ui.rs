@@ -470,6 +470,15 @@ impl Host for TestHost {
         (edits, vec![])
     }
 
+    /// Notes what it was asked to open beside the project.
+    fn open_edit(&self, plugin: &str, file: &Path, sequence: Option<&str>) -> anyhow::Result<()> {
+        std::fs::write(
+            file.with_extension("opened"),
+            format!("{plugin} {}", sequence.unwrap_or("")),
+        )?;
+        Ok(())
+    }
+
     fn rates(&self, _: &Path) -> anyhow::Result<Vec<shotline_core::ledger::RateLine>> {
         Ok(vec![shotline_core::ledger::RateLine {
             unit: "fake-credit".into(),
@@ -1695,11 +1704,13 @@ fn an_editor_s_sequence_on_the_cut_page() {
             file: p.root.join("shared/broken.fcproj"),
             name: "broken".into(),
             error: Some("not JSON".into()),
-            sequences: vec![],
+            ..EditInfo::default()
         },
         EditInfo {
             file: p.root.join("shared/edit.fcproj"),
             name: "Rain edit".into(),
+            app: "FilmCraft".into(),
+            plugin: "filmcraft".into(),
             error: None,
             sequences: vec![SequenceInfo {
                 name: "Main edit".into(),
@@ -1731,6 +1742,27 @@ fn an_editor_s_sequence_on_the_cut_page() {
     assert!(h.query_by_label("rain.wav").is_none());
     h.get_by_label("edit.fcproj · Main edit").click();
     h.run();
+    // Saved again in the editor, it's read again without asking.
+    let mut edits = edits;
+    edits[1].sequences[0].audio[0]
+        .clips
+        .push(clip("thunder.wav", p.root.join("thunder.wav"), 2.0));
+    std::fs::write(
+        p.root.join("shared/edits.json"),
+        serde_json::to_string(&edits).unwrap(),
+    )
+    .unwrap();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::Button, "thunder.wav")
+        .is_some()));
+    // To change it, it opens in its own app through the plugin that read it.
+    h.get_by_label("Open in FilmCraft").click();
+    let opened = p.root.join("shared/edit.opened");
+    assert!(wait_for(&mut h, |_| opened.is_file()));
+    assert_eq!(
+        std::fs::read_to_string(&opened).unwrap(),
+        "filmcraft Main edit"
+    );
     // The take goes by its name and opens its shot.
     h.get_by_role_and_label(Role::Button, "01-010#1").click();
     h.run();
@@ -3248,6 +3280,7 @@ fn plays_an_editor_sequence() {
             ],
             audio: vec![track(vec![piece("out.mp4", Some(video), 0.0)])],
         }],
+        ..EditInfo::default()
     }];
     std::fs::create_dir_all(p.root.join("shared")).unwrap();
     std::fs::write(

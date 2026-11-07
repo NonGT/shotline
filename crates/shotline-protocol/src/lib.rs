@@ -96,7 +96,7 @@ pub struct Description {
     #[serde(default)]
     pub env: Vec<String>,
     pub models: Vec<ModelInfo>,
-    /// It links shotline to a video editor: it answers `sequences`.
+    /// It links shotline to a video editor: it answers `sequences`, and `open` if it can.
     #[serde(default, skip_serializing_if = "is_false")]
     pub editor: bool,
 }
@@ -356,6 +356,14 @@ pub struct SequencesParams {
     pub film: PathBuf,
 }
 
+/// Params of `open`: a project from `sequences` to open in its editor, at a sequence if it can.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenParams {
+    pub file: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<String>,
+}
+
 /// Reply to `sequences`: the editor's projects for the film.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Sequences {
@@ -368,6 +376,12 @@ pub struct EditInfo {
     /// Its file; shotline reads the sequences again once it changes.
     pub file: PathBuf,
     pub name: String,
+    /// The editor's name for people, e.g. "FilmCraft".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
+    /// The plugin that answered; filled in by shotline.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plugin: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]

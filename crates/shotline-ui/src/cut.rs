@@ -255,6 +255,7 @@ impl App {
             self.edits = got;
             self.edit_takes = takes;
         }
+        self.watch_edits(ctx);
         if !self.edits_stale {
             return;
         }
@@ -269,6 +270,48 @@ impl App {
             *slot.lock().unwrap() = Some(host.sequences(&film));
             ctx.request_repaint();
         });
+    }
+
+    /// Asks the editors again once something in shared/, or one of their files, was saved.
+    fn watch_edits(&mut self, ctx: &egui::Context) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+        ctx.request_repaint_after(EVERY);
+        let now = std::time::Instant::now();
+        if self
+            .edits_seen
+            .is_some_and(|(_, at)| now.duration_since(at) < EVERY)
+        {
+            return;
+        }
+        let mut files: Vec<PathBuf> = self.edits.0.iter().map(|e| e.file.clone()).collect();
+        let shared = self.project.root.join("shared");
+        let mut dirs = vec![shared];
+        while let Some(dir) = dirs.pop() {
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = e.path();
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    dirs.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        files.dedup();
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for f in &files {
+            f.hash(&mut h);
+            if let Ok(m) = f.metadata() {
+                m.len().hash(&mut h);
+                m.modified().ok().hash(&mut h);
+            }
+        }
+        let seen = h.finish();
+        if self.edits_seen.is_some_and(|(was, _)| was != seen) {
+            self.edits_stale = true;
+        }
+        self.edits_seen = Some((seen, now));
     }
 
     /// The editor sequence picked to show, while it's still there.
@@ -402,6 +445,7 @@ impl App {
                 ui.spinner();
                 ui.weak("making a preview to play…");
             }
+            self.open_in_editor(ui, file, seq);
         });
         let playing = self
             .seq_playing
@@ -444,6 +488,59 @@ impl App {
             }
             Some(Hit::Seek(t)) if !making => self.play_sequence(&ctx, &title, seq, &out, t),
             _ => {}
+        }
+    }
+
+    /// A button that opens the project in the editor it was made in, to change it there.
+    fn open_in_editor(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
+        self.editor_opened();
+        let Some(edit) = self.edits.0.iter().find(|e| e.file == file) else {
+            return;
+        };
+        let app = if edit.app.is_empty() {
+            edit.plugin.clone()
+        } else {
+            edit.app.clone()
+        };
+        let opening = self.edit_opening.is_some();
+        let can = !edit.plugin.is_empty() && !opening;
+        if ui
+            .add_enabled(can, egui::Button::new(format!("Open in {app}")))
+            .on_hover_text(format!(
+                "change this cut in {app}; it shows here again each time it's saved"
+            ))
+            .on_disabled_hover_text("opening it…")
+            .clicked()
+            && let Some(host) = self.host.clone()
+        {
+            let slot: crate::Opened = Arc::default();
+            self.edit_opening = Some((app, slot.clone()));
+            let (plugin, file, name) = (edit.plugin.clone(), file.to_path_buf(), seq.name.clone());
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let r = host
+                    .open_edit(&plugin, &file, Some(&name))
+                    .map_err(|e| e.to_string());
+                *slot.lock().unwrap() = Some(r);
+                ctx.request_repaint();
+            });
+        }
+        if opening {
+            ui.spinner();
+        }
+    }
+
+    fn editor_opened(&mut self) {
+        let Some((app, slot)) = &self.edit_opening else {
+            return;
+        };
+        let Some(r) = slot.lock().unwrap().take() else {
+            return;
+        };
+        let app = app.clone();
+        self.edit_opening = None;
+        if let Err(e) = r {
+            self.error(format!("can't open it in {app}: {e}"));
         }
     }
 

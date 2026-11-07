@@ -624,6 +624,10 @@ impl shotline_ui::Host for Plugins {
         plugins::sequences(&plugins::load(), film)
     }
 
+    fn open_edit(&self, plugin: &str, file: &Path, sequence: Option<&str>) -> Result<()> {
+        plugins::open_edit(&plugins::load(), plugin, file, sequence)
+    }
+
     fn anchor_quote(&self, film: &Path, ask: &shotline_ui::AnchorAsk) -> Result<String> {
         let p = Project::open(film)?;
         image::quote(&p, target(ask), &anchor_make(ask, None))

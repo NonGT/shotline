@@ -64,6 +64,11 @@ pub trait Plugin: Send + Sync {
         Err(Error::Unsupported("sequences".into()))
     }
 
+    /// Opens one of those projects in the editor, at `sequence` if it can.
+    async fn open(&self, _file: &Path, _sequence: Option<&str>) -> Result<()> {
+        Err(Error::Unsupported("open".into()))
+    }
+
     /// Charges since an RFC 3339 time.
     async fn usage(&self, _since: &str) -> Result<Usage> {
         Err(Error::Unsupported("usage".into()))

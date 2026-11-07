@@ -2,7 +2,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use shotline_protocol::rpc;
-use shotline_protocol::{FetchParams, JobRef, RunParams, SequencesParams, UsageParams};
+use shotline_protocol::{FetchParams, JobRef, OpenParams, RunParams, SequencesParams, UsageParams};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::{Error, Plugin, Result};
@@ -79,6 +79,11 @@ async fn dispatch<P: Plugin>(p: &P, method: &str, v: Value) -> Result<Value> {
         "balance" => to_value(p.balance().await?),
         "voices" => to_value(p.voices().await?),
         "sequences" => to_value(p.sequences(&params::<SequencesParams>(v)?.film).await?),
+        "open" => {
+            let OpenParams { file, sequence } = params(v)?;
+            p.open(&file, sequence.as_deref()).await?;
+            json!({})
+        }
         "usage" => to_value(p.usage(&params::<UsageParams>(v)?.since).await?),
         other => return Err(Error::Unsupported(other.to_string())),
     })

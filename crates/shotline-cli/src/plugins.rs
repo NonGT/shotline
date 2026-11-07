@@ -346,11 +346,29 @@ pub fn sequences(installed: &Installed, film: &Path) -> (Vec<EditInfo>, Vec<Stri
                 .map_err(|e| anyhow::anyhow!("{}: {e}", p.name))
         });
         match got {
-            Ok(s) => edits.extend(s.edits),
+            Ok(s) => edits.extend(s.edits.into_iter().map(|mut e| {
+                e.plugin = p.name.clone();
+                e
+            })),
             Err(e) => problems.push(e.to_string()),
         }
     }
     (edits, problems)
+}
+
+/// Asks editor plugin `name` to open one of its projects.
+pub fn open_edit(
+    installed: &Installed,
+    name: &str,
+    file: &Path,
+    sequence: Option<&str>,
+) -> Result<()> {
+    let plugin = open(installed, name)?;
+    match runtime().block_on(plugin.open(file, sequence)) {
+        Ok(()) => Ok(()),
+        Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't open its projects"),
+        Err(e) => bail!("{name}: {e}"),
+    }
 }
 
 pub fn print_voices(installed: &Installed, name: &str) -> Result<()> {

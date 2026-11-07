@@ -11,12 +11,15 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use shotline_plugin::protocol::{
-    ClipInfo, Description, EditInfo, Outputs, PROTOCOL_VERSION, Quote, Request, SequenceInfo,
-    Sequences, Status, TrackInfo,
+    ClipInfo, Description, EditInfo, ErrorKind, Outputs, PROTOCOL_VERSION, PluginError, Quote,
+    Request, SequenceInfo, Sequences, Status, TrackInfo,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
 pub const SHARED_DIR: &str = "shared";
+const APP: &str = "FilmCraft";
+/// FilmCraft's bundle id on macOS, where it owns the `.fcproj` type.
+const BUNDLE: &str = "ai.storyteller.filmcraft";
 
 /// The newest project schema this was checked against. A newer one is still read; it's only
 /// named when the file can't be.
@@ -65,6 +68,69 @@ impl Plugin for FilmCraft {
             edits: shared_edits(film),
         })
     }
+
+    /// FilmCraft opens a project at the sequence it last had in front, so `sequence` isn't
+    /// used yet.
+    async fn open(&self, file: &Path, _sequence: Option<&str>) -> Result<()> {
+        if !file.is_file() {
+            return Err(fail(
+                ErrorKind::NotFound,
+                format!("{} isn't there", file.display()),
+            ));
+        }
+        let exe = std::env::var_os("FILMCRAFT").map(PathBuf::from);
+        let mut cmd = launcher(file, exe, cfg!(target_os = "macos"));
+        if cmd.get_program() == "open" {
+            // Quick, and it says when FilmCraft isn't installed.
+            let out = cmd
+                .output()
+                .map_err(|e| fail(ErrorKind::Other, format!("can't run open: {e}")))?;
+            if !out.status.success() {
+                return Err(fail(
+                    ErrorKind::Other,
+                    format!(
+                        "can't open {APP}; is it installed? {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                fail(
+                    ErrorKind::Other,
+                    format!(
+                        "can't start {}: {e}; put filmcraft on PATH or set FILMCRAFT",
+                        cmd.get_program().to_string_lossy()
+                    ),
+                )
+            })?;
+        Ok(())
+    }
+}
+
+fn fail(kind: ErrorKind, message: String) -> Error {
+    PluginError::new(kind, message).into()
+}
+
+/// How FilmCraft is started with `file`: the program in FILMCRAFT if set, on macOS the app that
+/// owns its bundle id, else `filmcraft` on PATH.
+fn launcher(file: &Path, exe: Option<PathBuf>, macos: bool) -> std::process::Command {
+    let mut c = match exe {
+        Some(exe) => std::process::Command::new(exe),
+        None if macos => {
+            let mut c = std::process::Command::new("open");
+            c.args(["-b", BUNDLE]);
+            c
+        }
+        None => std::process::Command::new("filmcraft"),
+    };
+    c.arg(file);
+    c
 }
 
 /// Every `.fcproj` in the film's `shared/`, by name; one that can't be read says why.
@@ -83,8 +149,9 @@ pub fn shared_edits(film: &Path) -> Vec<EditInfo> {
             read_edit(&p).unwrap_or_else(|error| EditInfo {
                 name: p.file_stem().unwrap_or_default().to_string_lossy().into(),
                 file: p,
+                app: APP.into(),
                 error: Some(error),
-                sequences: vec![],
+                ..EditInfo::default()
             })
         })
         .collect()
@@ -251,8 +318,9 @@ pub fn read_edit(path: &Path) -> std::result::Result<EditInfo, String> {
     Ok(EditInfo {
         file: path.to_path_buf(),
         name: p.name,
-        error: None,
+        app: APP.into(),
         sequences,
+        ..EditInfo::default()
     })
 }
 
@@ -413,6 +481,31 @@ mod tests {
             e.contains("from a newer FilmCraft (project schema v22)"),
             "{e}"
         );
+    }
+
+    #[test]
+    fn starts_filmcraft_with_the_project() {
+        let f = Path::new("/film/shared/edit.fcproj");
+        let args = |c: &std::process::Command| -> Vec<String> {
+            c.get_args().map(|a| a.to_string_lossy().into()).collect()
+        };
+        let c = launcher(f, None, true);
+        assert_eq!(c.get_program(), "open");
+        assert_eq!(args(&c), ["-b", BUNDLE, "/film/shared/edit.fcproj"]);
+        let c = launcher(f, None, false);
+        assert_eq!(c.get_program(), "filmcraft");
+        assert_eq!(args(&c), ["/film/shared/edit.fcproj"]);
+        let c = launcher(f, Some("/opt/fc/filmcraft".into()), true);
+        assert_eq!(c.get_program(), "/opt/fc/filmcraft");
+    }
+
+    #[tokio::test]
+    async fn opening_a_missing_project_says_so() {
+        let e = FilmCraft
+            .open(Path::new("/nowhere/edit.fcproj"), None)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("isn't there"), "{e}");
     }
 
     #[tokio::test]
