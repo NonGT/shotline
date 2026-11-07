@@ -392,7 +392,7 @@ pub struct Deck {
     sounding: Option<bool>,
 }
 
-fn clock(t: f64) -> String {
+pub(crate) fn clock(t: f64) -> String {
     format!("{}:{:04.1}", (t / 60.0) as u32, t % 60.0)
 }
 

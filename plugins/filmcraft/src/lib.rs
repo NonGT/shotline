@@ -1,15 +1,20 @@
-//! FilmCraft's projects in the film's `shared/` folder, read only: FilmCraft writes the whole file
-//! on save, so anything written into it here would be lost.
+//! Links shotline to FilmCraft (github.com/storytold/filmcraft): the projects saved in the film's
+//! `shared/` folder, read only. FilmCraft writes the whole file on save, so anything written into
+//! it here would be lost.
 //!
 //! Only what a cut needs is read: sequences, their tracks, and each clip's file and timing.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
-
-use crate::{Error, Project, Result};
+use shotline_plugin::protocol::{
+    ClipInfo, Description, EditInfo, Outputs, PROTOCOL_VERSION, Quote, Request, SequenceInfo,
+    Sequences, Status, TrackInfo,
+};
+use shotline_plugin::{Error, Plugin, Result};
 
 pub const SHARED_DIR: &str = "shared";
 
@@ -20,81 +25,69 @@ const KNOWN_SCHEMA: u64 = 17;
 /// FilmCraft's time unit: every frame and sample rate divides it evenly.
 const TICKS_PER_SECOND: f64 = 254_016_000_000.0;
 
-/// One `.fcproj` file.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Edit {
-    pub path: PathBuf,
-    pub name: String,
-    /// In the order FilmCraft's bins list them.
-    pub sequences: Vec<Sequence>,
-}
+pub struct FilmCraft;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Sequence {
-    pub name: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: f64,
-    /// V1 first.
-    pub video: Vec<Track>,
-    /// A1 first.
-    pub audio: Vec<Track>,
-}
+#[async_trait]
+impl Plugin for FilmCraft {
+    async fn describe(&self) -> Result<Description> {
+        Ok(Description {
+            name: "filmcraft".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            protocol: PROTOCOL_VERSION,
+            editor: true,
+            env: vec![],
+            models: vec![],
+        })
+    }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Track {
-    pub name: String,
-    /// Shown (video) or not muted (audio).
-    pub enabled: bool,
-    pub clips: Vec<Clip>,
-}
+    async fn quote(&self, _: &Request) -> Result<Quote> {
+        Err(Error::Unsupported("quote".into()))
+    }
 
-/// A clip on a track, in seconds.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Clip {
-    pub name: String,
-    /// None for what isn't a file: a nested sequence, a title, a generator.
-    pub file: Option<PathBuf>,
-    pub start: f64,
-    pub length: f64,
-    /// Where in the file it starts.
-    pub from: f64,
-    pub speed: f64,
-    pub enabled: bool,
-}
+    async fn run(&self, _: &Request, _: &Path) -> Result<String> {
+        Err(Error::Unsupported("run".into()))
+    }
 
-impl Clip {
-    pub fn end(&self) -> f64 {
-        self.start + self.length
+    async fn poll(&self, _: &str) -> Result<Status> {
+        Err(Error::Unsupported("poll".into()))
+    }
+
+    async fn fetch(&self, _: &str, _: &Path) -> Result<Outputs> {
+        Err(Error::Unsupported("fetch".into()))
+    }
+
+    async fn cancel(&self, _: &str) -> Result<()> {
+        Err(Error::Unsupported("cancel".into()))
+    }
+
+    async fn sequences(&self, film: &Path) -> Result<Sequences> {
+        Ok(Sequences {
+            edits: shared_edits(film),
+        })
     }
 }
 
-impl Sequence {
-    /// How long it runs: to the end of its last clip.
-    pub fn length(&self) -> f64 {
-        self.video
-            .iter()
-            .chain(&self.audio)
-            .flat_map(|t| &t.clips)
-            .map(Clip::end)
-            .fold(0.0, f64::max)
-    }
-}
-
-impl Project {
-    /// Every `.fcproj` in `shared/`, by name.
-    pub fn shared_edits(&self) -> Result<Vec<Edit>> {
-        let dir = self.root.join(SHARED_DIR);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Ok(vec![]);
-        };
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "fcproj"))
-            .collect();
-        paths.sort();
-        paths.iter().map(|p| read_edit(p)).collect()
-    }
+/// Every `.fcproj` in the film's `shared/`, by name; one that can't be read says why.
+pub fn shared_edits(film: &Path) -> Vec<EditInfo> {
+    let Ok(entries) = std::fs::read_dir(film.join(SHARED_DIR)) else {
+        return vec![];
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "fcproj"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|p| {
+            read_edit(&p).unwrap_or_else(|error| EditInfo {
+                name: p.file_stem().unwrap_or_default().to_string_lossy().into(),
+                file: p,
+                error: Some(error),
+                sequences: vec![],
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -175,16 +168,16 @@ fn secs(ticks: i64) -> f64 {
     ticks as f64 / TICKS_PER_SECOND
 }
 
-/// Reads one `.fcproj`.
-pub fn read_edit(path: &Path) -> Result<Edit> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| Error::Invalid(format!("can't read {}: {e}", path.display())))?;
+/// Reads one `.fcproj`, or says why it can't.
+pub fn read_edit(path: &Path) -> std::result::Result<EditInfo, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
     let file: File = serde_json::from_str(&text).map_err(|e| {
         let newer = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|v| v.get("schema_version")?.as_u64())
             .filter(|v| *v > KNOWN_SCHEMA);
-        Error::Invalid(match newer {
+        match newer {
             Some(v) => format!(
                 "{} is from a newer FilmCraft (project schema v{v}) and can't be read yet: {e}",
                 path.display()
@@ -193,7 +186,7 @@ pub fn read_edit(path: &Path) -> Result<Edit> {
                 "{} isn't a FilmCraft project shotline can read: {e}",
                 path.display()
             ),
-        })
+        }
     })?;
     let p = file.project;
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -214,19 +207,19 @@ pub fn read_edit(path: &Path) -> Result<Edit> {
             continue;
         };
         let s: RawSequence = serde_json::from_value(raw.clone()).map_err(|e| {
-            Error::Invalid(format!(
+            format!(
                 "{}: sequence {:?} can't be read: {e}",
                 path.display(),
                 item.name
-            ))
+            )
         })?;
-        let track = |t: RawTrack, video: bool| Track {
+        let track = |t: RawTrack, video: bool| TrackInfo {
             name: t.name,
             enabled: if video { t.enabled } else { !t.muted },
             clips: t
                 .items
                 .into_iter()
-                .map(|c| Clip {
+                .map(|c| ClipInfo {
                     file: media_file(&p.items, c.item, dir),
                     name: c.name,
                     start: secs(c.start),
@@ -238,7 +231,7 @@ pub fn read_edit(path: &Path) -> Result<Edit> {
                 .collect(),
         };
         let r = &s.settings.frame_rate;
-        sequences.push(Sequence {
+        sequences.push(SequenceInfo {
             name: item.name.clone(),
             width: s.settings.width,
             height: s.settings.height,
@@ -255,9 +248,10 @@ pub fn read_edit(path: &Path) -> Result<Edit> {
                 .collect(),
         });
     }
-    Ok(Edit {
-        path: path.to_path_buf(),
+    Ok(EditInfo {
+        file: path.to_path_buf(),
         name: p.name,
+        error: None,
         sequences,
     })
 }
@@ -384,7 +378,7 @@ mod tests {
         assert_eq!(v1.name, "Video 1");
         assert_eq!(
             v1.clips[0],
-            Clip {
+            ClipInfo {
                 name: "01-010#1".into(),
                 file: Some("/film/jobs/01A/out.mp4".into()),
                 start: 0.0,
@@ -414,24 +408,43 @@ mod tests {
         let broken =
             serde_json::json!({"schema_version": KNOWN_SCHEMA + 5, "project": {"name": 3}});
         std::fs::write(&path, broken.to_string()).unwrap();
-        let e = read_edit(&path).unwrap_err().to_string();
+        let e = read_edit(&path).unwrap_err();
         assert!(
             e.contains("from a newer FilmCraft (project schema v22)"),
             "{e}"
         );
     }
 
-    #[test]
-    fn shared_folder() {
+    #[tokio::test]
+    async fn answers_sequences_for_shared() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = Project::init(&tmp.path().join("film"), Some("Rain")).unwrap();
-        assert_eq!(p.shared_edits().unwrap(), vec![]);
-        let dir = p.root.join(SHARED_DIR);
+        let film = tmp.path().join("film");
+        let plugin = FilmCraft;
+        assert!(plugin.sequences(&film).await.unwrap().edits.is_empty());
+        let dir = film.join(SHARED_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         fixture(&dir, 17);
         std::fs::write(dir.join("notes.txt"), "").unwrap();
-        let edits = p.shared_edits().unwrap();
-        assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].path, dir.join("edit.fcproj"));
+        std::fs::write(dir.join("broken.fcproj"), "{").unwrap();
+        let edits = plugin.sequences(&film).await.unwrap().edits;
+        assert_eq!(edits.len(), 2);
+        assert_eq!(
+            (edits[0].name.as_str(), edits[0].file.clone()),
+            ("broken", dir.join("broken.fcproj"))
+        );
+        assert!(edits[0].error.is_some());
+        assert_eq!(edits[1].sequences.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn conforms() {
+        let dir = tempfile::tempdir().unwrap();
+        let checks = shotline_plugin::conformance::check(
+            &FilmCraft,
+            &shotline_plugin::conformance::Options::offline(dir.path()),
+        )
+        .await;
+        let failed: Vec<_> = checks.iter().filter(|c| c.problem.is_some()).collect();
+        assert!(failed.is_empty(), "{failed:#?}");
     }
 }

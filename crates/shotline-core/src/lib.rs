@@ -2,7 +2,6 @@ pub mod dotenv;
 mod draft;
 mod element;
 mod error;
-pub mod filmcraft;
 mod fsx;
 mod git;
 pub mod handle;

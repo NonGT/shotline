@@ -83,6 +83,8 @@ No params. Returns:
 }
 ```
 
+`"editor": true` marks a plugin that answers `sequences`; leave it out otherwise.
+
 Model fields other than `id` and `op` are optional; leave out what doesn't apply.
 
 - `ref_image`: how a reference image is named in the prompt, `{n}` counting from 1. Without it
@@ -212,6 +214,26 @@ Params: `{"since": "2026-10-01T00:00:00Z"}`. What the provider actually charged,
 ```json
 {"charges": [{"job": "abc", "time": "2026-10-30T10:12:03Z", "amount": 0.40, "unit": "USD"}]}
 ```
+
+### sequences (optional)
+
+For a plugin that links shotline to a video editor; it says `"editor": true` in `describe` and
+may list no models. Params: `{"film": "/path/to/film"}`. Returns the editor's projects for that
+film, read only, for the Cut page. It must be free to call.
+
+```json
+{"edits": [{"file": "/path/to/film/shared/edit.fcproj", "name": "Rain edit", "sequences": [
+  {"name": "Main edit", "width": 720, "height": 1280, "fps": 23.976,
+   "video": [{"name": "Video 1", "enabled": true, "clips": [
+     {"name": "01-010#1", "file": "/path/to/film/jobs/01K.../out.mp4", "start": 0, "length": 2,
+      "from": 0.5, "speed": 1, "enabled": true}]}],
+   "audio": []}]}]}
+```
+
+Times are seconds. `video` starts at V1, `audio` at A1. A clip that isn't a file (a title, a
+nested sequence) has no `file`; one in a take's job folder shows as that take. A project that
+can't be read comes back with an `error` and no sequences, so the others still show. shotline
+asks again when the film is read again.
 
 Leave out optional methods; answer with error code -32601 (method not found).
 

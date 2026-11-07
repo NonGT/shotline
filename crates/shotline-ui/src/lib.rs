@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
-use shotline_core::protocol::{Description, ModelInfo, Op, VoiceInfo};
+use shotline_core::protocol::{Description, EditInfo, ModelInfo, Op, VoiceInfo};
 use shotline_core::{
     Chapter, CutShot, Element, Git, JobStatus, Kind, LIP_SYNCED, Project, SPOKEN, Shot, ShotRef,
     Take, Timeline, Transition,
@@ -90,6 +90,9 @@ struct Film {
     in_use: HashMap<PathBuf, String>,
 }
 
+/// Editor projects, and problems asking the plugins for them.
+type Edits = (Vec<EditInfo>, Vec<String>);
+
 /// What the app asks of installed plugins. The CLI provides it; the app calls it off the UI thread.
 pub trait Host: Send + Sync {
     /// The installed plugins, and problems with ones that couldn't be used.
@@ -101,6 +104,11 @@ pub trait Host: Send + Sync {
     fn voices(&self, plugin: &str) -> anyhow::Result<Vec<VoiceInfo>>;
     /// What's left on the account, said in a line. It costs nothing, so it checks a key.
     fn balance(&self, plugin: &str) -> anyhow::Result<String>;
+    /// The film's projects in video editors, from the editor plugins, and problems asking them.
+    /// Free.
+    fn sequences(&self, _film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+        (vec![], vec![])
+    }
     /// What a new anchor image would cost, e.g. "$0.04". Free.
     fn anchor_quote(&self, film: &Path, ask: &AnchorAsk) -> anyhow::Result<String>;
     /// Downloads a reference image into the film's cache. Free.
@@ -209,6 +217,17 @@ pub struct App {
     posters: Arc<Mutex<HashSet<PathBuf>>>,
     film: Film,
     tab: Tab,
+    /// The Cut page shows this editor sequence, by file and name, instead of the film's cut.
+    cut_view: Option<(PathBuf, String)>,
+    /// The film's projects in video editors as the editor plugins last read them, and problems
+    /// asking them.
+    edits: Edits,
+    /// The takes the clips in them play, by file.
+    edit_takes: HashMap<PathBuf, Take>,
+    /// Being asked again in the background; the answer lands here.
+    edits_asked: Option<Arc<Mutex<Option<Edits>>>>,
+    /// The film was read again, so the editors are asked again.
+    edits_stale: bool,
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
@@ -504,6 +523,11 @@ impl App {
             posters: Arc::default(),
             film: Film::default(),
             tab: Tab::Shots,
+            cut_view: None,
+            edits: (vec![], vec![]),
+            edit_takes: HashMap::new(),
+            edits_asked: None,
+            edits_stale: true,
             shot: None,
             takes: vec![],
             status: None,
@@ -960,6 +984,7 @@ impl App {
             last_frames: p.last_frames()?,
         };
         self.film.in_use = in_use(&self.film, &self.project.root);
+        self.edits_stale = true;
         self.load_takes()
     }
 

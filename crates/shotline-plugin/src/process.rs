@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use shotline_protocol::rpc;
 use shotline_protocol::{
     Balance, Description, FetchParams, JobRef, Outputs, PluginError, Quote, Rates, Request,
-    RunParams, Status, Usage, UsageParams, Voices,
+    RunParams, Sequences, SequencesParams, Status, Usage, UsageParams, Voices,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -273,6 +273,16 @@ impl Plugin for ProcessPlugin {
 
     async fn voices(&self) -> Result<Voices> {
         self.call("voices", json!({})).await
+    }
+
+    async fn sequences(&self, film: &Path) -> Result<Sequences> {
+        self.call(
+            "sequences",
+            SequencesParams {
+                film: film.to_path_buf(),
+            },
+        )
+        .await
     }
 
     async fn usage(&self, since: &str) -> Result<Usage> {

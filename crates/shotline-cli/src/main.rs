@@ -620,6 +620,10 @@ impl shotline_ui::Host for Plugins {
         plugins::balance_of(&plugins::load(), plugin)
     }
 
+    fn sequences(&self, film: &Path) -> (Vec<shotline_core::protocol::EditInfo>, Vec<String>) {
+        plugins::sequences(&plugins::load(), film)
+    }
+
     fn anchor_quote(&self, film: &Path, ask: &shotline_ui::AnchorAsk) -> Result<String> {
         let p = Project::open(film)?;
         image::quote(&p, target(ask), &anchor_make(ask, None))

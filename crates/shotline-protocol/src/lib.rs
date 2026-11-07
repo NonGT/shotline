@@ -96,6 +96,9 @@ pub struct Description {
     #[serde(default)]
     pub env: Vec<String>,
     pub models: Vec<ModelInfo>,
+    /// It links shotline to a video editor: it answers `sequences`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editor: bool,
 }
 
 /// One model and what it accepts. Limits that don't apply are left out.
@@ -345,6 +348,78 @@ pub struct VoiceInfo {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Voices {
     pub voices: Vec<VoiceInfo>,
+}
+
+/// Params of `sequences`: the film's folder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SequencesParams {
+    pub film: PathBuf,
+}
+
+/// Reply to `sequences`: the editor's projects for the film.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Sequences {
+    pub edits: Vec<EditInfo>,
+}
+
+/// One editor project, or why it couldn't be read.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct EditInfo {
+    /// Its file; shotline reads the sequences again once it changes.
+    pub file: PathBuf,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub sequences: Vec<SequenceInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SequenceInfo {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    /// V1 first.
+    pub video: Vec<TrackInfo>,
+    /// A1 first.
+    pub audio: Vec<TrackInfo>,
+}
+
+impl SequenceInfo {
+    /// How long it runs: to the end of its last clip.
+    pub fn length(&self) -> f64 {
+        self.video
+            .iter()
+            .chain(&self.audio)
+            .flat_map(|t| &t.clips)
+            .map(|c| c.start + c.length)
+            .fold(0.0, f64::max)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TrackInfo {
+    pub name: String,
+    /// Shown (video) or not muted (audio).
+    pub enabled: bool,
+    pub clips: Vec<ClipInfo>,
+}
+
+/// A clip on a track. Times in seconds.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ClipInfo {
+    pub name: String,
+    /// None for what isn't a file: a nested sequence, a title, a generator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    pub start: f64,
+    pub length: f64,
+    /// Where in the file it starts.
+    #[serde(default)]
+    pub from: f64,
+    pub speed: f64,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -6,7 +6,8 @@ use std::path::Path;
 use async_trait::async_trait;
 pub use shotline_protocol as protocol;
 use shotline_protocol::{
-    Balance, Description, Outputs, PluginError, Quote, Rates, Request, Status, Usage, Voices,
+    Balance, Description, Outputs, PluginError, Quote, Rates, Request, Sequences, Status, Usage,
+    Voices,
 };
 
 pub mod conformance;
@@ -56,6 +57,11 @@ pub trait Plugin: Send + Sync {
     /// The voices audio.tts can use. Must be free to call.
     async fn voices(&self) -> Result<Voices> {
         Err(Error::Unsupported("voices".into()))
+    }
+
+    /// An editor plugin's projects for the film in `film`, read only. Must be free to call.
+    async fn sequences(&self, _film: &Path) -> Result<Sequences> {
+        Err(Error::Unsupported("sequences".into()))
     }
 
     /// Charges since an RFC 3339 time.

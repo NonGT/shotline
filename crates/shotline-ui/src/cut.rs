@@ -2,8 +2,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
+use shotline_core::protocol::{ClipInfo, SequenceInfo, TrackInfo};
 use shotline_core::{MatchAt, ShotRef, Transition};
 
 use crate::edit::Action;
@@ -31,6 +33,11 @@ impl App {
             .show(ui, |ui| {
                 page(ui, PAGE, |ui| {
                     self.deck(ui);
+                    self.cut_switch(ui);
+                    if let Some((file, seq)) = self.edit_sequence() {
+                        self.edit_lanes(ui, &file, &seq);
+                        return;
+                    }
                     if self.film.cut.is_empty() {
                         hint(ui, "No shots yet. Add some in Shots.");
                         return;
@@ -219,6 +226,228 @@ impl App {
                 self.open_shot(r);
             }
             None => {}
+        }
+    }
+
+    /// Picks up what the editor plugins said, and asks them again once the film was read again.
+    fn refresh_edits(&mut self, ctx: &egui::Context) {
+        if let Some(slot) = &self.edits_asked {
+            let Some(got) = slot.lock().unwrap().take() else {
+                return;
+            };
+            self.edits_asked = None;
+            let mut takes = HashMap::new();
+            for e in &got.0 {
+                for c in e
+                    .sequences
+                    .iter()
+                    .flat_map(|s| s.video.iter().chain(&s.audio))
+                {
+                    for f in c.clips.iter().filter_map(|c| c.file.as_ref()) {
+                        if !takes.contains_key(f)
+                            && let Some(t) = self.project.take_of_file(f)
+                        {
+                            takes.insert(f.clone(), t);
+                        }
+                    }
+                }
+            }
+            self.edits = got;
+            self.edit_takes = takes;
+        }
+        if !self.edits_stale {
+            return;
+        }
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        self.edits_stale = false;
+        let slot: Arc<Mutex<Option<_>>> = Arc::default();
+        self.edits_asked = Some(slot.clone());
+        let (film, ctx) = (self.project.root.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            *slot.lock().unwrap() = Some(host.sequences(&film));
+            ctx.request_repaint();
+        });
+    }
+
+    /// The editor sequence picked to show, while it's still there.
+    fn edit_sequence(&self) -> Option<(PathBuf, SequenceInfo)> {
+        let (file, name) = self.cut_view.as_ref()?;
+        let edit = self.edits.0.iter().find(|e| e.file == *file)?;
+        let seq = edit.sequences.iter().find(|s| s.name == *name)?;
+        Some((file.clone(), seq.clone()))
+    }
+
+    /// The film's own cut, or a sequence of a video editor's project, like FilmCraft's in
+    /// shared/.
+    fn cut_switch(&mut self, ui: &mut egui::Ui) {
+        self.refresh_edits(ui.ctx());
+        let (edits, problems) = &self.edits;
+        for p in problems {
+            ui.label(RichText::new(short(p, 100)).color(theme::FLAG))
+                .on_hover_text(p);
+        }
+        if edits.is_empty() {
+            hint(
+                ui,
+                "A FilmCraft project saved in shared/ shows its sequences here, next to this cut.",
+            );
+            ui.add_space(6.0);
+            return;
+        }
+        let several = edits.len() > 1;
+        let now = self.edit_sequence().map(|(f, s)| (f, s.name));
+        let mut pick = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .selectable_label(now.is_none(), "This film's cut")
+                .on_hover_text("the selected takes in shot order, as shotline renders them")
+                .clicked()
+            {
+                pick = Some(None);
+            }
+            ui.separator();
+            for e in edits {
+                let file = e.file.file_name().unwrap_or_default().to_string_lossy();
+                if let Some(why) = &e.error {
+                    ui.label(RichText::new(format!("{file} can't be read")).color(theme::FLAG))
+                        .on_hover_text(why);
+                    continue;
+                }
+                for seq in &e.sequences {
+                    let label = if several {
+                        format!("{file} · {}", seq.name)
+                    } else {
+                        seq.name.clone()
+                    };
+                    let on = now
+                        .as_ref()
+                        .is_some_and(|(f, s)| *f == e.file && *s == seq.name);
+                    if ui
+                        .selectable_label(on, label)
+                        .on_hover_text(format!("{} in {}", seq.name, self.project.rel(&e.file)))
+                        .clicked()
+                    {
+                        pick = Some(Some((e.file.clone(), seq.name.clone())));
+                    }
+                }
+                if e.sequences.is_empty() {
+                    ui.weak(format!("{file} has no sequences"));
+                }
+            }
+        });
+        if let Some(p) = pick {
+            self.cut_view = p;
+        }
+        ui.add_space(10.0);
+    }
+
+    /// An editor's sequence on its tracks, read only. Clips that are takes go by the take's name.
+    fn edit_lanes(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
+        let ctx = ui.ctx().clone();
+        let fps = if seq.fps.fract() == 0.0 {
+            format!("{}", seq.fps)
+        } else {
+            format!("{:.3}", seq.fps)
+        };
+        hint(
+            ui,
+            &format!(
+                "{} · {} × {} · {fps} fps · {}. Read only: it's edited in its own app.",
+                self.project.rel(file),
+                seq.width,
+                seq.height,
+                crate::player::clock(seq.length()),
+            ),
+        );
+        ui.add_space(8.0);
+        let lanes_of = |tracks: &[TrackInfo], sound: bool| -> Vec<Lane> {
+            tracks
+                .iter()
+                .enumerate()
+                .map(|(i, t)| Lane {
+                    name: format!("{}{}", if sound { "A" } else { "V" }, i + 1),
+                    blocks: t
+                        .clips
+                        .iter()
+                        .map(|c| self.edit_block(&ctx, c, sound))
+                        .collect(),
+                    sound,
+                    enabled: t.enabled,
+                })
+                .collect()
+        };
+        let video = lanes_of(&seq.video, false);
+        let audio = lanes_of(&seq.audio, true);
+        if let Some(Hit::Open(r)) = lanes::show(
+            ui,
+            "edit",
+            &video,
+            &audio,
+            seq.length(),
+            None,
+            &mut self.thumbs,
+        ) {
+            self.tab = crate::Tab::Shots;
+            self.open_shot(r);
+        }
+    }
+
+    fn edit_block(&self, ctx: &egui::Context, c: &ClipInfo, sound: bool) -> Block {
+        let take = c.file.as_ref().and_then(|f| self.edit_takes.get(f));
+        let mut hover = vec![];
+        if let Some(f) = &c.file {
+            hover.push(self.project.rel(f));
+        }
+        if c.from > 0.0 {
+            hover.push(format!("from {:.2} s into it", c.from));
+        }
+        if c.speed != 1.0 {
+            hover.push(format!("at {:.0}% speed", c.speed * 100.0));
+        }
+        if !c.enabled {
+            hover.push("turned off".into());
+        }
+        if take.is_some() {
+            hover.push("click to open the shot".into());
+        }
+        let still = match (&c.file, take.and_then(|t| t.output())) {
+            _ if sound => None,
+            (Some(f), Some(job)) if f.is_file() => Some((
+                f.clone(),
+                self.project
+                    .root
+                    .join(".shotline/cache/posters")
+                    .join(format!("{}.png", job.id)),
+            )),
+            (Some(f), None) if f.is_file() && is_video(f) => {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                f.hash(&mut h);
+                Some((
+                    f.clone(),
+                    self.project
+                        .root
+                        .join(".shotline/cache/posters")
+                        .join(format!("file-{:016x}.png", h.finish())),
+                ))
+            }
+            _ => None,
+        };
+        if let Some((video, png)) = &still
+            && !png.is_file()
+        {
+            crate::make_poster(ctx, (self.ff.as_ref(), &self.posters), video, png);
+        }
+        Block {
+            name: take.map_or_else(|| c.name.clone(), |t| t.to_string()),
+            start: c.start,
+            length: c.length,
+            still: still.map(|(_, png)| png),
+            hover: hover.join("\n"),
+            enabled: c.enabled,
+            shot: take.map(|t| t.shot),
         }
     }
 
@@ -464,4 +693,11 @@ fn plural(n: usize, what: &str) -> String {
     } else {
         format!("{n} {what}s")
     }
+}
+
+fn is_video(f: &Path) -> bool {
+    f.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+        ["mp4", "mov", "m4v", "webm", "mkv", "avi", "mxf"]
+            .contains(&x.to_ascii_lowercase().as_str())
+    })
 }

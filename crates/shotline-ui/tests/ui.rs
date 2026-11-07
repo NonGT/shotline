@@ -8,7 +8,9 @@ use eframe::egui::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use shotline_core::ledger::Context;
-use shotline_core::protocol::{Description, ModelInfo, Op, Quote, VoiceInfo};
+use shotline_core::protocol::{
+    ClipInfo, Description, EditInfo, ModelInfo, Op, Quote, SequenceInfo, TrackInfo, VoiceInfo,
+};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
 use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
 
@@ -314,6 +316,7 @@ impl Host for TestHost {
             name: name.into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
             env: vec![],
             models,
         };
@@ -457,6 +460,14 @@ impl Host for TestHost {
         std::fs::create_dir_all(out.parent().unwrap())?;
         std::fs::write(&out, "")?;
         Ok((out, "8s · 720x1280".into()))
+    }
+
+    /// An editor plugin's answer, from shared/edits.json when a test writes one.
+    fn sequences(&self, film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+        let edits = std::fs::read_to_string(film.join("shared/edits.json"))
+            .map(|t| serde_json::from_str(&t).unwrap())
+            .unwrap_or_default();
+        (edits, vec![])
     }
 
     fn rates(&self, _: &Path) -> anyhow::Result<Vec<shotline_core::ledger::RateLine>> {
@@ -618,6 +629,7 @@ fn make_an_anchor_image() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
             env: vec![],
             models: vec![model("fal-ai/flux"), model("fal-ai/nano-banana")],
         }],
@@ -711,6 +723,7 @@ fn a_shot_s_pictures_and_a_take() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
             env: vec![],
             models: vec![
                 ModelInfo {
@@ -924,6 +937,7 @@ fn translate_only_when_it_helps() {
                 name: "fal".into(),
                 version: "1".into(),
                 protocol: 1,
+                editor: false,
                 env: vec![],
                 models: vec![model("fal-ai/nano-banana", Op::ImageGenerate)],
             },
@@ -931,6 +945,7 @@ fn translate_only_when_it_helps() {
                 name: "venice".into(),
                 version: "1".into(),
                 protocol: 1,
+                editor: false,
                 env: vec![var.into()],
                 models: vec![model("claude-haiku-5-5", Op::TextGenerate)],
             },
@@ -1103,6 +1118,7 @@ fn edit_elements() {
             name: "elevenlabs".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
             env: vec![],
             models: vec![tts("eleven_v3"), tts("eleven_flash_v2_5")],
         }],
@@ -1640,6 +1656,87 @@ fn a_selected_take_s_last_frame() {
     assert_eq!(p.shot(next).unwrap().transition, Transition::Continue);
 }
 
+#[test]
+fn an_editor_s_sequence_on_the_cut_page() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    wait(&mut h, 0.1);
+    h.get_by_label_contains("A FilmCraft project saved in shared/");
+
+    // As the plugin reads it: a take of the film's, by its path, and a file of its own.
+    let take = p.take(R, "1").unwrap();
+    let video = p.job_dir(take.output().unwrap().id).join("out.mp4");
+    let clip = |name: &str, file: PathBuf, start: f64| ClipInfo {
+        name: name.into(),
+        file: Some(file),
+        start,
+        length: 1.0,
+        speed: 1.0,
+        enabled: true,
+        ..ClipInfo::default()
+    };
+    let track = |clips| TrackInfo {
+        name: "1".into(),
+        enabled: true,
+        clips,
+    };
+    let edits = vec![
+        EditInfo {
+            file: p.root.join("shared/broken.fcproj"),
+            name: "broken".into(),
+            error: Some("not JSON".into()),
+            sequences: vec![],
+        },
+        EditInfo {
+            file: p.root.join("shared/edit.fcproj"),
+            name: "Rain edit".into(),
+            error: None,
+            sequences: vec![SequenceInfo {
+                name: "Main edit".into(),
+                width: 720,
+                height: 1280,
+                fps: 24.0,
+                video: vec![track(vec![clip("out.mp4", video, 0.0)])],
+                audio: vec![track(vec![clip("rain.wav", p.root.join("rain.wav"), 1.0)])],
+            }],
+        },
+    ];
+    std::fs::create_dir_all(p.root.join("shared")).unwrap();
+    std::fs::write(
+        p.root.join("shared/edits.json"),
+        serde_json::to_string(&edits).unwrap(),
+    )
+    .unwrap();
+    h.get_by_label("Reload").click();
+    wait(&mut h, 0.1);
+
+    h.get_by_label("broken.fcproj can't be read");
+    h.get_by_label("edit.fcproj · Main edit").click();
+    h.run();
+    h.get_by_label_contains("shared/edit.fcproj · 720 × 1280 · 24 fps");
+    h.get_by_role_and_label(Role::Button, "rain.wav");
+    // Back and forth between the two.
+    h.get_by_label("This film's cut").click();
+    h.run();
+    assert!(h.query_by_label("rain.wav").is_none());
+    h.get_by_label("edit.fcproj · Main edit").click();
+    h.run();
+    // The take goes by its name and opens its shot.
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    h.run();
+    assert_eq!(h.state().tab(), Tab::Shots);
+}
+
 /// A second of test pattern with a tone, or None without ffmpeg.
 fn clip(path: &Path) -> Option<()> {
     let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
@@ -2036,6 +2133,7 @@ fn set_the_format_on_the_story_tab() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
             env: vec![],
             models: vec![ModelInfo {
                 id: "minimax/h3-max/reference-to-video".into(),
@@ -2121,6 +2219,7 @@ fn a_shot_on_another_model() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
             env: vec![],
             models: vec![
                 video("minimax/h3-max/reference-to-video", &["768P", "1080P"]),
@@ -2916,6 +3015,7 @@ fn remake_starts_from_what_a_picture_was_made_with() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
             env: vec![],
             models: vec![ModelInfo {
                 id: "fal-ai/nano-banana".into(),
@@ -2974,6 +3074,7 @@ fn no_more_lines_than_the_video_model_takes() {
         name: "fal".into(),
         version: "1".into(),
         protocol: 1,
+        editor: false,
         env: vec![],
         models: vec![ModelInfo {
             id: model.clone(),

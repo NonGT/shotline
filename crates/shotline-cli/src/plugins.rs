@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use shotline_builtin::fal::{self, Fal};
-use shotline_core::protocol::{Description, VoiceInfo};
+use shotline_core::protocol::{Description, EditInfo, VoiceInfo};
 use shotline_core::{Catalog, Project, user_dir};
 use shotline_plugin::conformance::{self, Options};
 use shotline_plugin::discovery::{self, Entry, Source};
@@ -36,6 +36,7 @@ fn fal_description() -> Description {
         name: "fal".into(),
         version: env!("CARGO_PKG_VERSION").into(),
         protocol: PROTOCOL_VERSION,
+        editor: false,
         env: vec![fal::KEY_VAR.into()],
         models: fal::models(),
     }
@@ -192,6 +193,12 @@ pub fn ls(installed: &Installed) {
                         println!("  {:<18} {}  options: {}", m.op, m.id, opts.join(", "));
                     }
                 }
+                if d.editor {
+                    println!(
+                        "  {:<18} the film's projects in a video editor",
+                        "sequences"
+                    );
+                }
                 print_env(&d.env, &env_file);
             }
         }
@@ -323,6 +330,27 @@ pub fn voices(installed: &Installed, name: &str) -> Result<Vec<VoiceInfo>> {
         Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't list its voices"),
         Err(e) => bail!("{name}: {e}"),
     }
+}
+
+/// What the editor plugins say about the film: their projects, sequences and clips. One that
+/// fails is skipped with a line in the returned problems.
+pub fn sequences(installed: &Installed, film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+    let rt = runtime();
+    let (mut edits, mut problems) = (vec![], vec![]);
+    for p in &installed.plugins {
+        if !p.description.as_ref().is_ok_and(|d| d.editor) {
+            continue;
+        }
+        let got = open(installed, &p.name).and_then(|plugin| {
+            rt.block_on(plugin.sequences(film))
+                .map_err(|e| anyhow::anyhow!("{}: {e}", p.name))
+        });
+        match got {
+            Ok(s) => edits.extend(s.edits),
+            Err(e) => problems.push(e.to_string()),
+        }
+    }
+    (edits, problems)
 }
 
 pub fn print_voices(installed: &Installed, name: &str) -> Result<()> {

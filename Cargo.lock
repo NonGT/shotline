@@ -4523,6 +4523,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shotline-plugin-filmcraft"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "shotline-plugin",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "shotline-plugin-local"
 version = "0.1.0"
 dependencies = [
