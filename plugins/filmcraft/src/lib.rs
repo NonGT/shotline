@@ -596,6 +596,12 @@ mod tests {
 
     /// Shaped like FilmCraft 0.18 writes it, cut down; the parts not read are left in to show
     /// they're skipped.
+    /// An absolute path on any system; `/film` has no drive on Windows.
+    fn take_file() -> PathBuf {
+        let root = if cfg!(windows) { r"C:\film" } else { "/film" };
+        Path::new(root).join("jobs").join("01A").join("out.mp4")
+    }
+
     fn fixture(dir: &Path, schema: u64) -> PathBuf {
         let clip = |id: u64, item: u64, name: &str, start: i64, dur: i64, from: i64| {
             serde_json::json!({
@@ -625,7 +631,7 @@ mod tests {
                 ]},
                 "items": {
                     "5": {"id": 5, "name": "01-010#1", "label": "Iris", "kind": {"Media": {
-                        "media": {"File": {"path": "/film/jobs/01A/out.mp4"}}, "offline": false}}},
+                        "media": {"File": {"path": take_file()}}, "offline": false}}},
                     "6": {"id": 6, "name": "music.wav", "label": "Iris", "kind": {"Media": {
                         "media": {"File": {"path": "../music.wav"}}}}},
                     "7": {"id": 7, "name": "bars", "label": "Iris", "kind": {"Media": {
@@ -676,7 +682,7 @@ mod tests {
             v1.clips[0],
             ClipInfo {
                 name: "01-010#1".into(),
-                file: Some("/film/jobs/01A/out.mp4".into()),
+                file: Some(take_file()),
                 start: 0.0,
                 length: 2.0,
                 from: 0.5,
