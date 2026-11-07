@@ -380,17 +380,155 @@ impl App {
         };
         let video = lanes_of(&seq.video, false);
         let audio = lanes_of(&seq.audio, true);
-        if let Some(Hit::Open(r)) = lanes::show(
+        let out = self.preview_of(seq);
+        self.sequence_made(&ctx);
+        let making = self.seq_making.as_ref().is_some_and(|m| m.out == out);
+        let title = seq_title(file, seq);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled_ui(!making && seq.length() > 0.0, |ui| {
+                    crate::icon_button(ui, "Play the sequence", crate::play_icon)
+                })
+                .inner
+                .on_hover_text(
+                    "plays a preview: the top clip at each moment, the sound tracks mixed; \
+                     effects and transitions are left out",
+                )
+                .clicked()
+            {
+                self.play_sequence(&ctx, &title, seq, &out, 0.0);
+            }
+            if making {
+                ui.spinner();
+                ui.weak("making a preview to play…");
+            }
+        });
+        let playing = self
+            .seq_playing
+            .as_ref()
+            .filter(|(p, _)| *p == out)
+            .and(self.deck.as_ref())
+            .filter(|d| d.title() == title);
+        if let Some((_, skipped)) = self.seq_playing.as_ref().filter(|(p, _)| *p == out)
+            && playing.is_some()
+            && !skipped.is_empty()
+        {
+            ui.label(
+                RichText::new(format!(
+                    "Left out of the preview: {}",
+                    short(&skipped.join("; "), 200)
+                ))
+                .color(theme::DUST),
+            )
+            .on_hover_text(skipped.join("\n"));
+        }
+        let playhead = playing.map(|d| d.position());
+        ui.add_space(6.0);
+        match lanes::show(
             ui,
             "edit",
             &video,
             &audio,
             seq.length(),
-            None,
+            playhead,
             &mut self.thumbs,
         ) {
-            self.tab = crate::Tab::Shots;
-            self.open_shot(r);
+            Some(Hit::Open(r)) => {
+                self.tab = crate::Tab::Shots;
+                self.open_shot(r);
+            }
+            Some(Hit::Seek(t)) if playhead.is_some() => {
+                if let Some(d) = &mut self.deck {
+                    d.seek(t, self.audio.as_ref());
+                }
+            }
+            Some(Hit::Seek(t)) if !making => self.play_sequence(&ctx, &title, seq, &out, t),
+            _ => {}
+        }
+    }
+
+    /// Where a sequence's preview goes: named by what's in it, so a changed sequence or a
+    /// changed file gets a new one.
+    fn preview_of(&self, seq: &SequenceInfo) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(seq).unwrap_or_default().hash(&mut h);
+        for c in seq.video.iter().chain(&seq.audio).flat_map(|t| &t.clips) {
+            if let Some(m) = c.file.as_ref().and_then(|f| f.metadata().ok()) {
+                m.len().hash(&mut h);
+                m.modified().ok().hash(&mut h);
+            }
+        }
+        self.project
+            .root
+            .join(".shotline/cache/sequences")
+            .join(format!("{:016x}.mp4", h.finish()))
+    }
+
+    /// Plays the preview from `at`, once it's made.
+    fn play_sequence(
+        &mut self,
+        ctx: &egui::Context,
+        title: &str,
+        seq: &SequenceInfo,
+        out: &Path,
+        at: f64,
+    ) {
+        let left_out = left_out(seq);
+        if out.is_file() {
+            let skipped = self
+                .seq_playing
+                .as_ref()
+                .filter(|(p, _)| p == out)
+                .map_or(left_out, |(_, s)| s.clone());
+            self.play(title, &[out.to_path_buf()], false);
+            if let Some(d) = &mut self.deck {
+                if at > 0.0 {
+                    d.seek(at, self.audio.as_ref());
+                }
+                self.seq_playing = Some((out.to_path_buf(), skipped));
+            }
+            return;
+        }
+        let Some(ff) = self.ff.clone() else {
+            self.error("can't play without ffmpeg; install it or set SHOTLINE_FFMPEG".into());
+            return;
+        };
+        let media = to_media(seq);
+        let slot: Made = Arc::default();
+        self.seq_making = Some(Making {
+            out: out.to_path_buf(),
+            title: title.into(),
+            at,
+            left_out,
+            seq: seq.clone(),
+            slot: slot.clone(),
+        });
+        let (out, ctx) = (out.to_path_buf(), ctx.clone());
+        std::thread::spawn(move || {
+            let r = ff.sequence_preview(&media, &out).map_err(|e| e.to_string());
+            *slot.lock().unwrap() = Some(r);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Plays a preview that's just been made.
+    fn sequence_made(&mut self, ctx: &egui::Context) {
+        let Some(m) = &self.seq_making else {
+            return;
+        };
+        let Some(r) = m.slot.lock().unwrap().take() else {
+            return;
+        };
+        let m = self.seq_making.take().expect("checked");
+        match r {
+            Ok(skipped) => {
+                let mut all = m.left_out.clone();
+                all.extend(skipped);
+                self.seq_playing = Some((m.out.clone(), all));
+                self.play_sequence(ctx, &m.title, &m.seq, &m.out, m.at);
+            }
+            Err(e) => self.error(format!("can't make a preview of {}: {e}", m.title)),
         }
     }
 
@@ -675,6 +813,67 @@ impl App {
         let Render::Done(f, about) = done else { return };
         self.reload();
         self.info(format!("{} · {about}", self.project.rel(&f)));
+    }
+}
+
+/// Filled once the preview is made: the clips left out of it, or why it couldn't be.
+type Made = Arc<Mutex<Option<Result<Vec<String>, String>>>>;
+
+/// A sequence's preview being made in the background.
+pub(crate) struct Making {
+    out: PathBuf,
+    title: String,
+    at: f64,
+    left_out: Vec<String>,
+    seq: SequenceInfo,
+    slot: Made,
+}
+
+fn seq_title(file: &Path, seq: &SequenceInfo) -> String {
+    let file = file.file_name().unwrap_or_default().to_string_lossy();
+    format!("{file} · {}", seq.name)
+}
+
+/// What the editor shows but a preview can't: clips made in the editor itself.
+fn left_out(seq: &SequenceInfo) -> Vec<String> {
+    seq.video
+        .iter()
+        .chain(&seq.audio)
+        .filter(|t| t.enabled)
+        .flat_map(|t| &t.clips)
+        .filter(|c| c.enabled && c.file.is_none())
+        .map(|c| format!("{}: made in the editor", c.name))
+        .collect()
+}
+
+/// Lowest video track first, so higher ones cover it; tracks and clips turned off left out.
+fn to_media(seq: &SequenceInfo) -> shotline_media::sequence::Sequence {
+    use shotline_media::sequence::{Piece, Sequence};
+    let pieces = |tracks: &[TrackInfo]| -> Vec<Piece> {
+        tracks
+            .iter()
+            .filter(|t| t.enabled)
+            .flat_map(|t| &t.clips)
+            .filter(|c| c.enabled)
+            .filter_map(|c| {
+                Some(Piece {
+                    path: c.file.clone()?,
+                    label: c.name.clone(),
+                    start: c.start,
+                    length: c.length,
+                    from: c.from,
+                    speed: c.speed,
+                })
+            })
+            .collect()
+    };
+    Sequence {
+        width: seq.width,
+        height: seq.height,
+        fps: seq.fps,
+        length: seq.length(),
+        video: pieces(&seq.video),
+        audio: pieces(&seq.audio),
     }
 }
 

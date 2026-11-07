@@ -228,6 +228,10 @@ pub struct App {
     edits_asked: Option<Arc<Mutex<Option<Edits>>>>,
     /// The film was read again, so the editors are asked again.
     edits_stale: bool,
+    /// A sequence's preview being made, and where to start playing it once it's there.
+    seq_making: Option<crate::cut::Making>,
+    /// The preview the deck plays, and the clips left out of it.
+    seq_playing: Option<(PathBuf, Vec<String>)>,
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
@@ -528,6 +532,8 @@ impl App {
             edit_takes: HashMap::new(),
             edits_asked: None,
             edits_stale: true,
+            seq_making: None,
+            seq_playing: None,
             shot: None,
             takes: vec![],
             status: None,

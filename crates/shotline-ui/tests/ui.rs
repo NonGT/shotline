@@ -3209,3 +3209,90 @@ fn a_recorded_line_has_a_player_under_it() {
     h.get_by_label("0.5 / 1.0 s");
     h.get_by_label("0.5 s in the shot");
 }
+
+#[test]
+fn plays_an_editor_sequence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let take = p.take(R, "1").unwrap();
+    let video = p.job_dir(take.output().unwrap().id).join("out.mp4");
+    if clip(&video).is_none() {
+        return;
+    }
+    let piece = |name: &str, file: Option<PathBuf>, start: f64| ClipInfo {
+        name: name.into(),
+        file,
+        start,
+        length: 1.0,
+        speed: 1.0,
+        enabled: true,
+        ..ClipInfo::default()
+    };
+    let track = |clips| TrackInfo {
+        name: "1".into(),
+        enabled: true,
+        clips,
+    };
+    let edits = vec![EditInfo {
+        file: p.root.join("shared/edit.fcproj"),
+        name: "Rain edit".into(),
+        error: None,
+        sequences: vec![SequenceInfo {
+            name: "Main edit".into(),
+            width: 160,
+            height: 90,
+            fps: 24.0,
+            video: vec![
+                track(vec![piece("out.mp4", Some(video.clone()), 0.0)]),
+                track(vec![piece("Title", None, 0.5)]),
+            ],
+            audio: vec![track(vec![piece("out.mp4", Some(video), 0.0)])],
+        }],
+    }];
+    std::fs::create_dir_all(p.root.join("shared")).unwrap();
+    std::fs::write(
+        p.root.join("shared/edits.json"),
+        serde_json::to_string(&edits).unwrap(),
+    )
+    .unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Main edit")
+        .is_some()));
+    h.get_by_label("Main edit").click();
+    h.run();
+
+    // A preview is made first, then it plays.
+    h.get_by_label("Play the sequence").click();
+    assert!(wait_for(&mut h, |h| h.state().is_playing()));
+    wait(&mut h, 0.1);
+    assert_eq!(h.query_all_by_label("edit.fcproj · Main edit").count(), 2);
+    h.get_by_label_contains("Left out of the preview: Title: made in the editor");
+    let made: Vec<_> = std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
+        .unwrap()
+        .collect();
+    assert_eq!(made.len(), 1);
+    wait(&mut h, 1.2);
+    assert!(wait_for(&mut h, |h| !h.state().is_playing()));
+
+    // Made once: the playhead starts it again straight away.
+    h.get_by_label("Close player").click();
+    wait(&mut h, 0.1);
+    h.get_by_role_and_label(Role::Slider, "Playhead").click();
+    assert!(wait_for(&mut h, |h| h.state().is_playing()));
+    assert_eq!(
+        std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
+            .unwrap()
+            .count(),
+        1
+    );
+}

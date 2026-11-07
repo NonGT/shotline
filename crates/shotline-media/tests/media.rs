@@ -393,3 +393,50 @@ fn pieces_of_takes_made_into_one() {
             .contains("shorter than its fade")
     );
 }
+
+#[test]
+fn a_sequence_made_into_a_preview() {
+    use shotline_media::sequence::{Piece, Sequence};
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let red = clip(dir.path(), "red.mp4", RED, false);
+    let blue = clip(dir.path(), "blue.mp4", BLUE, false);
+    let music = tone(dir.path());
+    let piece = |path: &Path, start: f64, length: f64, from: f64| Piece {
+        path: path.to_path_buf(),
+        label: path.display().to_string(),
+        start,
+        length,
+        from,
+        speed: 1.0,
+    };
+    let seq = Sequence {
+        width: 320,
+        height: 180,
+        fps: 24.0,
+        length: 2.0,
+        // Red, a gap, red again; blue above the first half second of the red.
+        video: vec![
+            piece(&red, 0.0, 1.0, 0.0),
+            piece(&red, 1.5, 0.5, 0.25),
+            piece(&blue, 0.5, 0.5, 0.0),
+            piece(&dir.path().join("gone.mp4"), 0.0, 1.0, 0.0),
+        ],
+        audio: vec![piece(&music, 0.5, 1.0, 0.0), piece(&red, 0.0, 1.0, 0.0)],
+    };
+    let out = dir.path().join("cache/seq.mp4");
+    let skipped = ff.sequence_preview(&seq, &out).unwrap();
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    let info = ff.probe(&out).unwrap();
+    assert_eq!((info.width, info.height), (320, 180));
+    assert!(info.audio);
+    assert!(close(info.duration, 2.0), "{}", info.duration);
+    let frames: Vec<Vec<u8>> = ff.frames(&out, 320, 180, "24/1", None).unwrap().collect();
+    let at = |t: f64| mean(&frames[(t * 24.0) as usize]);
+    let (r, b, black) = (at(0.25), at(0.75), at(1.25));
+    assert!(r[0] > r[2], "red first {r:?}");
+    assert!(b[2] > b[0], "blue over it {b:?}");
+    assert!(black.iter().all(|c| *c < 20.0), "a gap is black {black:?}");
+    let again = at(1.75);
+    assert!(again[0] > again[2], "red again {again:?}");
+}
