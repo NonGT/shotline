@@ -1741,9 +1741,10 @@ fn an_editor_s_sequence_on_the_cut_page() {
     )
     .unwrap();
     h.get_by_label("Reload").click();
-    wait(&mut h, 0.1);
-
-    h.get_by_label("broken.fcproj can't be read");
+    // Read on another thread, which can take a while on a slow machine.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("broken.fcproj can't be read")
+        .is_some()));
     h.get_by_label("edit.fcproj · Main edit").click();
     h.run();
     h.get_by_label_contains("shared/edit.fcproj · 720 × 1280 · 24 fps");
