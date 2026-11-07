@@ -9,6 +9,7 @@ mod cut;
 mod edit;
 mod git;
 mod grouped;
+mod lanes;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
 mod pieces;
@@ -263,6 +264,9 @@ pub struct App {
     remaking: Option<(ShotRef, usize, String)>,
     /// Recordings' lengths, as ffprobe gave them.
     lengths: HashMap<PathBuf, f64>,
+    /// Clips' lengths for the Cut page, probed in the background; None while it's probing or
+    /// when it can't tell.
+    clip_lengths: Arc<Mutex<HashMap<PathBuf, Option<f64>>>>,
     /// timeline.toml as edited, saved once nothing has focus.
     timeline_form: Timeline,
     render: Arc<Mutex<cut::Render>>,
@@ -536,6 +540,7 @@ impl App {
             paused: None,
             remaking: None,
             lengths: HashMap::new(),
+            clip_lengths: Arc::default(),
             timeline_form: Timeline::default(),
             render: Arc::default(),
             cost_view: cost::View::default(),
@@ -2690,6 +2695,29 @@ fn in_use(film: &Film, root: &Path) -> HashMap<PathBuf, String> {
     out
 }
 
+/// Takes `video`'s still into `png` in the background, unless it's being taken already.
+pub(crate) fn make_poster(
+    ctx: &egui::Context,
+    (ff, making): (Option<&Ffmpeg>, &Arc<Mutex<HashSet<PathBuf>>>),
+    video: &Path,
+    png: &Path,
+) {
+    if let Some(ff) = ff
+        && making.lock().unwrap().insert(png.to_path_buf())
+    {
+        let (ff, video, png) = (ff.clone(), video.to_path_buf(), png.to_path_buf());
+        let (making, ctx) = (making.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = ff.poster(&video, &png);
+            // Left in, a failed one isn't tried again every frame.
+            if png.is_file() {
+                making.lock().unwrap().remove(&png);
+            }
+            ctx.request_repaint();
+        });
+    }
+}
+
 /// A take's still, taken from its video the first time it's shown. Clicking it opens the take.
 fn poster(
     ui: &mut egui::Ui,
@@ -2703,20 +2731,7 @@ fn poster(
     let texture = if png.is_file() {
         thumbs.texture(ui, png, THUMB, name)
     } else {
-        if let Some(ff) = ff
-            && making.lock().unwrap().insert(png.to_path_buf())
-        {
-            let (ff, video, png) = (ff.clone(), video.to_path_buf(), png.to_path_buf());
-            let (making, ctx) = (making.clone(), ui.ctx().clone());
-            std::thread::spawn(move || {
-                let _ = ff.poster(&video, &png);
-                // Left in, a failed one isn't tried again every frame.
-                if png.is_file() {
-                    making.lock().unwrap().remove(&png);
-                }
-                ctx.request_repaint();
-            });
-        }
+        make_poster(ui.ctx(), (ff, making), video, png);
         None
     };
     let r = match texture {

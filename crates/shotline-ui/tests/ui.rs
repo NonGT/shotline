@@ -1598,7 +1598,8 @@ fn a_selected_take_s_last_frame() {
     h.run();
 
     // Nothing to continue from until the shot before has a take in the cut.
-    h.get_by_label_contains(&format!("{next}  Paka stops")).click();
+    h.get_by_label_contains(&format!("{next}  Paka stops"))
+        .click();
     h.run();
     let cont = h.get_by_label("Continue from previous shot");
     assert!(cont.accesskit_node().is_disabled());
@@ -1613,7 +1614,8 @@ fn a_selected_take_s_last_frame() {
     assert!(last.is_file());
 
     // It's there to pick under Takes.
-    h.get_by_label_contains(&format!("{next}  Paka stops")).click();
+    h.get_by_label_contains(&format!("{next}  Paka stops"))
+        .click();
     h.run();
     h.get_by_role_and_label(Role::ComboBox, "Browse existing frames")
         .click();
@@ -1796,6 +1798,16 @@ fn plays_compares_and_plays_the_cut() {
         .query_all_by_label("the cut")
         .count()
         == 0));
+
+    // On its track, the playhead starts the cut where it's put, and the take opens its shot.
+    h.get_by_role_and_label(Role::Slider, "Playhead").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("the cut")
+        .count()
+        == 2));
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.1);
+    assert_eq!(h.state().tab(), Tab::Shots);
 }
 
 #[test]

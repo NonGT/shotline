@@ -443,6 +443,14 @@ impl Deck {
         self.playing
     }
 
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn position(&self) -> f64 {
+        self.players[0].position()
+    }
+
     pub fn pause(&mut self, audio: Option<&Audio>) {
         self.playing = false;
         self.sounding = Some(false);

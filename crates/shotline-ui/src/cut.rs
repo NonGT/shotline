@@ -1,12 +1,17 @@
 //! The Cut tab: the shots in play order, how they join, music over them, and renders.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use eframe::egui::{self, RichText};
-use shotline_core::{MatchAt, Transition};
+use shotline_core::{MatchAt, ShotRef, Transition};
 
 use crate::edit::Action;
+use crate::lanes::{self, Block, Hit, Lane};
 use crate::{App, PAGE, hint, page, remove_button, short, theme};
+
+/// The deck's title while it plays the cut.
+const CUT: &str = "the cut";
 
 #[derive(Clone, Default)]
 pub(crate) enum Render {
@@ -33,7 +38,7 @@ impl App {
                     let mut acts = vec![];
                     self.cut_actions(ui);
                     ui.add_space(10.0);
-                    self.cut_shots(ui);
+                    self.cut_lanes(ui);
                     ui.add_space(18.0);
                     self.joins(ui);
                     ui.add_space(18.0);
@@ -75,7 +80,7 @@ impl App {
                 .on_disabled_hover_text("no shot has a take selected yet")
                 .clicked()
             {
-                self.play("the cut", &files, false);
+                self.play(CUT, &files, false);
             }
             let why = if missing.is_empty() {
                 String::new()
@@ -114,41 +119,125 @@ impl App {
         }
     }
 
-    fn cut_shots(&mut self, ui: &mut egui::Ui) {
+    /// The selected takes back to back on V1, as Play plays them, and the music under them.
+    fn cut_lanes(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let at = self.timeline_form.colormatch.at;
-        let mut open = None;
-        egui::Grid::new("cut")
-            .num_columns(4)
-            .spacing(egui::vec2(18.0, 6.0))
-            .show(ui, |ui| {
-                for (i, c) in self.film.cut.iter().enumerate() {
-                    if ui
-                        .link(RichText::new(c.shot.to_string()).color(theme::PAPER))
-                        .on_hover_text("open the shot")
-                        .clicked()
-                    {
-                        open = Some(c.shot);
-                    }
-                    ui.weak(match c.transition {
-                        Transition::Cut => "on a cut",
-                        Transition::Continue => "from the shot before",
-                    });
-                    match &c.take {
-                        Some(t) if c.video.is_some() => ui.label(format!("take #{}", t.number)),
-                        _ => ui.label(RichText::new("no take").color(theme::FLAG)),
-                    };
-                    if c.colormatch(at, i == 0) {
-                        ui.weak("colour matched");
-                    } else {
-                        ui.label("");
-                    }
-                    ui.end_row();
-                }
+        let shot_lengths: HashMap<ShotRef, f64> = self
+            .film
+            .chapters
+            .iter()
+            .flat_map(|(_, s)| s)
+            .map(|(r, s)| (*r, s.duration.unwrap_or(5.0)))
+            .collect();
+        let mut blocks = vec![];
+        let mut end = 0.0;
+        let cut = self.film.cut.clone();
+        for (i, c) in cut.iter().enumerate() {
+            let (Some(video), Some(take)) = (&c.video, &c.take) else {
+                continue;
+            };
+            let length = self
+                .clip_length(&ctx, video)
+                .unwrap_or(shot_lengths.get(&c.shot).copied().unwrap_or(5.0));
+            let still = take.output().map(|j| {
+                self.project
+                    .root
+                    .join(".shotline/cache/posters")
+                    .join(format!("{}.png", j.id))
             });
-        if let Some(r) = open {
-            self.tab = crate::Tab::Shots;
-            self.open_shot(r);
+            if let Some(png) = &still
+                && !png.is_file()
+            {
+                crate::make_poster(&ctx, (self.ff.as_ref(), &self.posters), video, png);
+            }
+            let mut hover = vec![match c.transition {
+                Transition::Cut => "on a cut".to_string(),
+                Transition::Continue => "from the shot before".to_string(),
+            }];
+            if c.colormatch(at, i == 0) {
+                hover.push("colour matched".into());
+            }
+            hover.push("click to open the shot".into());
+            blocks.push(Block {
+                name: take.to_string(),
+                start: end,
+                length,
+                still,
+                hover: hover.join("\n"),
+                enabled: true,
+                shot: Some(c.shot),
+            });
+            end += length;
         }
+        let video = vec![Lane {
+            name: "V1".into(),
+            blocks,
+            sound: false,
+            enabled: true,
+        }];
+        let tracks = self.timeline_form.tracks.clone();
+        let mut audio = vec![];
+        for (i, tr) in tracks.iter().enumerate() {
+            let path = self.project.root.join(&tr.file);
+            let length = self
+                .clip_length(&ctx, &path)
+                .unwrap_or((end - tr.at).max(1.0));
+            end = f64::max(end, tr.at + length);
+            audio.push(Lane {
+                name: format!("A{}", i + 1),
+                blocks: vec![Block {
+                    name: tr.file.clone(),
+                    start: tr.at,
+                    length,
+                    still: None,
+                    hover: format!("volume {:.2}", tr.volume),
+                    enabled: tr.volume > 0.0,
+                    shot: None,
+                }],
+                sound: true,
+                enabled: true,
+            });
+        }
+        let playhead = self
+            .deck
+            .as_ref()
+            .filter(|d| d.title() == CUT)
+            .map(|d| d.position());
+        match lanes::show(ui, "cut", &video, &audio, end, playhead, &mut self.thumbs) {
+            Some(Hit::Seek(t)) => {
+                if self.deck.as_ref().is_none_or(|d| d.title() != CUT) {
+                    let files: Vec<PathBuf> = cut.iter().filter_map(|c| c.video.clone()).collect();
+                    self.play(CUT, &files, false);
+                }
+                if let Some(d) = &mut self.deck {
+                    d.seek(t, self.audio.as_ref());
+                }
+            }
+            Some(Hit::Open(r)) => {
+                self.tab = crate::Tab::Shots;
+                self.open_shot(r);
+            }
+            None => {}
+        }
+    }
+
+    /// How long a clip plays, once ffprobe has said.
+    fn clip_length(&self, ctx: &egui::Context, path: &Path) -> Option<f64> {
+        let mut known = self.clip_lengths.lock().unwrap();
+        if let Some(l) = known.get(path) {
+            return *l;
+        }
+        known.insert(path.to_path_buf(), None);
+        if let Some(ff) = self.ff.clone() {
+            let (lengths, path, ctx) = (self.clip_lengths.clone(), path.to_path_buf(), ctx.clone());
+            std::thread::spawn(move || {
+                let l = ff.audio_duration(&path).ok();
+                lengths.lock().unwrap().insert(path, l);
+                ctx.request_repaint();
+            });
+        }
+        None
     }
 
     /// Crossfade and colour matching, saved in timeline.toml once left.
