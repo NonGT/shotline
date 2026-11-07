@@ -6,8 +6,8 @@ use std::path::Path;
 use async_trait::async_trait;
 pub use shotline_protocol as protocol;
 use shotline_protocol::{
-    Balance, Description, EditParams, Edited, ImportParams, Imported, OpenParams, Outputs,
-    PluginError, Quote, Rates, Request, Sequences, Status, Usage, Voices,
+    Balance, Description, EditParams, Edited, ExportParams, Exported, ImportParams, Imported,
+    OpenParams, Outputs, PluginError, Quote, Rates, Request, Sequences, Status, Usage, Voices,
 };
 
 pub mod conformance;
@@ -72,6 +72,11 @@ pub trait Plugin: Send + Sync {
     /// Changes one clip of an editor's sequence.
     async fn edit(&self, _ask: &EditParams) -> Result<Edited> {
         Err(Error::Unsupported("edit".into()))
+    }
+
+    /// Renders a sequence of an editor's project to a video file.
+    async fn export(&self, _ask: &ExportParams) -> Result<Exported> {
+        Err(Error::Unsupported("export".into()))
     }
 
     /// Hands finished takes to the editor, or keeps them until it's open.

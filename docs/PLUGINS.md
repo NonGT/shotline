@@ -288,6 +288,12 @@ change touched, so edits made in the editor since stay. `saved` says the change 
 project file; false when it's only in the open editor so far. An editor that can't be reached
 answers with an error saying why.
 
+### export (optional)
+
+For an editor plugin: renders a sequence with the editor's own renderer and waits for the file.
+Params: `{"film", "file", "sequence", "out"}`, with `out` the video to write (its extension says
+the format). Returns `{"file": "/path/to/film/renders/Main_edit-20261107-221500.mp4"}`.
+
 ### import (optional)
 
 For an editor plugin: a take is done, so it should be at hand in the editor. Params:

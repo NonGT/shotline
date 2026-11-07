@@ -82,18 +82,29 @@ impl Editor {
                         .map_err(|e| format!("can't back the project up first: {e}"))?;
                     c.backed_up.set(true);
                 }
-                cli_run(&c.exe, &c.project, steps)
+                cli_run(&c.exe, &c.project, true, steps)
             }
+        }
+    }
+
+    /// Like `batch`, for steps that change nothing in the project, like a render.
+    pub fn batch_unsaved(&self, steps: &[Value]) -> Result<Vec<Value>, String> {
+        match self {
+            Editor::App(_) => self.batch(steps),
+            Editor::Cli(c) => cli_run(&c.exe, &c.project, false, steps),
         }
     }
 }
 
-fn cli_run(exe: &Path, project: &Path, steps: &[Value]) -> Result<Vec<Value>, String> {
+fn cli_run(exe: &Path, project: &Path, save: bool, steps: &[Value]) -> Result<Vec<Value>, String> {
     use std::io::Write;
-    let mut child = Command::new(exe)
-        .arg("--project")
-        .arg(project)
-        .args(["--compact", "--save", "run", "-"])
+    let mut cmd = Command::new(exe);
+    cmd.arg("--project").arg(project).arg("--compact");
+    if save {
+        cmd.arg("--save");
+    }
+    let mut child = cmd
+        .args(["run", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -254,6 +265,25 @@ pub(crate) fn running_apps() -> Vec<u32> {
     }
 }
 
+/// filmcraft-cli leaves `.<name>.fcproj.lock` next to the project while it works; a film kept in
+/// git shouldn't pick it up.
+fn ignore_lock(film: &Path) {
+    const LINE: &str = "shared/**/.*.fcproj.lock";
+    let path = film.join(".gitignore");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if text.lines().any(|l| l.trim() == LINE) {
+        return;
+    }
+    let sep = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = std::fs::write(&path, format!("{text}{sep}{LINE}\n"));
+}
+
 /// What `exe --version` says, e.g. "0.18.0" from "filmcraft-cli 0.18.0".
 fn version_of(exe: &Path) -> Option<String> {
     let out = Command::new(exe).arg("--version").output().ok()?;
@@ -326,6 +356,7 @@ pub fn for_project(film: &Path, project: &Path) -> Result<Editor, String> {
             if let Some(why) = mismatch(&exe) {
                 return Err(why);
             }
+            ignore_lock(film);
             Ok(Editor::cli(exe, project.to_path_buf(), film))
         }
         None => Err("FilmCraft is closed and filmcraft-cli isn't installed".into()),
@@ -404,6 +435,19 @@ mod tests {
         let says = upgrade("0.18.0", "0.19.1", cli);
         assert!(says.contains("Update FilmCraft to 0.19.1"), "{says}");
         assert!(numbers("0.10.0") > numbers("0.9.3"));
+    }
+
+    #[test]
+    fn ignores_the_cli_lock_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ignore = tmp.path().join(".gitignore");
+        std::fs::write(&ignore, "renders/").unwrap();
+        ignore_lock(tmp.path());
+        ignore_lock(tmp.path());
+        assert_eq!(
+            std::fs::read_to_string(&ignore).unwrap(),
+            "renders/\nshared/**/.*.fcproj.lock\n"
+        );
     }
 
     #[test]

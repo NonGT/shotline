@@ -9,8 +9,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{
-    Change, ClipInfo, Description, EditInfo, EditParams, Edited, ModelInfo, Op, OpenParams, Quote,
-    SequenceInfo, TrackInfo, TransitionInfo, VoiceInfo,
+    Change, ClipInfo, Description, EditInfo, EditParams, Edited, ExportParams, ModelInfo, Op,
+    OpenParams, Quote, Request, SequenceInfo, TrackInfo, TransitionInfo, VoiceInfo,
 };
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
 use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
@@ -473,6 +473,36 @@ impl Host for TestHost {
             .map(|t| t.lines().map(String::from).collect())
             .unwrap_or_default();
         (edits, warnings)
+    }
+
+    /// Writes a stand-in video where it was asked to.
+    fn export_edit(&self, _plugin: &str, ask: &ExportParams) -> anyhow::Result<PathBuf> {
+        std::fs::create_dir_all(ask.out.parent().unwrap())?;
+        std::fs::write(&ask.out, "mp4")?;
+        Ok(ask.out.clone())
+    }
+
+    fn op_quote(&self, _film: &Path, _plugin: &str, _req: &Request) -> anyhow::Result<String> {
+        Ok("0.00 USD".into())
+    }
+
+    /// Copies its input next to it as `.done.mp4`, noting what it was given.
+    fn run_op(
+        &self,
+        film: &Path,
+        plugin: &str,
+        req: &Request,
+        at: &str,
+    ) -> anyhow::Result<PathBuf> {
+        assert_eq!(at, "0.00 USD");
+        std::fs::write(
+            film.join(format!("ran-{plugin}.json")),
+            serde_json::to_string(req)?,
+        )?;
+        let input = &req.inputs["video"];
+        let out = input.with_extension("done.mp4");
+        std::fs::copy(input, &out)?;
+        Ok(out)
     }
 
     /// Notes each change asked for, a line each; a change can be taken back with ["back"].
@@ -1874,10 +1904,32 @@ fn write_edits(p: &Project, clips: Vec<ClipInfo>, transitions: Vec<TransitionInf
 
 /// The Cut page showing "Main edit", and the changes the plugin was asked for.
 fn on_main_edit(tmp: &Path, p: &Project) -> (Harness<'static, App>, impl Fn() -> Vec<EditParams>) {
+    on_main_edit_with(tmp, p, "01-010#1")
+}
+
+/// The same, once the clip shows as `take`.
+fn on_main_edit_with(
+    tmp: &Path,
+    p: &Project,
+    take: &str,
+) -> (Harness<'static, App>, impl Fn() -> Vec<EditParams>) {
     let mut app = App::new(p.clone(), tmp.join("home"))
         .with_viewer(None)
         .silent();
-    app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    let local = Description {
+        name: "local".into(),
+        version: "0.1.0".into(),
+        protocol: 1,
+        env: vec![],
+        models: vec![ModelInfo {
+            id: "ffmpeg/minterpolate".into(),
+            op: Op::VideoInterpolate,
+            ..ModelInfo::default()
+        }],
+        editor: false,
+        app: String::new(),
+    };
+    app.set_plugins(vec![editor_plugin(), local], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
         .with_size(egui::vec2(1000.0, 1200.0))
@@ -1889,7 +1941,7 @@ fn on_main_edit(tmp: &Path, p: &Project) -> (Harness<'static, App>, impl Fn() ->
         .is_some()));
     h.get_by_label("Main edit").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_role_and_label(Role::Button, "01-010#1")
+        .query_by_role_and_label(Role::Button, take)
         .is_some()));
     let asked = p.root.join("edited-by-filmcraft.jsonl");
     let lines = move || -> Vec<EditParams> {
@@ -1984,6 +2036,85 @@ fn dissolves_a_join_in_an_editor() {
     h.get_by_label("Straight cut").click();
     assert!(wait_for(&mut h, |_| lines().len() == 2));
     assert_eq!(lines()[1].change, Change::Crossfade { frames: 0 });
+}
+
+#[test]
+fn selects_the_takes_an_editor_uses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.select_take(R, "1").unwrap();
+    let (_, third) = another_take(&p);
+    write_edits(&p, vec![editor_clip("7", &third, 0.0)], vec![]);
+    let (mut h, _) = on_main_edit_with(tmp.path(), &p, "01-010#3");
+    let says = "FilmCraft uses 01-010#3 (selected: 01-010#1).";
+    h.get_by_label(says);
+    h.get_by_label("Select these takes").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label(says).is_none()));
+    assert_eq!(p.selected_take(R).unwrap().unwrap().number, 3);
+}
+
+#[test]
+fn renders_an_editor_sequence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, _) = another_take(&p);
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    h.get_by_label("Render").click();
+    let made = || {
+        std::fs::read_dir(p.root.join("renders"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("Main_edit-"))
+    };
+    assert!(wait_for(&mut h, |_| made()));
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("Rendered renders/Main_edit-")
+        .is_some()));
+}
+
+#[test]
+fn processes_the_used_part_of_a_clip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, _) = another_take(&p);
+    if clip(&video).is_none() {
+        return;
+    }
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    h.run();
+    h.get_by_label("Process").click();
+    h.run();
+    h.get_by_label("video.interpolate · local ffmpeg/minterpolate")
+        .click();
+    assert!(wait_for(&mut h, |h| h.query_by_label("Go").is_some()));
+    h.get_by_label_contains("ffmpeg/minterpolate on 01-010#1 · 0.00 USD");
+    h.get_by_label("Go").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let ran: Request =
+        serde_json::from_str(&std::fs::read_to_string(p.root.join("ran-local.json")).unwrap())
+            .unwrap();
+    assert_eq!(ran.model, "ffmpeg/minterpolate");
+    let part = &ran.inputs["video"];
+    assert!(part.starts_with(p.root.join(".shotline/cache/clip-parts")));
+    // The clip uses 1 s from 0.25 s in; with 0.25 s before it and 0.5 s after, that's all of
+    // the 1 s file.
+    let ff = shotline_media::Ffmpeg::find().unwrap();
+    let length = ff.probe(part).unwrap().duration;
+    assert!((length - 1.0).abs() < 0.1, "{length}");
+    assert_eq!(
+        lines()[0].change,
+        Change::Replace {
+            file: part.with_extension("done.mp4"),
+            from: 0.25
+        }
+    );
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Undo ffmpeg/minterpolate on 01-010#1")
+        .is_some()));
 }
 
 #[test]

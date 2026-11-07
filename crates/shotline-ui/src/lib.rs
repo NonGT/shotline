@@ -112,6 +112,33 @@ pub trait Host: Send + Sync {
     fn sequences(&self, _film: &Path) -> (Vec<EditInfo>, Vec<String>) {
         (vec![], vec![])
     }
+    /// What one operation outside any shot would cost, e.g. "0.00 USD". Free.
+    fn op_quote(
+        &self,
+        _film: &Path,
+        plugin: &str,
+        _req: &shotline_core::protocol::Request,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("{plugin} can't be run from here")
+    }
+    /// Runs it, if the price is still `at`. Returns what it made.
+    fn run_op(
+        &self,
+        _film: &Path,
+        plugin: &str,
+        _req: &shotline_core::protocol::Request,
+        _at: &str,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("{plugin} can't be run from here")
+    }
+    /// Renders a sequence of an editor's project through its plugin into `out`.
+    fn export_edit(
+        &self,
+        plugin: &str,
+        _ask: &shotline_core::protocol::ExportParams,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("{plugin} can't render")
+    }
     /// Changes a clip of an editor's sequence through its plugin, and says how to undo it.
     fn edit_clip(
         &self,
@@ -260,6 +287,9 @@ pub struct App {
     changing: Option<cut_tools::Changing>,
     /// Undo for clip changes made from here, read from the film's cache when first needed.
     undo: Option<Vec<cut_tools::Undo>>,
+    /// A video tool on a clip, waiting for its price to be agreed.
+    process: Option<cut_tools::Process>,
+    edit_rendering: Option<cut_tools::Rendering>,
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
@@ -569,6 +599,8 @@ impl App {
             fade_frames: 12,
             changing: None,
             undo: None,
+            process: None,
+            edit_rendering: None,
             shot: None,
             takes: vec![],
             status: None,

@@ -12,9 +12,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use shotline_plugin::protocol::{
-    ClipInfo, Description, EditInfo, EditParams, Edited, ErrorKind, ImportParams, Imported,
-    OpenParams, Outputs, PROTOCOL_VERSION, PluginError, Quote, Request, SequenceInfo, Sequences,
-    Status, TakeFile, TrackInfo, TransitionInfo,
+    ClipInfo, Description, EditInfo, EditParams, Edited, ErrorKind, ExportParams, Exported,
+    ImportParams, Imported, OpenParams, Outputs, PROTOCOL_VERSION, PluginError, Quote, Request,
+    SequenceInfo, Sequences, Status, TakeFile, TrackInfo, TransitionInfo,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
@@ -86,6 +86,10 @@ impl Plugin for FilmCraft {
 
     async fn edit(&self, ask: &EditParams) -> Result<Edited> {
         edit::edit(ask).map_err(|e| fail(ErrorKind::Other, e))
+    }
+
+    async fn export(&self, ask: &ExportParams) -> Result<Exported> {
+        edit::export(ask).map_err(|e| fail(ErrorKind::Other, e))
     }
 
     async fn import(&self, ask: &ImportParams) -> Result<Imported> {
@@ -1010,6 +1014,37 @@ mod tests {
         FilmCraft.edit(&ask("", undo(&half))).await.unwrap();
         assert!(fades().is_empty());
 
+        let render = |name: &str| ExportParams {
+            film: film.clone(),
+            file: project.clone(),
+            sequence: "fan".into(),
+            out: film.join("renders").join(name),
+        };
+        let length = |f: &Path| {
+            let out = std::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(f)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<f64>()
+                .unwrap()
+        };
+        let got = FilmCraft.export(&render("open.mp4")).await.unwrap();
+        assert!(
+            (length(&got.file) - 6.0).abs() < 0.2,
+            "{}",
+            length(&got.file)
+        );
+
         let _ = s.call("app.quit", json!({}));
         let pid = s.pid.unwrap();
         assert!((0..80).any(|_| {
@@ -1078,6 +1113,12 @@ mod tests {
                 .await
                 .is_err(),
             "nothing goes into the first clip"
+        );
+        let got = FilmCraft.export(&render("closed.mp4")).await.unwrap();
+        assert!(
+            (length(&got.file) - 6.0).abs() < 0.2,
+            "{}",
+            length(&got.file)
         );
     }
 

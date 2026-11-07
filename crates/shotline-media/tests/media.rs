@@ -66,6 +66,18 @@ fn last_frame() {
 }
 
 #[test]
+fn part_of_a_clip() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let v = clip(dir.path(), "a.mp4", RED, true);
+    let out = dir.path().join("cache/parts/a.mp4");
+    ff.part(&v, 0.25, 0.5, &out).unwrap();
+    let info = ff.probe(&out).unwrap();
+    assert!((info.duration - 0.5).abs() < 0.05, "{}", info.duration);
+    assert!(info.audio);
+}
+
+#[test]
 fn poster() {
     let Some(ff) = ff() else { return };
     let dir = tempfile::tempdir().unwrap();

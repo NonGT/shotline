@@ -466,6 +466,14 @@ impl App {
                 crate::player::clock(seq.length()),
             ),
         );
+        let (plugin, app) = self
+            .edits
+            .0
+            .iter()
+            .find(|e| e.file == file)
+            .map(|e| (e.plugin.clone(), e.app.clone()))
+            .unwrap_or_default();
+        self.take_sync(ui, &app, seq);
         ui.add_space(8.0);
         let lanes_of = |tracks: &[TrackInfo], sound: bool| -> Vec<Lane> {
             tracks
@@ -518,6 +526,9 @@ impl App {
             if making {
                 ui.spinner();
                 ui.weak("making a preview to play…");
+            }
+            if !plugin.is_empty() {
+                self.edit_render(ui, &plugin, file, seq);
             }
         });
         let playing = self

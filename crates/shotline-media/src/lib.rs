@@ -131,6 +131,25 @@ impl Ffmpeg {
     }
 
     /// Writes the last frame of `video` as a PNG.
+    /// `length` seconds of `video` from `from`, cut on the frame (so encoded again).
+    pub fn part(&self, video: &Path, from: f64, length: f64, out: &Path) -> Result<()> {
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        run(
+            self.ffmpeg()
+                .args(["-ss", &format!("{from:.4}"), "-i"])
+                .arg(video)
+                .args(["-t", &format!("{length:.4}")])
+                .args([
+                    "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                ])
+                .arg(out),
+            &format!("cutting {}", video.display()),
+        )?;
+        Ok(())
+    }
+
     pub fn last_frame(&self, video: &Path, png: &Path) -> Result<()> {
         if let Some(dir) = png.parent() {
             std::fs::create_dir_all(dir)?;

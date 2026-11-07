@@ -3,7 +3,8 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use shotline_builtin::fal::{self, Fal};
 use shotline_core::protocol::{
-    Description, EditInfo, EditParams, Edited, ImportParams, OpenParams, TakeFile, VoiceInfo,
+    Description, EditInfo, EditParams, Edited, ExportParams, ImportParams, OpenParams, TakeFile,
+    VoiceInfo,
 };
 use shotline_core::{Catalog, Project, user_dir};
 use shotline_plugin::conformance::{self, Options};
@@ -406,6 +407,19 @@ pub fn edit_clip(installed: &Installed, name: &str, ask: &EditParams) -> Result<
     match runtime().block_on(plugin.edit(ask)) {
         Ok(e) => Ok(e),
         Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't change clips"),
+        Err(e) => bail!("{name}: {e}"),
+    }
+}
+
+pub fn export_edit(
+    installed: &Installed,
+    name: &str,
+    ask: &ExportParams,
+) -> Result<std::path::PathBuf> {
+    let plugin = open(installed, name)?;
+    match runtime().block_on(plugin.export(ask)) {
+        Ok(e) => Ok(e.file),
+        Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't render"),
         Err(e) => bail!("{name}: {e}"),
     }
 }

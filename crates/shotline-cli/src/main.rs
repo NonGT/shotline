@@ -627,6 +627,33 @@ impl shotline_ui::Host for Plugins {
         plugins::sequences(&plugins::load(), film)
     }
 
+    fn op_quote(
+        &self,
+        film: &Path,
+        plugin: &str,
+        req: &shotline_core::protocol::Request,
+    ) -> Result<String> {
+        shoot::quote_once(&Project::open(film)?, plugin, req)
+    }
+
+    fn run_op(
+        &self,
+        film: &Path,
+        plugin: &str,
+        req: &shotline_core::protocol::Request,
+        at: &str,
+    ) -> Result<PathBuf> {
+        shoot::op_at(&Project::open(film)?, plugin, req, at)
+    }
+
+    fn export_edit(
+        &self,
+        plugin: &str,
+        ask: &shotline_core::protocol::ExportParams,
+    ) -> Result<PathBuf> {
+        plugins::export_edit(&plugins::load(), plugin, ask)
+    }
+
     fn edit_clip(
         &self,
         plugin: &str,

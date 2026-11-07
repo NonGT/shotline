@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::{self, RichText};
 use serde::{Deserialize, Serialize};
 use shotline_core::protocol::{
-    Change, ClipInfo, EditParams, Edited, SequenceInfo, TrackInfo, TransitionInfo,
+    Change, ClipInfo, EditParams, Edited, ExportParams, Op, Request, SequenceInfo, TrackInfo,
+    TransitionInfo,
 };
+use shotline_core::{ShotRef, Take};
 
 use crate::{App, short, theme};
 
@@ -116,6 +118,7 @@ impl App {
                 ui.weak("Click a clip, or the mark where two meet, to change it from here.");
             }
         });
+        self.process_row(ui, file, seq);
         if let Some(what) = &busy {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -370,6 +373,17 @@ impl App {
             let what = format!("{label} on {name}");
             start = Some((what, ask(Change::Lut { file: Some(lut) })));
         }
+        let replace = ask(Change::Undo {
+            steps: serde_json::Value::Null,
+        });
+        self.process_menu(
+            ui,
+            plugin,
+            replace,
+            c,
+            &name,
+            free && self.process.is_none(),
+        );
         if let Some((what, ask)) = start {
             let undo = Undo {
                 plugin: plugin.to_string(),
@@ -455,5 +469,341 @@ impl App {
             }
         }
         self.edits_stale = true;
+    }
+}
+
+/// The request and what it would cost.
+type Priced = (Request, String);
+
+/// A tool run on the used part of a clip, waiting for its price to be agreed.
+pub(crate) struct Process {
+    what: String,
+    plugin: String,
+    /// The swap once it's made: Replace with `from` the head kept before the used part.
+    ask: EditParams,
+    editor: String,
+    head: f64,
+    slot: Arc<Mutex<Option<Result<Priced, String>>>>,
+    priced: Option<Priced>,
+}
+
+/// A sequence being rendered by its editor: into which file, and how it went.
+pub(crate) type Rendering = (PathBuf, Arc<Mutex<Option<Result<PathBuf, String>>>>);
+
+/// Seconds kept either side of a clip's used part, for the editor to trim into.
+const HANDLE: f64 = 0.5;
+
+impl App {
+    /// Shots whose take in the sequence isn't their selected one: the take it uses, and the
+    /// selected one's name.
+    fn other_takes(&self, seq: &SequenceInfo) -> Vec<(Take, String)> {
+        let mut by_shot: Vec<(ShotRef, Vec<&Take>)> = vec![];
+        for c in seq.video.iter().flat_map(|t| &t.clips) {
+            let Some(t) = c.file.as_ref().and_then(|f| self.edit_takes.get(f)) else {
+                continue;
+            };
+            match by_shot.iter_mut().find(|(s, _)| *s == t.shot) {
+                Some((_, ts)) if ts.iter().any(|x| x.id == t.id) => {}
+                Some((_, ts)) => ts.push(t),
+                None => by_shot.push((t.shot, vec![t])),
+            }
+        }
+        by_shot
+            .into_iter()
+            .filter_map(|(shot, ts)| {
+                // A shot cut from two takes has no one take to select.
+                let [t] = ts[..] else { return None };
+                let selected = self.film.cut.iter().find(|c| c.shot == shot)?;
+                match &selected.take {
+                    Some(s) if s.id == t.id => None,
+                    Some(s) => Some((t.clone(), s.to_string())),
+                    None => Some((t.clone(), "none".into())),
+                }
+            })
+            .collect()
+    }
+
+    /// Offers to select the takes the editor's sequence uses.
+    pub(crate) fn take_sync(&mut self, ui: &mut egui::Ui, app: &str, seq: &SequenceInfo) {
+        let other = self.other_takes(seq);
+        if other.is_empty() {
+            return;
+        }
+        let said: Vec<String> = other
+            .iter()
+            .map(|(t, s)| format!("{t} (selected: {s})"))
+            .collect();
+        ui.horizontal_wrapped(|ui| {
+            ui.weak(format!("{app} uses {}.", said.join(", ")));
+            if ui
+                .button("Select these takes")
+                .on_hover_text("so the film's own cut and the Shots page use them too")
+                .clicked()
+            {
+                let acts = other
+                    .iter()
+                    .map(|(t, _)| crate::edit::Action::Select(t.clone()))
+                    .collect();
+                self.flush();
+                self.apply(acts);
+            }
+        });
+    }
+
+    /// Render, through the editor, into renders/.
+    pub(crate) fn edit_render(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin: &str,
+        file: &Path,
+        seq: &SequenceInfo,
+    ) {
+        let got = self
+            .edit_rendering
+            .as_ref()
+            .and_then(|(out, slot)| Some((out.clone(), slot.lock().unwrap().take()?)));
+        if let Some((out, got)) = got {
+            self.edit_rendering = None;
+            match got {
+                Ok(f) => {
+                    self.status = Some((format!("Rendered {}", self.project.rel(&f)), false));
+                    self.reload();
+                }
+                Err(e) => self.error(format!("can't render {}: {e}", self.project.rel(&out))),
+            }
+        }
+        let busy = self.edit_rendering.is_some();
+        if ui
+            .add_enabled(!busy && self.host.is_some(), egui::Button::new("Render"))
+            .on_hover_text("the sequence as the editor renders it, into renders/; free")
+            .clicked()
+        {
+            let safe: String = seq
+                .name
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let at = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S");
+            let out = self
+                .project
+                .root
+                .join("renders")
+                .join(format!("{safe}-{at}.mp4"));
+            let ask = ExportParams {
+                film: self.project.root.clone(),
+                file: file.to_path_buf(),
+                sequence: seq.name.clone(),
+                out: out.clone(),
+            };
+            let slot: Arc<Mutex<Option<_>>> = Arc::default();
+            let (s, host, p, ctx) = (
+                slot.clone(),
+                self.host.clone().unwrap(),
+                plugin.to_string(),
+                ui.ctx().clone(),
+            );
+            std::thread::spawn(move || {
+                *s.lock().unwrap() = Some(host.export_edit(&p, &ask).map_err(|e| format!("{e:#}")));
+                ctx.request_repaint();
+            });
+            self.edit_rendering = Some((out, slot));
+        }
+        if busy {
+            ui.spinner();
+            ui.weak("rendering…");
+        }
+    }
+
+    /// The video tools of installed plugins, by plugin: upscale and interpolation.
+    fn clip_ops(&self) -> Vec<(String, String, Op)> {
+        let mut ops = vec![];
+        for d in &self.plugins {
+            for m in &d.models {
+                if matches!(m.op, Op::VideoInterpolate | Op::VideoUpscale) {
+                    ops.push((d.name.clone(), m.id.clone(), m.op.clone()));
+                }
+            }
+        }
+        ops
+    }
+
+    /// The menu of tools for a picked clip.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn process_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        editor: &str,
+        ask: EditParams,
+        c: &ClipInfo,
+        name: &str,
+        free: bool,
+    ) {
+        let ops = self.clip_ops();
+        let video = c.file.clone().filter(|f| f.is_file());
+        let mut pick = None;
+        ui.add_enabled_ui(
+            free && !ops.is_empty() && video.is_some() && self.ff.is_some(),
+            |ui| {
+                ui.menu_button("Process", |ui| {
+                    for (plugin, model, op) in &ops {
+                        if ui.button(format!("{op} · {plugin} {model}")).clicked() {
+                            pick = Some((plugin.clone(), model.clone(), op.clone()));
+                            ui.close();
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "runs it on the part of the clip in use, plus half a second either side, and \
+                 swaps the result in",
+                )
+                .on_disabled_hover_text(if ops.is_empty() {
+                    "no plugin has video tools; the local plugin has interpolation and upscaling"
+                } else {
+                    "the clip's file isn't there"
+                });
+            },
+        );
+        let (Some((plugin, model, op)), Some(video)) = (pick, video) else {
+            return;
+        };
+        let head = c.from.min(HANDLE);
+        let length = c.length * c.speed + head + HANDLE;
+        let from = c.from - head;
+        let part = self
+            .project
+            .root
+            .join(".shotline/cache/clip-parts")
+            .join(format!(
+                "{}-{}.mp4",
+                ask.clip,
+                jiff::Timestamp::now().as_millisecond()
+            ));
+        let slot: Arc<Mutex<Option<_>>> = Arc::default();
+        let (s, host, ff, film, p, ctx) = (
+            slot.clone(),
+            self.host.clone().unwrap(),
+            self.ff.clone().unwrap(),
+            self.project.root.clone(),
+            plugin.clone(),
+            ui.ctx().clone(),
+        );
+        let req = Request {
+            op: op.clone(),
+            model: model.clone(),
+            inputs: [("video".to_string(), part.clone())].into(),
+            ..Request::default()
+        };
+        std::thread::spawn(move || {
+            let got = ff
+                .part(&video, from, length, &part)
+                .map_err(|e| e.to_string())
+                .and_then(|()| {
+                    host.op_quote(&film, &p, &req)
+                        .map(|price| (req, price))
+                        .map_err(|e| format!("{e:#}"))
+                });
+            *s.lock().unwrap() = Some(got);
+            ctx.request_repaint();
+        });
+        self.process = Some(Process {
+            what: format!("{model} on {name}"),
+            plugin,
+            ask,
+            editor: editor.to_string(),
+            head,
+            slot,
+            priced: None,
+        });
+    }
+
+    /// The tool's price, to agree to or not, then the run and the swap.
+    pub(crate) fn process_row(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
+        let Some(p) = &mut self.process else {
+            return;
+        };
+        let got = if p.priced.is_none() {
+            p.slot.lock().unwrap().take()
+        } else {
+            None
+        };
+        match got {
+            Some(Ok(priced)) => p.priced = Some(priced),
+            Some(Err(e)) => {
+                let what = p.what.clone();
+                self.process = None;
+                self.error(format!("{what} didn't work: {}", short(&e, 300)));
+                return;
+            }
+            None => {}
+        }
+        let p = self.process.as_ref().unwrap();
+        let mut go = false;
+        let mut cancel = false;
+        ui.horizontal(|ui| match &p.priced {
+            None => {
+                ui.spinner();
+                ui.weak(format!(
+                    "{}: cutting the part and asking the price…",
+                    p.what
+                ));
+            }
+            Some((_, price)) => {
+                ui.label(format!("{} · {price}", p.what));
+                go = ui
+                    .add_enabled(self.changing.is_none(), egui::Button::new("Go"))
+                    .clicked();
+                cancel = ui.button("Cancel").clicked();
+            }
+        });
+        if cancel {
+            self.process = None;
+        }
+        if !go {
+            return;
+        }
+        let p = self.process.take().unwrap();
+        let (req, price) = p.priced.unwrap();
+        let slot: Arc<Mutex<Option<_>>> = Arc::default();
+        let (s, host, film, ctx) = (
+            slot.clone(),
+            self.host.clone().unwrap(),
+            self.project.root.clone(),
+            ui.ctx().clone(),
+        );
+        let (plugin, editor, head, mut ask) = (p.plugin, p.editor.clone(), p.head, p.ask.clone());
+        std::thread::spawn(move || {
+            let got = host
+                .run_op(&film, &plugin, &req, &price)
+                .and_then(|out| {
+                    ask.change = Change::Replace {
+                        file: std::path::absolute(&out).unwrap_or(out),
+                        from: head,
+                    };
+                    host.edit_clip(&editor, &ask)
+                })
+                .map_err(|e| format!("{e:#}"));
+            *s.lock().unwrap() = Some(got);
+            ctx.request_repaint();
+        });
+        self.changing = Some(Changing {
+            what: p.what.clone(),
+            undo: Some(Undo {
+                plugin: p.editor.clone(),
+                file: file.to_path_buf(),
+                sequence: seq.name.clone(),
+                what: p.what,
+                steps: serde_json::Value::Null,
+            }),
+            ask: p.ask,
+            plugin: p.editor,
+            slot,
+        });
     }
 }

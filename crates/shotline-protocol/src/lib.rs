@@ -529,6 +529,22 @@ pub enum Change {
     Undo { steps: serde_json::Value },
 }
 
+/// Params of `export`: a sequence of an editor project rendered to a video file.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ExportParams {
+    pub film: PathBuf,
+    pub file: PathBuf,
+    pub sequence: String,
+    /// Where the video goes; its extension says the format.
+    pub out: PathBuf,
+}
+
+/// What `export` made.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Exported {
+    pub file: PathBuf,
+}
+
 /// What `edit` did.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Edited {

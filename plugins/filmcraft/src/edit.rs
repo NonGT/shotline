@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
-use shotline_plugin::protocol::{Change, EditParams, Edited};
+use shotline_plugin::protocol::{Change, EditParams, Edited, ExportParams, Exported};
 
 use crate::editor::{self, Editor};
 
@@ -99,16 +99,22 @@ struct Found {
     sound: Option<(Value, u64)>,
 }
 
-fn find(snap: &Value, sequence: &str, clip: &str) -> Result<Found, String> {
+/// A sequence's id and its contents, by name.
+fn sequence<'a>(snap: &'a Value, name: &str) -> Result<(u64, &'a Value), String> {
     let items = snap["project"]["items"]
         .as_object()
         .ok_or("the project has no items")?;
     let (id, seq) = items
         .iter()
-        .find(|(_, i)| i["name"] == sequence && i["kind"]["Sequence"].is_object())
-        .ok_or_else(|| format!("there's no sequence {sequence:?}"))?;
-    let seq = &seq["kind"]["Sequence"];
-    let sequence: u64 = id.parse().map_err(|_| "a sequence without an id")?;
+        .find(|(_, i)| i["name"] == name && i["kind"]["Sequence"].is_object())
+        .ok_or_else(|| format!("there's no sequence {name:?}"))?;
+    let id = id.parse().map_err(|_| "a sequence without an id")?;
+    Ok((id, &seq["kind"]["Sequence"]))
+}
+
+fn find(snap: &Value, sequence: &str, clip: &str) -> Result<Found, String> {
+    let (id, seq) = self::sequence(snap, sequence)?;
+    let sequence = id;
     let want: u64 = clip
         .parse()
         .map_err(|_| format!("{clip:?} isn't a FilmCraft clip id"))?;
@@ -219,6 +225,32 @@ fn lumetri_back(clip: u64, before: Option<(usize, Value)>, after: &Value) -> Vec
         ));
     }
     steps
+}
+
+/// Renders the sequence with FilmCraft's own export, waiting for the file.
+pub fn export(ask: &ExportParams) -> Result<Exported, String> {
+    let e = editor::for_project(&ask.film, &ask.file)?;
+    let snap = snapshot(&e, &ask.film, &ask.file)?;
+    let (id, _) = sequence(&snap, &ask.sequence)?;
+    if let Some(dir) = ask.out.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    e.batch_unsaved(&[
+        step("sequence.open", json!({"item": id})),
+        step(
+            "file.exportMedia",
+            json!({"path": ask.out, "sequence": id, "range": "entire", "wait": true}),
+        ),
+    ])?;
+    if !ask.out.is_file() {
+        return Err(format!(
+            "FilmCraft said it rendered, but {} isn't there",
+            ask.out.display()
+        ));
+    }
+    Ok(Exported {
+        file: ask.out.clone(),
+    })
 }
 
 pub fn edit(ask: &EditParams) -> Result<Edited, String> {
