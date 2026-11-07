@@ -450,8 +450,9 @@ never writes it: an editor writes the whole file on save and doesn't merge, so a
 into it would be lost on the next save. Changes go through the editor's own commands instead. Files
 handed to the editor (`cut.otio`) sit next to it.
 
-What's read: `sequences` gives each project's sequences, tracks and clips in seconds. The Cut page
-can switch between shotline's own cut and those sequences, drawn the same way. A clip from a take's
+What's read: `sequences` gives each project's sequences, tracks and clips in seconds. Once there's
+an editor project, its sequence is the film's cut: the Cut page opens on it (the project shotline
+made first), drawn the same way as shotline's own cut, which is still there to switch to. A clip from a take's
 job folder is named by its take. A sequence plays from a preview
 ffmpeg makes into `.shotline/cache/sequences/`: the top enabled clip at each moment and the audio
 tracks mixed, without effects or transitions. The page watches `shared/` and reads it again when
@@ -471,7 +472,9 @@ Both edit the same timeline. On the Cut page a clip of an editor's sequence can 
 its shot, swap in another take, match its colour to the clip before, give it a LUT, or run a video
 tool on it (interpolation, upscaling): the part in use plus half a second either side is cut out,
 the tool runs on it as a job with the usual quote, and the result is swapped in. A join between two
-clips can get a dissolve or lose one, or a colour match. The plugin's `edit` makes each change with
+clips can get a dissolve or lose one, or a colour match: the editor's own (Apply Match), or
+shotline's MKL match, the one its renders use, written as a 33-point `.cube` and set as the clip's
+input LUT. The plugin's `edit` makes each change with
 FilmCraft's commands: through the control port when shotline opened it, through `filmcraft-cli`
 when it's closed (after copying the project into `.shotline/cache/filmcraft-backups/`, the last
 20), and not at all while a FilmCraft shotline didn't start is running or the CLI's version isn't

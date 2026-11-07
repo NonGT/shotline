@@ -261,6 +261,8 @@ pub struct App {
     tab: Tab,
     /// The Cut page shows this editor sequence, by file and name, instead of the film's cut.
     cut_view: Option<(PathBuf, String)>,
+    /// "This film's cut" was picked over an editor's sequence.
+    own_cut_asked: bool,
     /// The film's projects in video editors as the editor plugins last read them, and problems
     /// asking them.
     edits: Edits,
@@ -586,6 +588,7 @@ impl App {
             film: Film::default(),
             tab: Tab::Shots,
             cut_view: None,
+            own_cut_asked: false,
             edits: (vec![], vec![]),
             edit_takes: HashMap::new(),
             edits_asked: None,

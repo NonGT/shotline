@@ -2152,6 +2152,61 @@ fn matches_a_join_with_shotlines_lut() {
 }
 
 #[test]
+fn opens_on_the_editor_cut_shotline_made() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let seq = |name: &str| SequenceInfo {
+        name: name.into(),
+        width: 720,
+        height: 1280,
+        fps: 24.0,
+        ..SequenceInfo::default()
+    };
+    let edit = |file: &str, s: &str| EditInfo {
+        file: p.root.join(file),
+        name: file.into(),
+        app: "FilmCraft".into(),
+        plugin: "filmcraft".into(),
+        error: None,
+        sequences: vec![seq(s)],
+    };
+    let edits = vec![
+        edit("shared/other.fcproj", "Someone's"),
+        edit("shared/filmcraft/Rain.fcproj", "Rain"),
+    ];
+    std::fs::create_dir_all(p.root.join("shared")).unwrap();
+    let write = || {
+        std::fs::write(
+            p.root.join("shared/edits.json"),
+            serde_json::to_string(&edits).unwrap(),
+        )
+        .unwrap()
+    };
+    write();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    let shown = "shared/filmcraft/Rain.fcproj · 720 × 1280";
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains(shown)
+        .is_some()));
+    // Once the film's own is asked for, it stays, even when the editor saves again.
+    h.get_by_label("This film's cut").click();
+    h.run();
+    assert!(h.query_by_label_contains(shown).is_none());
+    write();
+    wait(&mut h, 1.5);
+    assert!(h.query_by_label_contains(shown).is_none());
+}
+
+#[test]
 fn shows_an_editor_warning_whole() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
@@ -3357,16 +3412,33 @@ fn a_take_from_pieces() {
     wait(&mut h, 0.1);
     h.get_by_role_and_label(Role::RadioButton, "cut from #3")
         .click();
-    wait(&mut h, 0.2);
+    // A busy machine can miss a click made while the pieces are still being laid out.
+    let picked = |h: &Harness<App>| {
+        h.query_by_role_and_label(Role::RadioButton, "cut from #3")
+            .is_some_and(|n| n.accesskit_node().toggled() == Some(egui::accesskit::Toggled::True))
+    };
+    if !wait_for(&mut h, picked) {
+        h.get_by_role_and_label(Role::RadioButton, "cut from #3")
+            .click();
+        assert!(wait_for(&mut h, picked));
+    }
     h.get_by_label("Add piece").click();
     // Its length comes from probing the file on another thread.
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label_contains("2. #3  0.00–1.00s")
-        .is_some()));
+    let seen = wait_for(&mut h, |h| {
+        h.query_by_label_contains("2. #3  0.00–1.00s").is_some()
+    });
+    if !seen {
+        let rows: Vec<String> = h
+            .query_all_by(|n| n.label().is_some_and(|l| l.contains(". #")))
+            .map(|n| n.accesskit_node().label().unwrap_or_default().to_string())
+            .collect();
+        panic!("no 2. #3 row; rows: {rows:?}");
+    }
     wait(&mut h, 0.1);
     h.get_by_label_contains("2. #3  0.00–1.00s").click();
-    wait(&mut h, 0.1);
-    h.get_by_label("changing piece 2");
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("changing piece 2")
+        .is_some()));
     h.get_by_role_and_label(Role::SpinButton, "Start").focus();
     // Focused, it turns into a box to type in.
     h.run();

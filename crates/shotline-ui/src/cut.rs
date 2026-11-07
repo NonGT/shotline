@@ -356,6 +356,15 @@ impl App {
             ui.add_space(6.0);
             return;
         }
+        // With an editor project, its cut is the film's cut: shown first, until the film's own
+        // is asked for.
+        if self.cut_view.is_none()
+            && !self.own_cut_asked
+            && let Some(main) = main_sequence(&self.project.root, edits)
+        {
+            self.cut_view = Some(main);
+        }
+        let edits = &self.edits.0;
         let several = edits.len() > 1;
         let now = self.edit_sequence().map(|(f, s)| (f, s.name));
         let mut pick = None;
@@ -432,6 +441,7 @@ impl App {
             }
         });
         if let Some(p) = pick {
+            self.own_cut_asked = p.is_none();
             self.cut_view = p;
         }
         let none_yet = edits.is_empty();
@@ -1037,6 +1047,23 @@ pub(crate) struct Making {
     left_out: Vec<String>,
     seq: SequenceInfo,
     slot: Made,
+}
+
+/// The sequence to show first: one in a project shotline made (under `shared/<plugin>/`), else
+/// the first one there is.
+fn main_sequence(
+    film: &Path,
+    edits: &[shotline_core::protocol::EditInfo],
+) -> Option<(PathBuf, String)> {
+    let readable = || {
+        edits
+            .iter()
+            .filter(|e| e.error.is_none() && !e.sequences.is_empty())
+    };
+    let own = readable()
+        .find(|e| !e.plugin.is_empty() && e.file.starts_with(film.join("shared").join(&e.plugin)));
+    let e = own.or_else(|| readable().next())?;
+    Some((e.file.clone(), e.sequences[0].name.clone()))
 }
 
 fn seq_title(file: &Path, seq: &SequenceInfo) -> String {
