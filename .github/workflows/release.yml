@@ -39,14 +39,14 @@ jobs:
       - run: >
           cargo build --release --locked --target ${{ matrix.target }}
           -p shotline-cli -p shotline-plugin-venice -p shotline-plugin-elevenlabs
-          -p shotline-plugin-wavespeed -p shotline-plugin-local
+          -p shotline-plugin-wavespeed -p shotline-plugin-local -p shotline-plugin-filmcraft
       - name: package
         shell: bash
         run: |
           exe=""
           [[ "$RUNNER_OS" == Windows ]] && exe=.exe
           mkdir "$NAME"
-          for b in shotline shotline-plugin-venice shotline-plugin-elevenlabs shotline-plugin-wavespeed shotline-plugin-local; do
+          for b in shotline shotline-plugin-venice shotline-plugin-elevenlabs shotline-plugin-wavespeed shotline-plugin-local shotline-plugin-filmcraft; do
             cp "target/${{ matrix.target }}/release/$b$exe" "$NAME/"
           done
           cp README.md LICENSE "$NAME/"

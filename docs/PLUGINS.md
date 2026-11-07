@@ -83,6 +83,9 @@ No params. Returns:
 }
 ```
 
+`"editor": true` marks a plugin that answers `sequences` (and `open` if it can); leave it out
+otherwise. `"app"` names the editor for people, as in "Open in FilmCraft".
+
 Model fields other than `id` and `op` are optional; leave out what doesn't apply.
 
 - `ref_image`: how a reference image is named in the prompt, `{n}` counting from 1. Without it
@@ -212,6 +215,59 @@ Params: `{"since": "2026-10-01T00:00:00Z"}`. What the provider actually charged,
 ```json
 {"charges": [{"job": "abc", "time": "2026-10-30T10:12:03Z", "amount": 0.40, "unit": "USD"}]}
 ```
+
+### sequences (optional)
+
+For a plugin that links shotline to a video editor; it says `"editor": true` in `describe` and
+may list no models. Params: `{"film": "/path/to/film"}`. Returns the editor's projects for that
+film, read only, for the Cut page. It must be free to call.
+
+```json
+{"edits": [{"file": "/path/to/film/shared/edit.fcproj", "name": "Rain edit", "app": "FilmCraft",
+  "sequences": [
+  {"name": "Main edit", "width": 720, "height": 1280, "fps": 23.976,
+   "video": [{"name": "Video 1", "enabled": true, "clips": [
+     {"name": "01-010#1", "file": "/path/to/film/jobs/01K.../out.mp4", "start": 0, "length": 2,
+      "from": 0.5, "speed": 1, "enabled": true}]}],
+   "audio": []}]}]}
+```
+
+Times are seconds. `video` starts at V1, `audio` at A1. A clip that isn't a file (a title, a
+nested sequence) has no `file`; one in a take's job folder shows as that take. A project that
+can't be read comes back with an `error` and no sequences, so the others still show. shotline
+asks again when the film is read again or a file in `shared/` (or a project's own file)
+changes. `app` names the editor for people, as in the Cut page's "Open in FilmCraft".
+
+### open (optional)
+
+For an editor plugin: opens the film's project in the editor so the cut can be changed there,
+or makes one when there's none yet. Params:
+
+```json
+{"film": "/path/to/film", "file": "/path/to/film/shared/filmcraft/fan.fcproj",
+ "sequence": "Main edit"}
+```
+
+`file` and `sequence` come from `sequences`; without `file` the plugin opens the film's own
+project, and when there's none it makes one from `cut`, shotline's cut in the same shape as a
+sequence above (the selected takes back to back on V1, their sound on A1, music on A2 and up).
+With a new project, `takes` lists every finished take of the film, as in `import` below. A plugin
+keeps what it makes under `shared/<plugin name>/`, and only lets the editor itself write its
+project file. Returns `{}` once the editor shows it.
+
+### import (optional)
+
+For an editor plugin: a take is done, so it should be at hand in the editor. Params:
+
+```json
+{"film": "/path/to/film",
+ "takes": [{"name": "01-010#2", "shot": "01-010", "file": "/path/to/film/jobs/01J.../out.mp4"}]}
+```
+
+Paths are absolute. Returns `{"sent": 1, "waiting": 0}`: takes now in the editor, and ones the
+plugin keeps until it can send them (the editor isn't open). The filmcraft plugin puts them in a
+`shotline/<shot>` bin named as the take, in the film's project when FilmCraft was opened from
+shotline, and sends the waiting ones next time it opens it.
 
 Leave out optional methods; answer with error code -32601 (method not found).
 

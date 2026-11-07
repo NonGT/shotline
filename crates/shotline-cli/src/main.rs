@@ -196,6 +196,9 @@ enum Cmd {
     /// Serves the built-in fake plugin over stdio, for tests and dry runs
     #[command(name = "__fake-plugin", hide = true)]
     FakePlugin,
+    /// Serves a fake editor plugin over stdio, for tests
+    #[command(name = "__fake-editor", hide = true)]
+    FakeEditor,
 }
 
 #[derive(clap::Args)]
@@ -618,6 +621,14 @@ impl shotline_ui::Host for Plugins {
 
     fn balance(&self, plugin: &str) -> Result<String> {
         plugins::balance_of(&plugins::load(), plugin)
+    }
+
+    fn sequences(&self, film: &Path) -> (Vec<shotline_core::protocol::EditInfo>, Vec<String>) {
+        plugins::sequences(&plugins::load(), film)
+    }
+
+    fn open_edit(&self, plugin: &str, ask: &shotline_core::protocol::OpenParams) -> Result<()> {
+        plugins::open_edit(&plugins::load(), plugin, ask)
     }
 
     fn anchor_quote(&self, film: &Path, ask: &shotline_ui::AnchorAsk) -> Result<String> {
@@ -1339,6 +1350,10 @@ fn run(cli: Cli) -> Result<()> {
             plugins::runtime().block_on(shotline_plugin::serve(
                 shotline_plugin::fake::FakePlugin::default(),
             ))?;
+        }
+        Cmd::FakeEditor => {
+            plugins::runtime()
+                .block_on(shotline_plugin::serve(shotline_plugin::fake::FakeEditor))?;
         }
     }
     Ok(())

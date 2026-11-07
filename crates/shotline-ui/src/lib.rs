@@ -9,6 +9,7 @@ mod cut;
 mod edit;
 mod git;
 mod grouped;
+mod lanes;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
 mod pieces;
@@ -26,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
-use shotline_core::protocol::{Description, ModelInfo, Op, VoiceInfo};
+use shotline_core::protocol::{Description, EditInfo, ModelInfo, Op, OpenParams, VoiceInfo};
 use shotline_core::{
     Chapter, CutShot, Element, Git, JobStatus, Kind, LIP_SYNCED, Project, SPOKEN, Shot, ShotRef,
     Take, Timeline, Transition,
@@ -89,6 +90,11 @@ struct Film {
     in_use: HashMap<PathBuf, String>,
 }
 
+/// Editor projects, and problems asking the plugins for them.
+type Edits = (Vec<EditInfo>, Vec<String>);
+/// Filled once an editor was asked to open a project.
+type Opened = Arc<Mutex<Option<Result<(), String>>>>;
+
 /// What the app asks of installed plugins. The CLI provides it; the app calls it off the UI thread.
 pub trait Host: Send + Sync {
     /// The installed plugins, and problems with ones that couldn't be used.
@@ -100,6 +106,15 @@ pub trait Host: Send + Sync {
     fn voices(&self, plugin: &str) -> anyhow::Result<Vec<VoiceInfo>>;
     /// What's left on the account, said in a line. It costs nothing, so it checks a key.
     fn balance(&self, plugin: &str) -> anyhow::Result<String>;
+    /// The film's projects in video editors, from the editor plugins, and problems asking them.
+    /// Free.
+    fn sequences(&self, _film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+        (vec![], vec![])
+    }
+    /// Opens the film's project in an editor plugin's app, made from the cut if there's none.
+    fn open_edit(&self, plugin: &str, _ask: &OpenParams) -> anyhow::Result<()> {
+        anyhow::bail!("{plugin} can't open its projects")
+    }
     /// What a new anchor image would cost, e.g. "$0.04". Free.
     fn anchor_quote(&self, film: &Path, ask: &AnchorAsk) -> anyhow::Result<String>;
     /// Downloads a reference image into the film's cache. Free.
@@ -208,6 +223,25 @@ pub struct App {
     posters: Arc<Mutex<HashSet<PathBuf>>>,
     film: Film,
     tab: Tab,
+    /// The Cut page shows this editor sequence, by file and name, instead of the film's cut.
+    cut_view: Option<(PathBuf, String)>,
+    /// The film's projects in video editors as the editor plugins last read them, and problems
+    /// asking them.
+    edits: Edits,
+    /// The takes the clips in them play, by file.
+    edit_takes: HashMap<PathBuf, Take>,
+    /// Being asked again in the background; the answer lands here.
+    edits_asked: Option<Arc<Mutex<Option<Edits>>>>,
+    /// The film was read again, so the editors are asked again.
+    edits_stale: bool,
+    /// What shared/ and the editors' files looked like when last checked, and when that was.
+    edits_seen: Option<(u64, std::time::Instant)>,
+    /// A sequence's preview being made, and where to start playing it once it's there.
+    seq_making: Option<crate::cut::Making>,
+    /// The preview the deck plays, and the clips left out of it.
+    seq_playing: Option<(PathBuf, Vec<String>)>,
+    /// An editor being asked to open a project: what to call it, and how that went.
+    edit_opening: Option<(String, Opened)>,
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
@@ -263,6 +297,9 @@ pub struct App {
     remaking: Option<(ShotRef, usize, String)>,
     /// Recordings' lengths, as ffprobe gave them.
     lengths: HashMap<PathBuf, f64>,
+    /// Clips' lengths for the Cut page, probed in the background; None while it's probing or
+    /// when it can't tell.
+    clip_lengths: Arc<Mutex<HashMap<PathBuf, Option<f64>>>>,
     /// timeline.toml as edited, saved once nothing has focus.
     timeline_form: Timeline,
     render: Arc<Mutex<cut::Render>>,
@@ -500,6 +537,15 @@ impl App {
             posters: Arc::default(),
             film: Film::default(),
             tab: Tab::Shots,
+            cut_view: None,
+            edits: (vec![], vec![]),
+            edit_takes: HashMap::new(),
+            edits_asked: None,
+            edits_stale: true,
+            edits_seen: None,
+            seq_making: None,
+            seq_playing: None,
+            edit_opening: None,
             shot: None,
             takes: vec![],
             status: None,
@@ -536,6 +582,7 @@ impl App {
             paused: None,
             remaking: None,
             lengths: HashMap::new(),
+            clip_lengths: Arc::default(),
             timeline_form: Timeline::default(),
             render: Arc::default(),
             cost_view: cost::View::default(),
@@ -955,6 +1002,7 @@ impl App {
             last_frames: p.last_frames()?,
         };
         self.film.in_use = in_use(&self.film, &self.project.root);
+        self.edits_stale = true;
         self.load_takes()
     }
 
@@ -2690,6 +2738,29 @@ fn in_use(film: &Film, root: &Path) -> HashMap<PathBuf, String> {
     out
 }
 
+/// Takes `video`'s still into `png` in the background, unless it's being taken already.
+pub(crate) fn make_poster(
+    ctx: &egui::Context,
+    (ff, making): (Option<&Ffmpeg>, &Arc<Mutex<HashSet<PathBuf>>>),
+    video: &Path,
+    png: &Path,
+) {
+    if let Some(ff) = ff
+        && making.lock().unwrap().insert(png.to_path_buf())
+    {
+        let (ff, video, png) = (ff.clone(), video.to_path_buf(), png.to_path_buf());
+        let (making, ctx) = (making.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = ff.poster(&video, &png);
+            // Left in, a failed one isn't tried again every frame.
+            if png.is_file() {
+                making.lock().unwrap().remove(&png);
+            }
+            ctx.request_repaint();
+        });
+    }
+}
+
 /// A take's still, taken from its video the first time it's shown. Clicking it opens the take.
 fn poster(
     ui: &mut egui::Ui,
@@ -2703,20 +2774,7 @@ fn poster(
     let texture = if png.is_file() {
         thumbs.texture(ui, png, THUMB, name)
     } else {
-        if let Some(ff) = ff
-            && making.lock().unwrap().insert(png.to_path_buf())
-        {
-            let (ff, video, png) = (ff.clone(), video.to_path_buf(), png.to_path_buf());
-            let (making, ctx) = (making.clone(), ui.ctx().clone());
-            std::thread::spawn(move || {
-                let _ = ff.poster(&video, &png);
-                // Left in, a failed one isn't tried again every frame.
-                if png.is_file() {
-                    making.lock().unwrap().remove(&png);
-                }
-                ctx.request_repaint();
-            });
-        }
+        make_poster(ui.ctx(), (ff, making), video, png);
         None
     };
     let r = match texture {

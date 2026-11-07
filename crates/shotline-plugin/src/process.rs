@@ -10,8 +10,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use shotline_protocol::rpc;
 use shotline_protocol::{
-    Balance, Description, FetchParams, JobRef, Outputs, PluginError, Quote, Rates, Request,
-    RunParams, Status, Usage, UsageParams, Voices,
+    Balance, Description, FetchParams, ImportParams, Imported, JobRef, OpenParams, Outputs,
+    PluginError, Quote, Rates, Request, RunParams, Sequences, SequencesParams, Status, Usage,
+    UsageParams, Voices,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -273,6 +274,25 @@ impl Plugin for ProcessPlugin {
 
     async fn voices(&self) -> Result<Voices> {
         self.call("voices", json!({})).await
+    }
+
+    async fn sequences(&self, film: &Path) -> Result<Sequences> {
+        self.call(
+            "sequences",
+            SequencesParams {
+                film: film.to_path_buf(),
+            },
+        )
+        .await
+    }
+
+    async fn import(&self, ask: &ImportParams) -> Result<Imported> {
+        self.call("import", ask).await
+    }
+
+    async fn open(&self, ask: &OpenParams) -> Result<()> {
+        let _: Value = self.call("open", ask).await?;
+        Ok(())
     }
 
     async fn usage(&self, since: &str) -> Result<Usage> {

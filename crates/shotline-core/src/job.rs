@@ -462,6 +462,21 @@ impl Project {
         Ok(out)
     }
 
+    /// The take a file belongs to, by the `jobs/<id>/` folder it's in. Only those two folders
+    /// count, so a path written by another app, absolute or through a link, still matches.
+    pub fn take_of_file(&self, file: &Path) -> Option<Take> {
+        let dir = file.parent()?;
+        if dir.parent()?.file_name()? != "jobs" {
+            return None;
+        }
+        let id = Ulid::from_string(dir.file_name()?.to_str()?).ok()?;
+        let job = self.job(&id.to_string()).ok()?;
+        self.takes(job.shot?)
+            .ok()?
+            .into_iter()
+            .find(|t| Some(t.id) == job.take)
+    }
+
     /// `3`, `#3` or a ULID prefix.
     pub fn take(&self, shot: ShotRef, spec: &str) -> Result<Take> {
         let takes = self.takes(shot)?;
@@ -529,6 +544,29 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_take_by_its_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Project::init(&tmp.path().join("film"), Some("Rain")).unwrap();
+        p.add_chapter("One").unwrap();
+        let r = p.add_shot("1", None, crate::Shot::default()).unwrap();
+        let mut j = Job::new(Op::VideoGenerate, "fake", "fake/video");
+        j.shot = Some(r);
+        j.take = Some(p.new_take_id());
+        let j = p.create_job(j).unwrap();
+        // Named by another app through another path to the same folder.
+        let elsewhere = Path::new("/Volumes/x/film/jobs")
+            .join(j.id.to_string())
+            .join("out.mp4");
+        let t = p.take_of_file(&elsewhere).unwrap();
+        assert_eq!((t.shot, t.number), (r, 1));
+        assert!(p.take_of_file(Path::new("/x/jobs/nope/out.mp4")).is_none());
+        assert!(
+            p.take_of_file(&Path::new("/x/renders").join(j.id.to_string()).join("a.mp4"))
+                .is_none()
+        );
+    }
 
     #[test]
     fn system_ids_only_go_up() {

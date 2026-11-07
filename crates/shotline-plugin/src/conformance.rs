@@ -89,35 +89,55 @@ pub async fn check(plugin: &dyn Plugin, opts: &Options<'_>) -> Vec<Check> {
         }
     }
 
-    // A sample request for an operation the plugin does, with a model it doesn't have.
-    let mut bogus = desc
-        .models
-        .first()
-        .and_then(|m| sample_request(m, opts.work_dir).ok())
-        .unwrap_or_default();
-    bogus.model = "no/such-model".into();
-    r.add(
-        "unknown model is a validation error on `model`",
-        match plugin.quote(&bogus).await {
-            Err(Error::Plugin(e))
-                if matches!(e.kind, ErrorKind::Validation | ErrorKind::NotFound)
-                    && e.field.as_deref() == Some("model") =>
-            {
-                None
-            }
-            Err(e) => Some(format!("got {e}")),
-            Ok(_) => Some("quoted a model that doesn't exist".into()),
-        },
-    );
+    // An editor with no models has no jobs to ask about.
+    if !desc.models.is_empty() {
+        // A sample request for an operation the plugin does, with a model it doesn't have.
+        let mut bogus = desc
+            .models
+            .first()
+            .and_then(|m| sample_request(m, opts.work_dir).ok())
+            .unwrap_or_default();
+        bogus.model = "no/such-model".into();
+        r.add(
+            "unknown model is a validation error on `model`",
+            match plugin.quote(&bogus).await {
+                Err(Error::Plugin(e))
+                    if matches!(e.kind, ErrorKind::Validation | ErrorKind::NotFound)
+                        && e.field.as_deref() == Some("model") =>
+                {
+                    None
+                }
+                Err(e) => Some(format!("got {e}")),
+                Ok(_) => Some("quoted a model that doesn't exist".into()),
+            },
+        );
 
-    r.add(
-        "unknown job is not_found",
-        match plugin.poll("no-such-job").await {
-            Err(Error::Plugin(e)) if e.kind == ErrorKind::NotFound => None,
-            Err(e) => Some(format!("got {e}")),
-            Ok(_) => Some("polled a job that doesn't exist".into()),
-        },
-    );
+        r.add(
+            "unknown job is not_found",
+            match plugin.poll("no-such-job").await {
+                Err(Error::Plugin(e)) if e.kind == ErrorKind::NotFound => None,
+                Err(e) => Some(format!("got {e}")),
+                Ok(_) => Some("polled a job that doesn't exist".into()),
+            },
+        );
+    }
+
+    if desc.editor {
+        r.add(
+            "sequences",
+            match plugin.sequences(opts.work_dir).await {
+                Ok(s) => s
+                    .edits
+                    .iter()
+                    .flat_map(|e| &e.sequences)
+                    .flat_map(|q| q.video.iter().chain(&q.audio))
+                    .flat_map(|t| &t.clips)
+                    .find(|c| !(c.start >= 0.0 && c.length >= 0.0))
+                    .map(|c| format!("clip {:?} has a bad start or length", c.name)),
+                Err(e) => Some(e.to_string()),
+            },
+        );
+    }
 
     match plugin.balance().await {
         Err(Error::Unsupported(_)) => {}
@@ -155,7 +175,7 @@ fn describe_problem(d: &Description) -> Option<String> {
     if d.name.trim().is_empty() {
         return Some("empty name".into());
     }
-    if d.models.is_empty() {
+    if d.models.is_empty() && !d.editor {
         return Some("no models".into());
     }
     let mut seen = HashSet::new();

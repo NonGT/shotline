@@ -17,6 +17,9 @@ pub const TUNGSTEN: Color32 = Color32::from_rgb(0xe0, 0xa8, 0x4a);
 pub const TUNGSTEN_LIT: Color32 = Color32::from_rgb(0xf0, 0xbd, 0x66);
 pub const TUNGSTEN_DEEP: Color32 = Color32::from_rgb(0xc4, 0x8f, 0x36);
 pub const FLAG: Color32 = Color32::from_rgb(0xe0, 0x6a, 0x5a);
+/// Clips on the Cut page's tracks, in the blue and green editors use.
+pub const VIDEO_CLIP: Color32 = Color32::from_rgb(0x3b, 0x4f, 0x6b);
+pub const AUDIO_CLIP: Color32 = Color32::from_rgb(0x34, 0x5c, 0x48);
 
 pub const SEMIBOLD: &str = "semibold";
 

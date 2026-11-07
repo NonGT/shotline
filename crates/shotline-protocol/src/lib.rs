@@ -96,6 +96,12 @@ pub struct Description {
     #[serde(default)]
     pub env: Vec<String>,
     pub models: Vec<ModelInfo>,
+    /// It links shotline to a video editor: it answers `sequences`, and `open` if it can.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub editor: bool,
+    /// The editor's name for people, e.g. "FilmCraft".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
 }
 
 /// One model and what it accepts. Limits that don't apply are left out.
@@ -345,6 +351,127 @@ pub struct VoiceInfo {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Voices {
     pub voices: Vec<VoiceInfo>,
+}
+
+/// Params of `sequences`: the film's folder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SequencesParams {
+    pub film: PathBuf,
+}
+
+/// Params of `import`: finished takes for the editor to have at hand.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ImportParams {
+    pub film: PathBuf,
+    pub takes: Vec<TakeFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TakeFile {
+    /// As shotline names it, e.g. `01-010#2`.
+    pub name: String,
+    /// Its shot, e.g. `01-010`.
+    pub shot: String,
+    pub file: PathBuf,
+}
+
+/// What `import` did: takes in the editor now, and ones kept until it's open.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Imported {
+    #[serde(default)]
+    pub sent: usize,
+    #[serde(default)]
+    pub waiting: usize,
+}
+
+/// Params of `open`: the film's project in the editor, made from `cut` when there's none yet.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct OpenParams {
+    pub film: PathBuf,
+    /// A project from `sequences`; without one the plugin opens or makes the film's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    /// The sequence to show, if the editor can be told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<String>,
+    /// shotline's cut: the selected takes back to back on V1, the music on A tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<SequenceInfo>,
+    /// Takes to have at hand there too, as with `import`; sent with a new project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<TakeFile>,
+}
+
+/// Reply to `sequences`: the editor's projects for the film.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Sequences {
+    pub edits: Vec<EditInfo>,
+}
+
+/// One editor project, or why it couldn't be read.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct EditInfo {
+    /// Its file; shotline reads the sequences again once it changes.
+    pub file: PathBuf,
+    pub name: String,
+    /// The editor's name for people, e.g. "FilmCraft".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
+    /// The plugin that answered; filled in by shotline.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub plugin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub sequences: Vec<SequenceInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SequenceInfo {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    /// V1 first.
+    pub video: Vec<TrackInfo>,
+    /// A1 first.
+    pub audio: Vec<TrackInfo>,
+}
+
+impl SequenceInfo {
+    /// How long it runs: to the end of its last clip.
+    pub fn length(&self) -> f64 {
+        self.video
+            .iter()
+            .chain(&self.audio)
+            .flat_map(|t| &t.clips)
+            .map(|c| c.start + c.length)
+            .fold(0.0, f64::max)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TrackInfo {
+    pub name: String,
+    /// Shown (video) or not muted (audio).
+    pub enabled: bool,
+    pub clips: Vec<ClipInfo>,
+}
+
+/// A clip on a track. Times in seconds.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ClipInfo {
+    pub name: String,
+    /// None for what isn't a file: a nested sequence, a title, a generator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    pub start: f64,
+    pub length: f64,
+    /// Where in the file it starts.
+    #[serde(default)]
+    pub from: f64,
+    pub speed: f64,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

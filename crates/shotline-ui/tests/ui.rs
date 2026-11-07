@@ -8,7 +8,10 @@ use eframe::egui::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use shotline_core::ledger::Context;
-use shotline_core::protocol::{Description, ModelInfo, Op, Quote, VoiceInfo};
+use shotline_core::protocol::{
+    ClipInfo, Description, EditInfo, ModelInfo, Op, OpenParams, Quote, SequenceInfo, TrackInfo,
+    VoiceInfo,
+};
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
 use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
 
@@ -314,6 +317,8 @@ impl Host for TestHost {
             name: name.into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
+            app: String::new(),
             env: vec![],
             models,
         };
@@ -457,6 +462,23 @@ impl Host for TestHost {
         std::fs::create_dir_all(out.parent().unwrap())?;
         std::fs::write(&out, "")?;
         Ok((out, "8s · 720x1280".into()))
+    }
+
+    /// An editor plugin's answer, from shared/edits.json when a test writes one.
+    fn sequences(&self, film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+        let edits = std::fs::read_to_string(film.join("shared/edits.json"))
+            .map(|t| serde_json::from_str(&t).unwrap())
+            .unwrap_or_default();
+        (edits, vec![])
+    }
+
+    /// Notes what it was asked, in the film's folder.
+    fn open_edit(&self, plugin: &str, ask: &OpenParams) -> anyhow::Result<()> {
+        std::fs::write(
+            ask.film.join(format!("opened-by-{plugin}.json")),
+            serde_json::to_string(ask)?,
+        )?;
+        Ok(())
     }
 
     fn rates(&self, _: &Path) -> anyhow::Result<Vec<shotline_core::ledger::RateLine>> {
@@ -618,6 +640,8 @@ fn make_an_anchor_image() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![model("fal-ai/flux"), model("fal-ai/nano-banana")],
         }],
@@ -711,6 +735,8 @@ fn a_shot_s_pictures_and_a_take() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![
                 ModelInfo {
@@ -924,6 +950,8 @@ fn translate_only_when_it_helps() {
                 name: "fal".into(),
                 version: "1".into(),
                 protocol: 1,
+                editor: false,
+                app: String::new(),
                 env: vec![],
                 models: vec![model("fal-ai/nano-banana", Op::ImageGenerate)],
             },
@@ -931,6 +959,8 @@ fn translate_only_when_it_helps() {
                 name: "venice".into(),
                 version: "1".into(),
                 protocol: 1,
+                editor: false,
+                app: String::new(),
                 env: vec![var.into()],
                 models: vec![model("claude-haiku-5-5", Op::TextGenerate)],
             },
@@ -1103,6 +1133,8 @@ fn edit_elements() {
             name: "elevenlabs".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![tts("eleven_v3"), tts("eleven_flash_v2_5")],
         }],
@@ -1113,17 +1145,18 @@ fn edit_elements() {
         .with_max_steps(16)
         .with_size(egui::vec2(1100.0, 1100.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
-    h.run();
+    // Anchors decode on another thread and repaint when done, which can take a while.
+    h.run_ok();
     h.get_by_label("Elements").click();
-    h.run();
+    h.run_ok();
 
     let name = h.get_by_role_and_label(Role::TextInput, "New element");
     name.focus();
     name.type_text("Mali");
-    h.run();
+    h.run_ok();
     h.get_by_label("Add element").click();
-    h.run();
-    h.run();
+    h.run_ok();
+    h.run_ok();
     assert_eq!(p.element("mali").unwrap().name, "Mali");
     h.get_by_label("added @mali");
 
@@ -1131,36 +1164,36 @@ fn edit_elements() {
     let desc = h.get_by_role_and_label(Role::MultilineTextInput, "Description");
     desc.focus();
     desc.type_text("young woman, short black hair");
-    h.run();
+    h.run_ok();
     h.get_by_role_and_label(Role::ComboBox, "Plugin").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("elevenlabs").click();
     // The plugin is asked for its voices in the background; its repaint can land mid-run.
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::ComboBox, "Voice")
         .is_some()));
-    h.run();
+    h.run_ok();
     h.get_by_role_and_label(Role::ComboBox, "Model").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("eleven_v3").click();
-    h.run();
+    h.run_ok();
     // The plugin is asked for its voices in the background.
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::ComboBox, "Voice")
         .is_some()));
     h.get_by_role_and_label(Role::ComboBox, "Voice").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("Somchai").click();
-    h.run();
+    h.run_ok();
     // Settings as the model describes them, each with what it does under it.
     h.get_by_label("Higher is steadier");
     h.get_by_role_and_label(Role::CheckBox, "boost").click();
-    h.run();
+    h.run_ok();
     h.get_by_role_and_label(Role::ComboBox, "mood").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("angry").click();
-    h.run();
-    h.run();
+    h.run_ok();
+    h.run_ok();
     let mali = p.element("mali").unwrap();
     assert_eq!(mali.description, "young woman, short black hair");
     let voice = mali.voice.unwrap();
@@ -1174,7 +1207,7 @@ fn edit_elements() {
 
     // Clicking an anchor shows it big.
     h.get_by_label("@paka  Paka").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("elements/cast/paka/01.png").click();
     // It opens at once with a spinner while the big one decodes.
     h.step();
@@ -1185,28 +1218,28 @@ fn edit_elements() {
         .query_by_label("elements/cast/paka/01.png big")
         .is_some()));
     // A new modal takes a frame or two to find its place.
-    h.run();
+    h.run_ok();
     // Pinched in, a click doesn't close it; pinched back out, it does.
     let big = "elements/cast/paka/01.png big";
     h.get_by_label(big).hover();
-    h.run();
+    h.run_ok();
     h.event(egui::Event::Zoom(2.0));
-    h.run();
+    h.run_ok();
     h.get_by_label(big).click();
-    h.run();
+    h.run_ok();
     h.get_by_label(big).hover();
-    h.run();
+    h.run_ok();
     h.event(egui::Event::Zoom(0.25));
-    h.run();
+    h.run_ok();
     h.get_by_label(big).click();
-    h.run();
+    h.run_ok();
     assert!(h.query_by_label(big).is_none());
 
     h.get_by_label("elements/cast/paka/01.png").click();
     assert!(wait_for(&mut h, |h| h.query_by_label(big).is_some()));
-    h.run();
+    h.run_ok();
     h.get_by_label("Close").click();
-    h.run();
+    h.run_ok();
     assert!(h.query_by_label("elements/cast/paka/01.png big").is_none());
 
     // A label says what it shows, saved once the box is left; Enter doesn't break the line.
@@ -1216,21 +1249,21 @@ fn edit_elements() {
     );
     label.focus();
     label.type_text("side view");
-    h.run();
+    h.run_ok();
     h.key_press(egui::Key::Enter);
-    h.run();
+    h.run_ok();
     h.key_press(egui::Key::Escape);
-    h.run();
-    h.run();
+    h.run_ok();
+    h.run_ok();
     assert_eq!(p.element("paka").unwrap().labels["01.png"], "side view");
 
     // Taking an anchor off takes its label too, and both come back on undo.
     h.get_by_label("Remove").click();
-    h.run();
+    h.run_ok();
     assert!(!anchor.exists());
     assert!(p.element("paka").unwrap().labels.is_empty());
     h.get_by_label("Undo").click();
-    h.run();
+    h.run_ok();
     assert_eq!(std::fs::read(&anchor).unwrap(), bytes);
     assert_eq!(p.element("paka").unwrap().labels["01.png"], "side view");
 
@@ -1598,7 +1631,8 @@ fn a_selected_take_s_last_frame() {
     h.run();
 
     // Nothing to continue from until the shot before has a take in the cut.
-    h.get_by_label_contains(&format!("{next}  Paka stops")).click();
+    h.get_by_label_contains(&format!("{next}  Paka stops"))
+        .click();
     h.run();
     let cont = h.get_by_label("Continue from previous shot");
     assert!(cont.accesskit_node().is_disabled());
@@ -1613,7 +1647,8 @@ fn a_selected_take_s_last_frame() {
     assert!(last.is_file());
 
     // It's there to pick under Takes.
-    h.get_by_label_contains(&format!("{next}  Paka stops")).click();
+    h.get_by_label_contains(&format!("{next}  Paka stops"))
+        .click();
     h.run();
     h.get_by_role_and_label(Role::ComboBox, "Browse existing frames")
         .click();
@@ -1636,6 +1671,173 @@ fn a_selected_take_s_last_frame() {
     h.run();
     h.run();
     assert_eq!(p.shot(next).unwrap().transition, Transition::Continue);
+}
+
+#[test]
+fn an_editor_s_sequence_on_the_cut_page() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    wait(&mut h, 0.1);
+    // Without an editor plugin, a word on what one would do.
+    h.get_by_label_contains("With an editor plugin like filmcraft");
+    assert!(h.query_by_label("Open in FilmCraft").is_none());
+    h.state_mut()
+        .set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    wait(&mut h, 0.1);
+
+    // As the plugin reads it: a take of the film's, by its path, and a file of its own.
+    let take = p.take(R, "1").unwrap();
+    let video = p.job_dir(take.output().unwrap().id).join("out.mp4");
+    let clip = |name: &str, file: PathBuf, start: f64| ClipInfo {
+        name: name.into(),
+        file: Some(file),
+        start,
+        length: 1.0,
+        speed: 1.0,
+        enabled: true,
+        ..ClipInfo::default()
+    };
+    let track = |clips| TrackInfo {
+        name: "1".into(),
+        enabled: true,
+        clips,
+    };
+    let edits = vec![
+        EditInfo {
+            file: p.root.join("shared/broken.fcproj"),
+            name: "broken".into(),
+            error: Some("not JSON".into()),
+            ..EditInfo::default()
+        },
+        EditInfo {
+            file: p.root.join("shared/edit.fcproj"),
+            name: "Rain edit".into(),
+            app: "FilmCraft".into(),
+            plugin: "filmcraft".into(),
+            error: None,
+            sequences: vec![SequenceInfo {
+                name: "Main edit".into(),
+                width: 720,
+                height: 1280,
+                fps: 24.0,
+                video: vec![track(vec![clip("out.mp4", video, 0.0)])],
+                audio: vec![track(vec![clip("rain.wav", p.root.join("rain.wav"), 1.0)])],
+            }],
+        },
+    ];
+    std::fs::create_dir_all(p.root.join("shared")).unwrap();
+    std::fs::write(
+        p.root.join("shared/edits.json"),
+        serde_json::to_string(&edits).unwrap(),
+    )
+    .unwrap();
+    h.get_by_label("Reload").click();
+    // Read on another thread, which can take a while on a slow machine.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("broken.fcproj can't be read")
+        .is_some()));
+    h.get_by_label("edit.fcproj · Main edit").click();
+    h.run();
+    h.get_by_label_contains("shared/edit.fcproj · 720 × 1280 · 24 fps");
+    h.get_by_role_and_label(Role::Button, "rain.wav");
+    // Back and forth between the two.
+    h.get_by_label("This film's cut").click();
+    h.run();
+    assert!(h.query_by_label("rain.wav").is_none());
+    h.get_by_label("edit.fcproj · Main edit").click();
+    h.run();
+    // Saved again in the editor, it's read again without asking.
+    let mut edits = edits;
+    edits[1].sequences[0].audio[0]
+        .clips
+        .push(clip("thunder.wav", p.root.join("thunder.wav"), 2.0));
+    std::fs::write(
+        p.root.join("shared/edits.json"),
+        serde_json::to_string(&edits).unwrap(),
+    )
+    .unwrap();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::Button, "thunder.wav")
+        .is_some()));
+    // To change it, it opens in its own app through the plugin that read it.
+    h.get_by_label("Open in FilmCraft").click();
+    let opened = p.root.join("opened-by-filmcraft.json");
+    assert!(wait_for(&mut h, |_| opened.is_file()));
+    let ask: OpenParams = serde_json::from_str(&std::fs::read_to_string(&opened).unwrap()).unwrap();
+    assert_eq!(ask.file, Some(p.root.join("shared/edit.fcproj")));
+    assert_eq!(ask.sequence.as_deref(), Some("Main edit"));
+    assert!(ask.cut.is_none());
+    // The take goes by its name and opens its shot.
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    h.run();
+    assert_eq!(h.state().tab(), Tab::Shots);
+}
+
+fn editor_plugin() -> Description {
+    Description {
+        name: "filmcraft".into(),
+        version: "0.1.0".into(),
+        protocol: 1,
+        env: vec![],
+        models: vec![],
+        editor: true,
+        app: "FilmCraft".into(),
+    }
+}
+
+#[test]
+fn starts_an_editor_project_from_the_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let take = p.take(R, "1").unwrap();
+    let video = p.job_dir(take.output().unwrap().id).join("out.mp4");
+    if clip(&video).is_none() {
+        return;
+    }
+    p.select_take(R, "1").unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    wait(&mut h, 0.1);
+    // No project yet: the button is there anyway, and makes one from this cut.
+    h.get_by_label_contains("Its sequences show here once it's saved");
+    h.get_by_label("Open in FilmCraft").click();
+    let opened = p.root.join("opened-by-filmcraft.json");
+    assert!(wait_for(&mut h, |_| opened.is_file()));
+    let ask: OpenParams = serde_json::from_str(&std::fs::read_to_string(&opened).unwrap()).unwrap();
+    assert_eq!(ask.film, p.root);
+    assert!(ask.file.is_none());
+    let cut = ask.cut.unwrap();
+    assert_eq!((cut.width, cut.height, cut.fps), (160, 90, 24.0));
+    let v1 = &cut.video[0].clips;
+    assert_eq!(v1.len(), 1);
+    assert_eq!(v1[0].name, "01-010#1");
+    assert_eq!(v1[0].file.as_ref(), Some(&video));
+    assert!((v1[0].length - 1.0).abs() < 0.1, "{}", v1[0].length);
+    // Its sound under it.
+    assert_eq!(cut.audio[0].clips.len(), 1);
+    // Every finished take goes in its bins too, by absolute path.
+    let names: Vec<&str> = ask.takes.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["01-010#1"]);
+    assert_eq!(ask.takes[0].shot, "01-010");
+    assert!(ask.takes[0].file.is_absolute());
 }
 
 /// A second of test pattern with a tone, or None without ffmpeg.
@@ -1796,6 +1998,16 @@ fn plays_compares_and_plays_the_cut() {
         .query_all_by_label("the cut")
         .count()
         == 0));
+
+    // On its track, the playhead starts the cut where it's put, and the take opens its shot.
+    h.get_by_role_and_label(Role::Slider, "Playhead").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("the cut")
+        .count()
+        == 2));
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.1);
+    assert_eq!(h.state().tab(), Tab::Shots);
 }
 
 #[test]
@@ -2024,6 +2236,8 @@ fn set_the_format_on_the_story_tab() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![ModelInfo {
                 id: "minimax/h3-max/reference-to-video".into(),
@@ -2109,6 +2323,8 @@ fn a_shot_on_another_model() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![
                 video("minimax/h3-max/reference-to-video", &["768P", "1080P"]),
@@ -2765,6 +2981,10 @@ fn a_take_from_pieces() {
         .click();
     wait(&mut h, 0.2);
     h.get_by_label("Add piece").click();
+    // Its length comes from probing the file on another thread.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("2. #3  0.00–1.00s")
+        .is_some()));
     wait(&mut h, 0.1);
     h.get_by_label_contains("2. #3  0.00–1.00s").click();
     wait(&mut h, 0.1);
@@ -2904,6 +3124,8 @@ fn remake_starts_from_what_a_picture_was_made_with() {
             name: "fal".into(),
             version: "1".into(),
             protocol: 1,
+            editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![ModelInfo {
                 id: "fal-ai/nano-banana".into(),
@@ -2962,6 +3184,8 @@ fn no_more_lines_than_the_video_model_takes() {
         name: "fal".into(),
         version: "1".into(),
         protocol: 1,
+        editor: false,
+        app: String::new(),
         env: vec![],
         models: vec![ModelInfo {
             id: model.clone(),
@@ -3095,4 +3319,95 @@ fn a_recorded_line_has_a_player_under_it() {
     h.run();
     h.get_by_label("0.5 / 1.0 s");
     h.get_by_label("0.5 s in the shot");
+}
+
+#[test]
+fn plays_an_editor_sequence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let take = p.take(R, "1").unwrap();
+    let video = p.job_dir(take.output().unwrap().id).join("out.mp4");
+    if clip(&video).is_none() {
+        return;
+    }
+    let piece = |name: &str, file: Option<PathBuf>, start: f64| ClipInfo {
+        name: name.into(),
+        file,
+        start,
+        length: 1.0,
+        speed: 1.0,
+        enabled: true,
+        ..ClipInfo::default()
+    };
+    let track = |clips| TrackInfo {
+        name: "1".into(),
+        enabled: true,
+        clips,
+    };
+    let edits = vec![EditInfo {
+        file: p.root.join("shared/edit.fcproj"),
+        name: "Rain edit".into(),
+        error: None,
+        sequences: vec![SequenceInfo {
+            name: "Main edit".into(),
+            width: 160,
+            height: 90,
+            fps: 24.0,
+            video: vec![
+                track(vec![piece("out.mp4", Some(video.clone()), 0.0)]),
+                track(vec![piece("Title", None, 0.5)]),
+            ],
+            audio: vec![track(vec![piece("out.mp4", Some(video), 0.0)])],
+        }],
+        ..EditInfo::default()
+    }];
+    std::fs::create_dir_all(p.root.join("shared")).unwrap();
+    std::fs::write(
+        p.root.join("shared/edits.json"),
+        serde_json::to_string(&edits).unwrap(),
+    )
+    .unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Main edit")
+        .is_some()));
+    h.get_by_label("Main edit").click();
+    h.run();
+
+    // A preview is made first, then it plays.
+    h.get_by_label("Play the sequence").click();
+    assert!(wait_for(&mut h, |h| h.state().is_playing()));
+    // Its title, then its picture once the first frame is in.
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("edit.fcproj · Main edit")
+        .count()
+        == 2));
+    h.get_by_label_contains("Left out of the preview: Title: made in the editor");
+    let made: Vec<_> = std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
+        .unwrap()
+        .collect();
+    assert_eq!(made.len(), 1);
+    wait(&mut h, 1.2);
+    assert!(wait_for(&mut h, |h| !h.state().is_playing()));
+
+    // Made once: the playhead starts it again straight away.
+    h.get_by_label("Close player").click();
+    wait(&mut h, 0.1);
+    h.get_by_role_and_label(Role::Slider, "Playhead").click();
+    assert!(wait_for(&mut h, |h| h.state().is_playing()));
+    assert_eq!(
+        std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
+            .unwrap()
+            .count(),
+        1
+    );
 }

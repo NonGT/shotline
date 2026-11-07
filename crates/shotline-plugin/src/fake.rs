@@ -22,9 +22,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use shotline_protocol::{
-    Amount, Balance, Description, ErrorKind, MediaKind, ModelInfo, Op, Output, Outputs,
-    PROTOCOL_VERSION, PluginError, Quote, Rate, Rates, Request, State, Status, Usage, VoiceInfo,
-    Voices,
+    Amount, Balance, Description, ErrorKind, ImportParams, Imported, MediaKind, ModelInfo, Op,
+    Output, Outputs, PROTOCOL_VERSION, PluginError, Quote, Rate, Rates, Request, State, Status,
+    Usage, VoiceInfo, Voices,
 };
 
 use crate::{Plugin, Result};
@@ -294,6 +294,8 @@ impl Plugin for FakePlugin {
             name: "fake".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOL_VERSION,
+            editor: false,
+            app: String::new(),
             env: vec![KEY_VAR.into()],
             models: models(),
         })
@@ -445,5 +447,69 @@ impl Plugin for FakePlugin {
                 .map_err(|e| PluginError::new(ErrorKind::Other, e.to_string()).into()),
             Err(_) => Ok(Usage::default()),
         }
+    }
+}
+
+/// An editor that takes whatever it's given: `import` adds a line per take to
+/// `shared/fake-editor/imported.jsonl` in the film, and it has no projects.
+#[derive(Default)]
+pub struct FakeEditor;
+
+#[async_trait]
+impl Plugin for FakeEditor {
+    async fn describe(&self) -> Result<Description> {
+        Ok(Description {
+            name: "fake-editor".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            protocol: PROTOCOL_VERSION,
+            env: vec![],
+            models: vec![],
+            editor: true,
+            app: "Fake Editor".into(),
+        })
+    }
+
+    async fn quote(&self, _req: &Request) -> Result<Quote> {
+        Err(crate::Error::Unsupported("quote".into()))
+    }
+
+    async fn run(&self, _: &Request, _: &Path) -> Result<String> {
+        Err(crate::Error::Unsupported("run".into()))
+    }
+
+    async fn poll(&self, _: &str) -> Result<Status> {
+        Err(crate::Error::Unsupported("poll".into()))
+    }
+
+    async fn fetch(&self, _: &str, _: &Path) -> Result<Outputs> {
+        Err(crate::Error::Unsupported("fetch".into()))
+    }
+
+    async fn cancel(&self, _: &str) -> Result<()> {
+        Err(crate::Error::Unsupported("cancel".into()))
+    }
+
+    async fn sequences(&self, _film: &Path) -> Result<shotline_protocol::Sequences> {
+        Ok(shotline_protocol::Sequences::default())
+    }
+
+    async fn import(&self, ask: &ImportParams) -> Result<Imported> {
+        use std::io::Write;
+        let dir = ask.film.join("shared/fake-editor");
+        let file = std::fs::create_dir_all(&dir).and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("imported.jsonl"))
+        });
+        let mut file = file.map_err(|e| PluginError::new(ErrorKind::Other, e.to_string()))?;
+        for t in &ask.takes {
+            writeln!(file, "{}", serde_json::to_string(t).unwrap_or_default())
+                .map_err(|e| PluginError::new(ErrorKind::Other, e.to_string()))?;
+        }
+        Ok(Imported {
+            sent: ask.takes.len(),
+            waiting: 0,
+        })
     }
 }

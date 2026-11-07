@@ -9,6 +9,7 @@ pub mod colour;
 pub mod lines;
 pub mod play;
 pub mod render;
+pub mod sequence;
 pub mod splice;
 
 #[derive(Debug, thiserror::Error)]

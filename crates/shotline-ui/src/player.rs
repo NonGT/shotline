@@ -392,7 +392,7 @@ pub struct Deck {
     sounding: Option<bool>,
 }
 
-fn clock(t: f64) -> String {
+pub(crate) fn clock(t: f64) -> String {
     format!("{}:{:04.1}", (t / 60.0) as u32, t % 60.0)
 }
 
@@ -441,6 +441,14 @@ impl Deck {
 
     pub fn is_playing(&self) -> bool {
         self.playing
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn position(&self) -> f64 {
+        self.players[0].position()
     }
 
     pub fn pause(&mut self, audio: Option<&Audio>) {
