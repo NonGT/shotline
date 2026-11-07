@@ -19,6 +19,7 @@ use shotline_plugin::protocol::{
 use shotline_plugin::{Error, Plugin, Result};
 
 pub mod control;
+pub mod editor;
 mod otio;
 
 pub const SHARED_DIR: &str = "shared";
@@ -127,9 +128,10 @@ fn add_waiting(film: &Path, takes: &[TakeFile]) -> std::result::Result<Vec<TakeF
 fn send_takes(ask: &ImportParams) -> std::result::Result<Imported, String> {
     let film = &ask.film;
     let all = add_waiting(film, &ask.takes)?;
-    let left = match control::Session::load(film).filter(control::Session::alive) {
-        Some(s) => deliver(&s, film, &all)?,
-        None => all.clone(),
+    let project = fcprojs(&own_dir(film)).into_iter().next();
+    let left = match project.map(|p| editor::for_project(film, &p)) {
+        Some(Ok(e)) => deliver(&e, film, &all)?,
+        _ => all.clone(),
     };
     keep_waiting(film, &left)?;
     Ok(Imported {
@@ -138,7 +140,7 @@ fn send_takes(ask: &ImportParams) -> std::result::Result<Imported, String> {
     })
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
@@ -165,14 +167,14 @@ fn find_bin(root: &Value, id: u64) -> Option<&Value> {
 /// returns the ones that couldn't go: all of them when another project is open in FilmCraft.
 /// One already in its bin isn't imported twice; one whose file is gone is dropped.
 fn deliver(
-    s: &control::Session,
+    s: &editor::Editor,
     film: &Path,
     takes: &[TakeFile],
 ) -> std::result::Result<Vec<TakeFile>, String> {
     if takes.is_empty() {
         return Ok(vec![]);
     }
-    let project = s.exec("project.inspect", json!({}))?;
+    let project = s.read("project.inspect", json!({}))?;
     let ours = project["path"]
         .as_str()
         .and_then(|p| Path::new(p).parent())
@@ -219,7 +221,7 @@ fn deliver(
         if let Some(item) = got["items"].as_array().and_then(|i| i.first()) {
             let _ = s.exec("clip.rename", json!({"item": item, "name": t.name}));
         }
-        root = s.exec("project.inspect", json!({}))?["root"].clone();
+        root = s.read("project.inspect", json!({}))?["root"].clone();
     }
     Ok(vec![])
 }
@@ -275,7 +277,7 @@ fn open_in_filmcraft(ask: &OpenParams) -> std::result::Result<(), String> {
         }
         None => make_project(film, ask.cut.as_ref(), running)?,
     };
-    let left = deliver(&s, film, &waiting(film));
+    let left = deliver(&editor::Editor::App(s.clone()), film, &waiting(film));
     let _ = s.call("ui.focus", json!({}));
     keep_waiting(film, &left?)
 }
@@ -357,7 +359,10 @@ fn make_project(
     s.exec("file.saveAs", json!({"path": file}))?;
     // Takes waiting go in once the project is the film's; it's saved again with them.
     if !waiting(film).is_empty() {
-        keep_waiting(film, &deliver(&s, film, &waiting(film))?)?;
+        keep_waiting(
+            film,
+            &deliver(&editor::Editor::App(s.clone()), film, &waiting(film))?,
+        )?;
         s.exec("file.save", json!({}))?;
     }
     if let Some(id) = got["sequences"].as_array().and_then(|a| a.first()) {
@@ -878,7 +883,46 @@ mod tests {
         assert_eq!(control::Session::load(&film), Some(s.clone()));
         let now = s.exec("project.inspect", json!({})).unwrap();
         assert_eq!(now["path"].as_str().map(Path::new), Some(project.as_path()));
+        // Saved, then closed: edits go through filmcraft-cli on the file.
+        s.exec("file.save", json!({})).unwrap();
         let _ = s.call("app.quit", json!({}));
+        let gone = |pid| {
+            (0..80).any(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                !editor::running_apps().contains(&pid)
+            })
+        };
+        assert!(gone(s.pid.unwrap()));
+        let Some(exe) = editor::cli_program() else {
+            eprintln!("no filmcraft-cli; the rest is skipped");
+            return;
+        };
+        let got = FilmCraft.import(&take("01-030#1", "01-030")).await.unwrap();
+        assert_eq!((got.sent, got.waiting), (1, 0));
+        let cli = editor::Editor::cli(exe, project.clone(), &film);
+        let root = cli.read("project.inspect", json!({})).unwrap()["root"].clone();
+        let top = find_bin(&root, bin_in(&root, "shotline").unwrap())
+            .unwrap()
+            .clone();
+        assert_eq!(shot(&top, "01-030"), ["01-030#1"]);
+        // The CLI's save was backed up first.
+        assert_eq!(
+            std::fs::read_dir(editor::backups_dir(&film))
+                .unwrap()
+                .count(),
+            1
+        );
+
+        // A FilmCraft shotline didn't start could save over the file, so the take waits.
+        let mut other = std::process::Command::new(control::program())
+            .arg("--empty")
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let got = FilmCraft.import(&take("01-040#1", "01-040")).await.unwrap();
+        let _ = other.kill();
+        let _ = other.wait();
+        assert_eq!((got.sent, got.waiting), (0, 1));
     }
 
     #[tokio::test]
