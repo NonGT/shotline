@@ -1145,17 +1145,18 @@ fn edit_elements() {
         .with_max_steps(16)
         .with_size(egui::vec2(1100.0, 1100.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
-    h.run();
+    // Anchors decode on another thread and repaint when done, which can take a while.
+    h.run_ok();
     h.get_by_label("Elements").click();
-    h.run();
+    h.run_ok();
 
     let name = h.get_by_role_and_label(Role::TextInput, "New element");
     name.focus();
     name.type_text("Mali");
-    h.run();
+    h.run_ok();
     h.get_by_label("Add element").click();
-    h.run();
-    h.run();
+    h.run_ok();
+    h.run_ok();
     assert_eq!(p.element("mali").unwrap().name, "Mali");
     h.get_by_label("added @mali");
 
@@ -1163,36 +1164,36 @@ fn edit_elements() {
     let desc = h.get_by_role_and_label(Role::MultilineTextInput, "Description");
     desc.focus();
     desc.type_text("young woman, short black hair");
-    h.run();
+    h.run_ok();
     h.get_by_role_and_label(Role::ComboBox, "Plugin").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("elevenlabs").click();
     // The plugin is asked for its voices in the background; its repaint can land mid-run.
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::ComboBox, "Voice")
         .is_some()));
-    h.run();
+    h.run_ok();
     h.get_by_role_and_label(Role::ComboBox, "Model").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("eleven_v3").click();
-    h.run();
+    h.run_ok();
     // The plugin is asked for its voices in the background.
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::ComboBox, "Voice")
         .is_some()));
     h.get_by_role_and_label(Role::ComboBox, "Voice").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("Somchai").click();
-    h.run();
+    h.run_ok();
     // Settings as the model describes them, each with what it does under it.
     h.get_by_label("Higher is steadier");
     h.get_by_role_and_label(Role::CheckBox, "boost").click();
-    h.run();
+    h.run_ok();
     h.get_by_role_and_label(Role::ComboBox, "mood").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("angry").click();
-    h.run();
-    h.run();
+    h.run_ok();
+    h.run_ok();
     let mali = p.element("mali").unwrap();
     assert_eq!(mali.description, "young woman, short black hair");
     let voice = mali.voice.unwrap();
@@ -1206,7 +1207,7 @@ fn edit_elements() {
 
     // Clicking an anchor shows it big.
     h.get_by_label("@paka  Paka").click();
-    h.run();
+    h.run_ok();
     h.get_by_label("elements/cast/paka/01.png").click();
     // It opens at once with a spinner while the big one decodes.
     h.step();
@@ -1217,28 +1218,28 @@ fn edit_elements() {
         .query_by_label("elements/cast/paka/01.png big")
         .is_some()));
     // A new modal takes a frame or two to find its place.
-    h.run();
+    h.run_ok();
     // Pinched in, a click doesn't close it; pinched back out, it does.
     let big = "elements/cast/paka/01.png big";
     h.get_by_label(big).hover();
-    h.run();
+    h.run_ok();
     h.event(egui::Event::Zoom(2.0));
-    h.run();
+    h.run_ok();
     h.get_by_label(big).click();
-    h.run();
+    h.run_ok();
     h.get_by_label(big).hover();
-    h.run();
+    h.run_ok();
     h.event(egui::Event::Zoom(0.25));
-    h.run();
+    h.run_ok();
     h.get_by_label(big).click();
-    h.run();
+    h.run_ok();
     assert!(h.query_by_label(big).is_none());
 
     h.get_by_label("elements/cast/paka/01.png").click();
     assert!(wait_for(&mut h, |h| h.query_by_label(big).is_some()));
-    h.run();
+    h.run_ok();
     h.get_by_label("Close").click();
-    h.run();
+    h.run_ok();
     assert!(h.query_by_label("elements/cast/paka/01.png big").is_none());
 
     // A label says what it shows, saved once the box is left; Enter doesn't break the line.
@@ -1248,21 +1249,21 @@ fn edit_elements() {
     );
     label.focus();
     label.type_text("side view");
-    h.run();
+    h.run_ok();
     h.key_press(egui::Key::Enter);
-    h.run();
+    h.run_ok();
     h.key_press(egui::Key::Escape);
-    h.run();
-    h.run();
+    h.run_ok();
+    h.run_ok();
     assert_eq!(p.element("paka").unwrap().labels["01.png"], "side view");
 
     // Taking an anchor off takes its label too, and both come back on undo.
     h.get_by_label("Remove").click();
-    h.run();
+    h.run_ok();
     assert!(!anchor.exists());
     assert!(p.element("paka").unwrap().labels.is_empty());
     h.get_by_label("Undo").click();
-    h.run();
+    h.run_ok();
     assert_eq!(std::fs::read(&anchor).unwrap(), bytes);
     assert_eq!(p.element("paka").unwrap().labels["01.png"], "side view");
 
