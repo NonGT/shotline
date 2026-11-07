@@ -175,6 +175,7 @@ impl Plugin for WaveSpeed {
             version: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOL_VERSION,
             editor: false,
+            app: String::new(),
             env: vec![KEY_VAR.into()],
             models: models(),
         })

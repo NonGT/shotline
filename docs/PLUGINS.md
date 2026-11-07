@@ -84,7 +84,7 @@ No params. Returns:
 ```
 
 `"editor": true` marks a plugin that answers `sequences` (and `open` if it can); leave it out
-otherwise.
+otherwise. `"app"` names the editor for people, as in "Open in FilmCraft".
 
 Model fields other than `id` and `op` are optional; leave out what doesn't apply.
 
@@ -240,10 +240,19 @@ changes. `app` names the editor for people, as in the Cut page's "Open in FilmCr
 
 ### open (optional)
 
-For an editor plugin: opens one of the projects it listed in its editor, so the cut can be
-changed there. Params: `{"file": "/path/to/film/shared/edit.fcproj", "sequence": "Main edit"}`;
-`sequence` may be ignored when the editor can't be told which one to show. Returns `{}` once the
-editor was started, without waiting for it to close.
+For an editor plugin: opens the film's project in the editor so the cut can be changed there,
+or makes one when there's none yet. Params:
+
+```json
+{"film": "/path/to/film", "file": "/path/to/film/shared/filmcraft/fan.fcproj",
+ "sequence": "Main edit"}
+```
+
+`file` and `sequence` come from `sequences`; without `file` the plugin opens the film's own
+project, and when there's none it makes one from `cut`, shotline's cut in the same shape as a
+sequence above (the selected takes back to back on V1, their sound on A1, music on A2 and up).
+A plugin keeps what it makes under `shared/<plugin name>/`, and only lets the editor itself write
+its project file. Returns `{}` once the editor shows it.
 
 Leave out optional methods; answer with error code -32601 (method not found).
 

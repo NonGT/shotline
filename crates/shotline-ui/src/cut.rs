@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
-use shotline_core::protocol::{ClipInfo, SequenceInfo, TrackInfo};
+use shotline_core::protocol::{ClipInfo, OpenParams, SequenceInfo, TrackInfo};
 use shotline_core::{MatchAt, ShotRef, Transition};
 
 use crate::edit::Action;
@@ -326,15 +326,26 @@ impl App {
     /// shared/.
     fn cut_switch(&mut self, ui: &mut egui::Ui) {
         self.refresh_edits(ui.ctx());
-        let (edits, problems) = &self.edits;
-        for p in problems {
+        self.editor_opened();
+        for p in &self.edits.1 {
             ui.label(RichText::new(short(p, 100)).color(theme::FLAG))
                 .on_hover_text(p);
         }
-        if edits.is_empty() {
+        let editors: Vec<(String, String)> = self
+            .plugins
+            .iter()
+            .filter(|d| d.editor)
+            .map(|d| {
+                let app = if d.app.is_empty() { &d.name } else { &d.app };
+                (d.name.clone(), app.clone())
+            })
+            .collect();
+        let edits = &self.edits.0;
+        if edits.is_empty() && editors.is_empty() {
             hint(
                 ui,
-                "A FilmCraft project saved in shared/ shows its sequences here, next to this cut.",
+                "With an editor plugin like filmcraft, this cut opens in a video editor and \
+                 its sequences show here.",
             );
             ui.add_space(6.0);
             return;
@@ -342,15 +353,18 @@ impl App {
         let several = edits.len() > 1;
         let now = self.edit_sequence().map(|(f, s)| (f, s.name));
         let mut pick = None;
+        let mut open = None;
         ui.horizontal_wrapped(|ui| {
-            if ui
-                .selectable_label(now.is_none(), "This film's cut")
-                .on_hover_text("the selected takes in shot order, as shotline renders them")
-                .clicked()
-            {
-                pick = Some(None);
+            if !edits.is_empty() {
+                if ui
+                    .selectable_label(now.is_none(), "This film's cut")
+                    .on_hover_text("the selected takes in shot order, as shotline renders them")
+                    .clicked()
+                {
+                    pick = Some(None);
+                }
+                ui.separator();
             }
-            ui.separator();
             for e in edits {
                 let file = e.file.file_name().unwrap_or_default().to_string_lossy();
                 if let Some(why) = &e.error {
@@ -379,9 +393,51 @@ impl App {
                     ui.weak(format!("{file} has no sequences"));
                 }
             }
+            if !edits.is_empty() {
+                ui.separator();
+            }
+            let opening = self.edit_opening.is_some();
+            for (plugin, app) in &editors {
+                let shown = now
+                    .as_ref()
+                    .filter(|(f, _)| edits.iter().any(|e| e.file == *f && e.plugin == *plugin));
+                let has_own = edits.iter().any(|e| e.plugin == *plugin);
+                let hover = match (shown, has_own) {
+                    (Some(_), _) => format!(
+                        "change this sequence in {app}; it shows here again each time it's saved"
+                    ),
+                    (None, true) => format!("open the film's {app} project"),
+                    (None, false) => format!(
+                        "start a {app} project from this cut, in shared/{plugin}/; its \
+                         sequences then show here, and again each time it's saved"
+                    ),
+                };
+                if ui
+                    .add_enabled(!opening, egui::Button::new(format!("Open in {app}")))
+                    .on_hover_text(hover)
+                    .on_disabled_hover_text("opening it…")
+                    .clicked()
+                {
+                    open = Some((plugin.clone(), app.clone(), shown.cloned()));
+                }
+            }
+            if opening {
+                ui.spinner();
+            }
         });
         if let Some(p) = pick {
             self.cut_view = p;
+        }
+        let none_yet = edits.is_empty();
+        if let Some((plugin, app, shown)) = open {
+            self.open_in_editor(ui.ctx(), plugin, app, shown);
+        }
+        if none_yet {
+            ui.add_space(4.0);
+            hint(
+                ui,
+                "Its sequences show here once it's saved in the film's shared/ folder.",
+            );
         }
         ui.add_space(10.0);
     }
@@ -445,7 +501,6 @@ impl App {
                 ui.spinner();
                 ui.weak("making a preview to play…");
             }
-            self.open_in_editor(ui, file, seq);
         });
         let playing = self
             .seq_playing
@@ -491,43 +546,57 @@ impl App {
         }
     }
 
-    /// A button that opens the project in the editor it was made in, to change it there.
-    fn open_in_editor(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
-        self.editor_opened();
-        let Some(edit) = self.edits.0.iter().find(|e| e.file == file) else {
+    /// Asks the editor plugin to open the film's project there, at the sequence shown, or to
+    /// make one from this cut when there's none yet.
+    fn open_in_editor(
+        &mut self,
+        ctx: &egui::Context,
+        plugin: String,
+        app: String,
+        shown: Option<(PathBuf, String)>,
+    ) {
+        let Some(host) = self.host.clone() else {
             return;
         };
-        let app = if edit.app.is_empty() {
-            edit.plugin.clone()
-        } else {
-            edit.app.clone()
-        };
-        let opening = self.edit_opening.is_some();
-        let can = !edit.plugin.is_empty() && !opening;
-        if ui
-            .add_enabled(can, egui::Button::new(format!("Open in {app}")))
-            .on_hover_text(format!(
-                "change this cut in {app}; it shows here again each time it's saved"
-            ))
-            .on_disabled_hover_text("opening it…")
-            .clicked()
-            && let Some(host) = self.host.clone()
-        {
-            let slot: crate::Opened = Arc::default();
-            self.edit_opening = Some((app, slot.clone()));
-            let (plugin, file, name) = (edit.plugin.clone(), file.to_path_buf(), seq.name.clone());
-            let ctx = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let r = host
-                    .open_edit(&plugin, &file, Some(&name))
-                    .map_err(|e| e.to_string());
-                *slot.lock().unwrap() = Some(r);
-                ctx.request_repaint();
-            });
-        }
-        if opening {
-            ui.spinner();
-        }
+        let takes: Vec<(String, PathBuf)> = self
+            .film
+            .cut
+            .iter()
+            .filter_map(|c| Some((c.take.as_ref()?.to_string(), c.video.clone()?)))
+            .collect();
+        let music: Vec<(String, PathBuf, f64)> = self
+            .timeline_form
+            .tracks
+            .iter()
+            .filter(|t| t.volume > 0.0)
+            .map(|t| (t.file.clone(), self.project.root.join(&t.file), t.at))
+            .collect();
+        let (ff, film) = (self.ff.clone(), self.project.root.clone());
+        let slot: crate::Opened = Arc::default();
+        self.edit_opening = Some((app, slot.clone()));
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let r = (|| {
+                let mut ask = OpenParams {
+                    film: film.clone(),
+                    ..OpenParams::default()
+                };
+                match shown {
+                    Some((file, seq)) => {
+                        ask.file = Some(file);
+                        ask.sequence = Some(seq);
+                    }
+                    None if !takes.is_empty() => {
+                        let ff = ff.ok_or("can't measure the takes without ffmpeg")?;
+                        ask.cut = Some(own_cut(&ff, &film, &takes, &music)?);
+                    }
+                    None => {}
+                }
+                host.open_edit(&plugin, &ask).map_err(|e| e.to_string())
+            })();
+            *slot.lock().unwrap() = Some(r);
+            ctx.request_repaint();
+        });
     }
 
     fn editor_opened(&mut self) {
@@ -929,6 +998,67 @@ pub(crate) struct Making {
 fn seq_title(file: &Path, seq: &SequenceInfo) -> String {
     let file = file.file_name().unwrap_or_default().to_string_lossy();
     format!("{file} · {}", seq.name)
+}
+
+/// The film's cut as an editor sequence: the takes back to back on V1 and their sound on A1,
+/// each music track on an A track of its own, at the first take's size and frame rate.
+fn own_cut(
+    ff: &shotline_media::Ffmpeg,
+    film: &Path,
+    takes: &[(String, PathBuf)],
+    music: &[(String, PathBuf, f64)],
+) -> Result<SequenceInfo, String> {
+    let mut cut = SequenceInfo {
+        name: film
+            .file_name()
+            .map_or("film".into(), |n| n.to_string_lossy().into()),
+        ..SequenceInfo::default()
+    };
+    let (mut v1, mut a1) = (vec![], vec![]);
+    let mut at = 0.0;
+    for (name, video) in takes {
+        let info = ff.probe(video).map_err(|e| e.to_string())?;
+        if cut.width == 0 {
+            (cut.width, cut.height, cut.fps) = (info.width, info.height, info.fps_value());
+        }
+        let clip = ClipInfo {
+            name: name.clone(),
+            file: Some(video.clone()),
+            start: at,
+            length: info.duration,
+            speed: 1.0,
+            enabled: true,
+            ..ClipInfo::default()
+        };
+        if info.audio {
+            a1.push(clip.clone());
+        }
+        v1.push(clip);
+        at += info.duration;
+    }
+    let track = |name: &str, clips| TrackInfo {
+        name: name.into(),
+        enabled: true,
+        clips,
+    };
+    cut.video.push(track("V1", v1));
+    cut.audio.push(track("A1", a1));
+    for (i, (name, path, start)) in music.iter().enumerate() {
+        let length = ff.audio_duration(path).map_err(|e| e.to_string())?;
+        cut.audio.push(track(
+            &format!("A{}", i + 2),
+            vec![ClipInfo {
+                name: name.clone(),
+                file: Some(path.clone()),
+                start: *start,
+                length,
+                speed: 1.0,
+                enabled: true,
+                ..ClipInfo::default()
+            }],
+        ));
+    }
+    Ok(cut)
 }
 
 /// What the editor shows but a preview can't: clips made in the editor itself.

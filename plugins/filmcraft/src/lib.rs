@@ -9,17 +9,18 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use shotline_plugin::protocol::{
-    ClipInfo, Description, EditInfo, ErrorKind, Outputs, PROTOCOL_VERSION, PluginError, Quote,
-    Request, SequenceInfo, Sequences, Status, TrackInfo,
+    ClipInfo, Description, EditInfo, ErrorKind, OpenParams, Outputs, PROTOCOL_VERSION, PluginError,
+    Quote, Request, SequenceInfo, Sequences, Status, TrackInfo,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
+pub mod control;
+mod otio;
+
 pub const SHARED_DIR: &str = "shared";
 const APP: &str = "FilmCraft";
-/// FilmCraft's bundle id on macOS, where it owns the `.fcproj` type.
-const BUNDLE: &str = "ai.storyteller.filmcraft";
 
 /// The newest project schema this was checked against. A newer one is still read; it's only
 /// named when the file can't be.
@@ -38,6 +39,7 @@ impl Plugin for FilmCraft {
             version: env!("CARGO_PKG_VERSION").into(),
             protocol: PROTOCOL_VERSION,
             editor: true,
+            app: APP.into(),
             env: vec![],
             models: vec![],
         })
@@ -69,47 +71,8 @@ impl Plugin for FilmCraft {
         })
     }
 
-    /// FilmCraft opens a project at the sequence it last had in front, so `sequence` isn't
-    /// used yet.
-    async fn open(&self, file: &Path, _sequence: Option<&str>) -> Result<()> {
-        if !file.is_file() {
-            return Err(fail(
-                ErrorKind::NotFound,
-                format!("{} isn't there", file.display()),
-            ));
-        }
-        let exe = std::env::var_os("FILMCRAFT").map(PathBuf::from);
-        let mut cmd = launcher(file, exe, cfg!(target_os = "macos"));
-        if cmd.get_program() == "open" {
-            // Quick, and it says when FilmCraft isn't installed.
-            let out = cmd
-                .output()
-                .map_err(|e| fail(ErrorKind::Other, format!("can't run open: {e}")))?;
-            if !out.status.success() {
-                return Err(fail(
-                    ErrorKind::Other,
-                    format!(
-                        "can't open {APP}; is it installed? {}",
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    ),
-                ));
-            }
-            return Ok(());
-        }
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| {
-                fail(
-                    ErrorKind::Other,
-                    format!(
-                        "can't start {}: {e}; put filmcraft on PATH or set FILMCRAFT",
-                        cmd.get_program().to_string_lossy()
-                    ),
-                )
-            })?;
-        Ok(())
+    async fn open(&self, ask: &OpenParams) -> Result<()> {
+        open_in_filmcraft(ask).map_err(|e| fail(ErrorKind::Other, e))
     }
 }
 
@@ -117,32 +80,140 @@ fn fail(kind: ErrorKind, message: String) -> Error {
     PluginError::new(kind, message).into()
 }
 
-/// How FilmCraft is started with `file`: the program in FILMCRAFT if set, on macOS the app that
-/// owns its bundle id, else `filmcraft` on PATH.
-fn launcher(file: &Path, exe: Option<PathBuf>, macos: bool) -> std::process::Command {
-    let mut c = match exe {
-        Some(exe) => std::process::Command::new(exe),
-        None if macos => {
-            let mut c = std::process::Command::new("open");
-            c.args(["-b", BUNDLE]);
-            c
-        }
-        None => std::process::Command::new("filmcraft"),
-    };
-    c.arg(file);
-    c
+/// Where the film's own FilmCraft project and what's passed to it live.
+pub fn own_dir(film: &Path) -> PathBuf {
+    film.join(SHARED_DIR).join("filmcraft")
 }
 
-/// Every `.fcproj` in the film's `shared/`, by name; one that can't be read says why.
-pub fn shared_edits(film: &Path) -> Vec<EditInfo> {
-    let Ok(entries) = std::fs::read_dir(film.join(SHARED_DIR)) else {
-        return vec![];
-    };
-    let mut paths: Vec<PathBuf> = entries
+fn fcprojs(dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "fcproj"))
         .collect();
     paths.sort();
+    paths
+}
+
+/// Opens `ask.file`, else the film's own project, else makes that from shotline's cut: FilmCraft
+/// imports the cut and saves the project itself, so the file is always one it wrote.
+fn open_in_filmcraft(ask: &OpenParams) -> std::result::Result<(), String> {
+    let film = &ask.film;
+    let target = ask
+        .file
+        .clone()
+        .or_else(|| fcprojs(&own_dir(film)).into_iter().next());
+    let running = control::Session::load(film).filter(control::Session::alive);
+    let s = match target {
+        Some(file) => {
+            if !file.is_file() {
+                return Err(format!("{} isn't there", file.display()));
+            }
+            let s = match running {
+                Some(s) => {
+                    switch_to(&s, &file)?;
+                    s
+                }
+                None => control::start(film, &[file.into()])?,
+            };
+            if let Some(name) = &ask.sequence {
+                show_sequence(&s, name);
+            }
+            s
+        }
+        None => make_project(film, ask.cut.as_ref(), running)?,
+    };
+    let _ = s.call("ui.focus", json!({}));
+    Ok(())
+}
+
+/// Opens `file` in a running FilmCraft, unless that would lose changes it hasn't saved.
+fn switch_to(s: &control::Session, file: &Path) -> std::result::Result<(), String> {
+    let now = s.exec("project.inspect", json!({}))?;
+    if now["path"].as_str().map(Path::new) == Some(file) {
+        return Ok(());
+    }
+    if now["dirty"] == true {
+        return Err(format!(
+            "{APP} has changes in {} that aren't saved; save them there first",
+            now["name"].as_str().unwrap_or("its project")
+        ));
+    }
+    s.exec("file.open", json!({"path": file})).map(drop)
+}
+
+/// The id of the sequence called `name` in the open project, from its bins.
+fn sequence_id(bin: &Value, name: &str) -> Option<u64> {
+    for c in bin["children"].as_array()? {
+        if c["type"] == "Sequence" && c["name"] == name {
+            return c["item"].as_u64();
+        }
+        if let Some(id) = sequence_id(c, name) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn show_sequence(s: &control::Session, name: &str) {
+    if let Ok(p) = s.exec("project.inspect", json!({}))
+        && let Some(id) = sequence_id(&p["root"], name)
+    {
+        let _ = s.exec("sequence.open", json!({"item": id}));
+    }
+}
+
+fn make_project(
+    film: &Path,
+    cut: Option<&SequenceInfo>,
+    running: Option<control::Session>,
+) -> std::result::Result<control::Session, String> {
+    let cut = cut.ok_or("there's no FilmCraft project yet, and no cut to start one from")?;
+    if cut.video.iter().all(|t| t.clips.is_empty()) {
+        return Err("the cut has no takes yet; select some first".into());
+    }
+    let name = film
+        .canonicalize()
+        .unwrap_or_else(|_| film.to_path_buf())
+        .file_name()
+        .map_or("film".into(), |n| n.to_string_lossy().into_owned());
+    let dir = own_dir(film);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("can't make {}: {e}", dir.display()))?;
+    let otio = dir.join("cut.otio");
+    let text = serde_json::to_string_pretty(&otio::timeline(&name, cut)).unwrap_or_default();
+    std::fs::write(&otio, text).map_err(|e| format!("can't write {}: {e}", otio.display()))?;
+    let s = match running {
+        Some(s) => {
+            let now = s.exec("project.inspect", json!({}))?;
+            if now["dirty"] == true {
+                return Err(format!(
+                    "{APP} has changes in {} that aren't saved; save them there first",
+                    now["name"].as_str().unwrap_or("its project")
+                ));
+            }
+            s.exec("file.newProject", json!({"name": name}))?;
+            s
+        }
+        None => control::start(film, &["--empty".into()])?,
+    };
+    let got = s.exec("file.import", json!({"paths": [otio]}))?;
+    if let Some(e) = got["errors"].as_array().and_then(|e| e.first()) {
+        return Err(format!("{APP} couldn't import the cut: {e}"));
+    }
+    let file = dir.join(format!("{name}.fcproj"));
+    s.exec("file.saveAs", json!({"path": file}))?;
+    if let Some(id) = got["sequences"].as_array().and_then(|a| a.first()) {
+        let _ = s.exec("sequence.open", json!({"item": id}));
+    }
+    Ok(s)
+}
+
+/// Every `.fcproj` in the film's `shared/` and `shared/filmcraft/`, by name; one that can't be
+/// read says why.
+pub fn shared_edits(film: &Path) -> Vec<EditInfo> {
+    let mut paths = fcprojs(&film.join(SHARED_DIR));
+    paths.extend(fcprojs(&own_dir(film)));
     paths
         .into_iter()
         .map(|p| {
@@ -483,29 +554,97 @@ mod tests {
         );
     }
 
-    #[test]
-    fn starts_filmcraft_with_the_project() {
-        let f = Path::new("/film/shared/edit.fcproj");
-        let args = |c: &std::process::Command| -> Vec<String> {
-            c.get_args().map(|a| a.to_string_lossy().into()).collect()
-        };
-        let c = launcher(f, None, true);
-        assert_eq!(c.get_program(), "open");
-        assert_eq!(args(&c), ["-b", BUNDLE, "/film/shared/edit.fcproj"]);
-        let c = launcher(f, None, false);
-        assert_eq!(c.get_program(), "filmcraft");
-        assert_eq!(args(&c), ["/film/shared/edit.fcproj"]);
-        let c = launcher(f, Some("/opt/fc/filmcraft".into()), true);
-        assert_eq!(c.get_program(), "/opt/fc/filmcraft");
-    }
-
     #[tokio::test]
     async fn opening_a_missing_project_says_so() {
+        let film = tempfile::tempdir().unwrap();
+        let ask = |file: Option<PathBuf>| OpenParams {
+            film: film.path().into(),
+            file,
+            ..OpenParams::default()
+        };
         let e = FilmCraft
-            .open(Path::new("/nowhere/edit.fcproj"), None)
+            .open(&ask(Some("/nowhere/edit.fcproj".into())))
             .await
             .unwrap_err();
         assert!(e.to_string().contains("isn't there"), "{e}");
+        // Nothing to open and nothing to make one from.
+        let e = FilmCraft.open(&ask(None)).await.unwrap_err();
+        assert!(e.to_string().contains("no cut"), "{e}");
+    }
+
+    #[test]
+    fn finds_a_sequence_in_the_bins() {
+        let root = json!({"children": [
+            {"item": 1, "name": "Main", "type": "Sequence"},
+            {"id": 2, "name": "Old", "children": [{"item": 7, "name": "Alt", "type": "Sequence"}]},
+        ]});
+        assert_eq!(sequence_id(&root, "Alt"), Some(7));
+        assert_eq!(sequence_id(&root, "Main"), Some(1));
+        assert_eq!(sequence_id(&root, "Nope"), None);
+    }
+
+    /// Starts the real FilmCraft: makes the film's project from a cut, opens it again, and
+    /// quits it. Run with FILMCRAFT_DATA_DIR set to a scratch folder to keep it apart from
+    /// yours: `cargo test -p shotline-plugin-filmcraft -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn with_filmcraft() {
+        let tmp = tempfile::tempdir().unwrap();
+        let film = tmp.path().join("fan");
+        std::fs::create_dir_all(film.join("jobs/a")).unwrap();
+        let clip = film.join("jobs/a/out.mp4");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=red:s=720x1280:r=24:d=3")
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let piece = |start: f64| ClipInfo {
+            name: "01-010#1".into(),
+            file: Some(clip.clone()),
+            start,
+            length: 2.0,
+            from: 0.5,
+            speed: 1.0,
+            enabled: true,
+        };
+        let cut = SequenceInfo {
+            name: "cut".into(),
+            width: 720,
+            height: 1280,
+            fps: 24.0,
+            video: vec![TrackInfo {
+                name: "V1".into(),
+                enabled: true,
+                clips: vec![piece(0.0), piece(2.0)],
+            }],
+            audio: vec![],
+        };
+        let ask = OpenParams {
+            film: film.clone(),
+            cut: Some(cut),
+            ..OpenParams::default()
+        };
+        FilmCraft.open(&ask).await.unwrap();
+        let s = control::Session::load(&film).unwrap();
+        let project = own_dir(&film).join("fan.fcproj");
+        assert!(project.is_file());
+        let edits = shared_edits(&film);
+        assert_eq!(edits.len(), 1);
+        let seq = &edits[0].sequences[0];
+        assert_eq!((seq.width, seq.height, seq.fps), (720, 1280, 24.0));
+        assert_eq!(seq.video[0].clips.len(), 2);
+        assert_eq!(seq.video[0].clips[1].start, 2.0);
+        assert_eq!(seq.video[0].clips[1].from, 0.5);
+
+        // Asked again, the same FilmCraft shows it; nothing new is made.
+        FilmCraft.open(&ask).await.unwrap();
+        assert_eq!(control::Session::load(&film), Some(s.clone()));
+        let now = s.exec("project.inspect", json!({})).unwrap();
+        assert_eq!(now["path"].as_str().map(Path::new), Some(project.as_path()));
+        let _ = s.call("app.quit", json!({}));
     }
 
     #[tokio::test]

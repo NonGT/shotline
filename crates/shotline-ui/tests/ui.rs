@@ -9,7 +9,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use shotline_core::ledger::Context;
 use shotline_core::protocol::{
-    ClipInfo, Description, EditInfo, ModelInfo, Op, Quote, SequenceInfo, TrackInfo, VoiceInfo,
+    ClipInfo, Description, EditInfo, ModelInfo, Op, OpenParams, Quote, SequenceInfo, TrackInfo,
+    VoiceInfo,
 };
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
 use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
@@ -317,6 +318,7 @@ impl Host for TestHost {
             version: "1".into(),
             protocol: 1,
             editor: false,
+            app: String::new(),
             env: vec![],
             models,
         };
@@ -470,11 +472,11 @@ impl Host for TestHost {
         (edits, vec![])
     }
 
-    /// Notes what it was asked to open beside the project.
-    fn open_edit(&self, plugin: &str, file: &Path, sequence: Option<&str>) -> anyhow::Result<()> {
+    /// Notes what it was asked, in the film's folder.
+    fn open_edit(&self, plugin: &str, ask: &OpenParams) -> anyhow::Result<()> {
         std::fs::write(
-            file.with_extension("opened"),
-            format!("{plugin} {}", sequence.unwrap_or("")),
+            ask.film.join(format!("opened-by-{plugin}.json")),
+            serde_json::to_string(ask)?,
         )?;
         Ok(())
     }
@@ -639,6 +641,7 @@ fn make_an_anchor_image() {
             version: "1".into(),
             protocol: 1,
             editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![model("fal-ai/flux"), model("fal-ai/nano-banana")],
         }],
@@ -733,6 +736,7 @@ fn a_shot_s_pictures_and_a_take() {
             version: "1".into(),
             protocol: 1,
             editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![
                 ModelInfo {
@@ -947,6 +951,7 @@ fn translate_only_when_it_helps() {
                 version: "1".into(),
                 protocol: 1,
                 editor: false,
+                app: String::new(),
                 env: vec![],
                 models: vec![model("fal-ai/nano-banana", Op::ImageGenerate)],
             },
@@ -955,6 +960,7 @@ fn translate_only_when_it_helps() {
                 version: "1".into(),
                 protocol: 1,
                 editor: false,
+                app: String::new(),
                 env: vec![var.into()],
                 models: vec![model("claude-haiku-5-5", Op::TextGenerate)],
             },
@@ -1128,6 +1134,7 @@ fn edit_elements() {
             version: "1".into(),
             protocol: 1,
             editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![tts("eleven_v3"), tts("eleven_flash_v2_5")],
         }],
@@ -1680,7 +1687,12 @@ fn an_editor_s_sequence_on_the_cut_page() {
     h.run();
     h.get_by_label("Cut").click();
     wait(&mut h, 0.1);
-    h.get_by_label_contains("A FilmCraft project saved in shared/");
+    // Without an editor plugin, a word on what one would do.
+    h.get_by_label_contains("With an editor plugin like filmcraft");
+    assert!(h.query_by_label("Open in FilmCraft").is_none());
+    h.state_mut()
+        .set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    wait(&mut h, 0.1);
 
     // As the plugin reads it: a take of the film's, by its path, and a file of its own.
     let take = p.take(R, "1").unwrap();
@@ -1757,16 +1769,68 @@ fn an_editor_s_sequence_on_the_cut_page() {
         .is_some()));
     // To change it, it opens in its own app through the plugin that read it.
     h.get_by_label("Open in FilmCraft").click();
-    let opened = p.root.join("shared/edit.opened");
+    let opened = p.root.join("opened-by-filmcraft.json");
     assert!(wait_for(&mut h, |_| opened.is_file()));
-    assert_eq!(
-        std::fs::read_to_string(&opened).unwrap(),
-        "filmcraft Main edit"
-    );
+    let ask: OpenParams = serde_json::from_str(&std::fs::read_to_string(&opened).unwrap()).unwrap();
+    assert_eq!(ask.file, Some(p.root.join("shared/edit.fcproj")));
+    assert_eq!(ask.sequence.as_deref(), Some("Main edit"));
+    assert!(ask.cut.is_none());
     // The take goes by its name and opens its shot.
     h.get_by_role_and_label(Role::Button, "01-010#1").click();
     h.run();
     assert_eq!(h.state().tab(), Tab::Shots);
+}
+
+fn editor_plugin() -> Description {
+    Description {
+        name: "filmcraft".into(),
+        version: "0.1.0".into(),
+        protocol: 1,
+        env: vec![],
+        models: vec![],
+        editor: true,
+        app: "FilmCraft".into(),
+    }
+}
+
+#[test]
+fn starts_an_editor_project_from_the_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let take = p.take(R, "1").unwrap();
+    let video = p.job_dir(take.output().unwrap().id).join("out.mp4");
+    if clip(&video).is_none() {
+        return;
+    }
+    p.select_take(R, "1").unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    wait(&mut h, 0.1);
+    // No project yet: the button is there anyway, and makes one from this cut.
+    h.get_by_label_contains("Its sequences show here once it's saved");
+    h.get_by_label("Open in FilmCraft").click();
+    let opened = p.root.join("opened-by-filmcraft.json");
+    assert!(wait_for(&mut h, |_| opened.is_file()));
+    let ask: OpenParams = serde_json::from_str(&std::fs::read_to_string(&opened).unwrap()).unwrap();
+    assert_eq!(ask.film, p.root);
+    assert!(ask.file.is_none());
+    let cut = ask.cut.unwrap();
+    assert_eq!((cut.width, cut.height, cut.fps), (160, 90, 24.0));
+    let v1 = &cut.video[0].clips;
+    assert_eq!(v1.len(), 1);
+    assert_eq!(v1[0].name, "01-010#1");
+    assert_eq!(v1[0].file.as_ref(), Some(&video));
+    assert!((v1[0].length - 1.0).abs() < 0.1, "{}", v1[0].length);
+    // Its sound under it.
+    assert_eq!(cut.audio[0].clips.len(), 1);
 }
 
 /// A second of test pattern with a tone, or None without ffmpeg.
@@ -2166,6 +2230,7 @@ fn set_the_format_on_the_story_tab() {
             version: "1".into(),
             protocol: 1,
             editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![ModelInfo {
                 id: "minimax/h3-max/reference-to-video".into(),
@@ -2252,6 +2317,7 @@ fn a_shot_on_another_model() {
             version: "1".into(),
             protocol: 1,
             editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![
                 video("minimax/h3-max/reference-to-video", &["768P", "1080P"]),
@@ -3048,6 +3114,7 @@ fn remake_starts_from_what_a_picture_was_made_with() {
             version: "1".into(),
             protocol: 1,
             editor: false,
+            app: String::new(),
             env: vec![],
             models: vec![ModelInfo {
                 id: "fal-ai/nano-banana".into(),
@@ -3107,6 +3174,7 @@ fn no_more_lines_than_the_video_model_takes() {
         version: "1".into(),
         protocol: 1,
         editor: false,
+        app: String::new(),
         env: vec![],
         models: vec![ModelInfo {
             id: model.clone(),
@@ -3307,8 +3375,11 @@ fn plays_an_editor_sequence() {
     // A preview is made first, then it plays.
     h.get_by_label("Play the sequence").click();
     assert!(wait_for(&mut h, |h| h.state().is_playing()));
-    wait(&mut h, 0.1);
-    assert_eq!(h.query_all_by_label("edit.fcproj · Main edit").count(), 2);
+    // Its title, then its picture once the first frame is in.
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("edit.fcproj · Main edit")
+        .count()
+        == 2));
     h.get_by_label_contains("Left out of the preview: Title: made in the editor");
     let made: Vec<_> = std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
         .unwrap()

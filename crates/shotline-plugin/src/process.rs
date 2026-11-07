@@ -285,16 +285,8 @@ impl Plugin for ProcessPlugin {
         .await
     }
 
-    async fn open(&self, file: &Path, sequence: Option<&str>) -> Result<()> {
-        let _: Value = self
-            .call(
-                "open",
-                OpenParams {
-                    file: file.to_path_buf(),
-                    sequence: sequence.map(Into::into),
-                },
-            )
-            .await?;
+    async fn open(&self, ask: &OpenParams) -> Result<()> {
+        let _: Value = self.call("open", ask).await?;
         Ok(())
     }
 

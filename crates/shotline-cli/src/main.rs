@@ -624,8 +624,8 @@ impl shotline_ui::Host for Plugins {
         plugins::sequences(&plugins::load(), film)
     }
 
-    fn open_edit(&self, plugin: &str, file: &Path, sequence: Option<&str>) -> Result<()> {
-        plugins::open_edit(&plugins::load(), plugin, file, sequence)
+    fn open_edit(&self, plugin: &str, ask: &shotline_core::protocol::OpenParams) -> Result<()> {
+        plugins::open_edit(&plugins::load(), plugin, ask)
     }
 
     fn anchor_quote(&self, film: &Path, ask: &shotline_ui::AnchorAsk) -> Result<String> {

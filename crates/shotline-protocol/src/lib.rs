@@ -99,6 +99,9 @@ pub struct Description {
     /// It links shotline to a video editor: it answers `sequences`, and `open` if it can.
     #[serde(default, skip_serializing_if = "is_false")]
     pub editor: bool,
+    /// The editor's name for people, e.g. "FilmCraft".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub app: String,
 }
 
 /// One model and what it accepts. Limits that don't apply are left out.
@@ -356,12 +359,19 @@ pub struct SequencesParams {
     pub film: PathBuf,
 }
 
-/// Params of `open`: a project from `sequences` to open in its editor, at a sequence if it can.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Params of `open`: the film's project in the editor, made from `cut` when there's none yet.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct OpenParams {
-    pub file: PathBuf,
+    pub film: PathBuf,
+    /// A project from `sequences`; without one the plugin opens or makes the film's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    /// The sequence to show, if the editor can be told.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<String>,
+    /// shotline's cut: the selected takes back to back on V1, the music on A tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<SequenceInfo>,
 }
 
 /// Reply to `sequences`: the editor's projects for the film.

@@ -6,8 +6,8 @@ use std::path::Path;
 use async_trait::async_trait;
 pub use shotline_protocol as protocol;
 use shotline_protocol::{
-    Balance, Description, Outputs, PluginError, Quote, Rates, Request, Sequences, Status, Usage,
-    Voices,
+    Balance, Description, OpenParams, Outputs, PluginError, Quote, Rates, Request, Sequences,
+    Status, Usage, Voices,
 };
 
 pub mod conformance;
@@ -64,8 +64,8 @@ pub trait Plugin: Send + Sync {
         Err(Error::Unsupported("sequences".into()))
     }
 
-    /// Opens one of those projects in the editor, at `sequence` if it can.
-    async fn open(&self, _file: &Path, _sequence: Option<&str>) -> Result<()> {
+    /// Opens the film's project in the editor, making it from the cut if there's none yet.
+    async fn open(&self, _ask: &OpenParams) -> Result<()> {
         Err(Error::Unsupported("open".into()))
     }
 

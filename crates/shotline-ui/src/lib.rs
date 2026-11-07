@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
-use shotline_core::protocol::{Description, EditInfo, ModelInfo, Op, VoiceInfo};
+use shotline_core::protocol::{Description, EditInfo, ModelInfo, Op, OpenParams, VoiceInfo};
 use shotline_core::{
     Chapter, CutShot, Element, Git, JobStatus, Kind, LIP_SYNCED, Project, SPOKEN, Shot, ShotRef,
     Take, Timeline, Transition,
@@ -111,8 +111,8 @@ pub trait Host: Send + Sync {
     fn sequences(&self, _film: &Path) -> (Vec<EditInfo>, Vec<String>) {
         (vec![], vec![])
     }
-    /// Opens one of those projects in its editor, through the plugin that read it.
-    fn open_edit(&self, plugin: &str, _file: &Path, _sequence: Option<&str>) -> anyhow::Result<()> {
+    /// Opens the film's project in an editor plugin's app, made from the cut if there's none.
+    fn open_edit(&self, plugin: &str, _ask: &OpenParams) -> anyhow::Result<()> {
         anyhow::bail!("{plugin} can't open its projects")
     }
     /// What a new anchor image would cost, e.g. "$0.04". Free.

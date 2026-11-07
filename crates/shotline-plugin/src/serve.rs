@@ -80,8 +80,7 @@ async fn dispatch<P: Plugin>(p: &P, method: &str, v: Value) -> Result<Value> {
         "voices" => to_value(p.voices().await?),
         "sequences" => to_value(p.sequences(&params::<SequencesParams>(v)?.film).await?),
         "open" => {
-            let OpenParams { file, sequence } = params(v)?;
-            p.open(&file, sequence.as_deref()).await?;
+            p.open(&params::<OpenParams>(v)?).await?;
             json!({})
         }
         "usage" => to_value(p.usage(&params::<UsageParams>(v)?.since).await?),

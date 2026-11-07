@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use shotline_builtin::fal::{self, Fal};
-use shotline_core::protocol::{Description, EditInfo, VoiceInfo};
+use shotline_core::protocol::{Description, EditInfo, OpenParams, VoiceInfo};
 use shotline_core::{Catalog, Project, user_dir};
 use shotline_plugin::conformance::{self, Options};
 use shotline_plugin::discovery::{self, Entry, Source};
@@ -37,6 +37,7 @@ fn fal_description() -> Description {
         version: env!("CARGO_PKG_VERSION").into(),
         protocol: PROTOCOL_VERSION,
         editor: false,
+        app: String::new(),
         env: vec![fal::KEY_VAR.into()],
         models: fal::models(),
     }
@@ -356,15 +357,10 @@ pub fn sequences(installed: &Installed, film: &Path) -> (Vec<EditInfo>, Vec<Stri
     (edits, problems)
 }
 
-/// Asks editor plugin `name` to open one of its projects.
-pub fn open_edit(
-    installed: &Installed,
-    name: &str,
-    file: &Path,
-    sequence: Option<&str>,
-) -> Result<()> {
+/// Asks editor plugin `name` to open the film's project, making it if need be.
+pub fn open_edit(installed: &Installed, name: &str, ask: &OpenParams) -> Result<()> {
     let plugin = open(installed, name)?;
-    match runtime().block_on(plugin.open(file, sequence)) {
+    match runtime().block_on(plugin.open(ask)) {
         Ok(()) => Ok(()),
         Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't open its projects"),
         Err(e) => bail!("{name}: {e}"),
