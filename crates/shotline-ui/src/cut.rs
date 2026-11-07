@@ -10,6 +10,7 @@ use shotline_core::{MatchAt, ShotRef, Transition};
 
 use crate::edit::Action;
 use crate::lanes::{self, Block, Hit, Lane};
+use crate::player::{Deck, Player};
 use crate::{App, PAGE, hint, page, remove_button, short, theme};
 
 /// The deck's title while it plays the cut.
@@ -28,57 +29,88 @@ pub(crate) enum Render {
 impl App {
     pub(crate) fn cut(&mut self, ui: &mut egui::Ui) {
         self.render_finished();
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::BAY))
+        // The Shots page's player keeps quiet here; this page has its own.
+        if let Some(d) = &mut self.deck
+            && d.is_playing()
+        {
+            d.pause(self.audio.as_ref());
+        }
+        let edge = egui::Margin::symmetric(PAGE.x as i8, 12);
+        let mut editor = None;
+        egui::Panel::top("cut-head")
+            .frame(egui::Frame::new().fill(theme::BAY).inner_margin(edge))
             .show(ui, |ui| {
-                page(ui, PAGE, |ui| {
-                    self.deck(ui);
-                    self.cut_switch(ui);
-                    if let Some((file, seq)) = self.edit_sequence() {
-                        self.edit_lanes(ui, &file, &seq);
-                        return;
-                    }
-                    // Not shotline's cut for a moment while the editor's is still being read.
-                    if self.edits.0.is_empty()
-                        && self.edits_asked.is_some()
-                        && self.plugins.iter().any(|d| d.editor)
-                    {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.weak("reading the editor's project…");
-                        });
-                        return;
-                    }
-                    if self.film.cut.is_empty() {
-                        hint(ui, "No shots yet. Add some in Shots.");
-                        return;
-                    }
-                    let mut acts = vec![];
+                self.cut_switch(ui);
+                editor = self.edit_sequence();
+                if let Some((file, seq)) = &editor {
+                    self.edit_head(ui, file, seq);
+                } else if !self.film.cut.is_empty() && !self.reading_edits() {
                     self.cut_actions(ui);
-                    ui.add_space(10.0);
-                    self.cut_lanes(ui);
-                    ui.add_space(18.0);
-                    self.joins(ui);
-                    ui.add_space(18.0);
-                    self.music(ui, &mut acts);
-                    ui.add_space(18.0);
-                    self.renders(ui);
-                    if !acts.is_empty() {
-                        self.flush();
-                        self.apply(acts);
-                    }
-                });
+                }
             });
-    }
-
-    /// Play and Render, and how the render is going.
-    fn cut_actions(&mut self, ui: &mut egui::Ui) {
+        if let Some((file, seq)) = editor {
+            self.edit_lanes(ui, &file, &seq);
+            return;
+        }
+        if self.reading_edits() || self.film.cut.is_empty() {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(theme::BAY))
+                .show(ui, |ui| {
+                    page(ui, PAGE, |ui| {
+                        if self.film.cut.is_empty() && !self.reading_edits() {
+                            hint(ui, "No shots yet. Add some in Shots.");
+                        } else {
+                            // Not shotline's cut for a moment while the editor's is read.
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.weak("reading the editor's project…");
+                            });
+                        }
+                    });
+                });
+            return;
+        }
         let files: Vec<PathBuf> = self
             .film
             .cut
             .iter()
             .filter_map(|c| c.video.clone())
             .collect();
+        self.cut_deck_on(CUT, &files);
+        let mut acts = vec![];
+        egui::Panel::right("cut-side")
+            .resizable(true)
+            .default_size(340.0)
+            .frame(egui::Frame::new().fill(theme::RACK))
+            .show(ui, |ui| {
+                page(ui, egui::vec2(16.0, 12.0), |ui| {
+                    self.joins(ui);
+                    ui.add_space(18.0);
+                    self.music(ui, &mut acts);
+                    ui.add_space(18.0);
+                    self.renders(ui);
+                });
+            });
+        egui::Panel::bottom("cut-timeline")
+            .frame(egui::Frame::new().fill(theme::RACK).inner_margin(edge))
+            .show(ui, |ui| self.cut_lanes(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme::BAY).inner_margin(edge))
+            .show(ui, |ui| self.show_cut_deck(ui, CUT, None));
+        if !acts.is_empty() {
+            self.flush();
+            self.apply(acts);
+        }
+    }
+
+    fn reading_edits(&self) -> bool {
+        self.edits.0.is_empty()
+            && self.edits_asked.is_some()
+            && self.plugins.iter().any(|d| d.editor)
+    }
+
+    /// Play and Render, and how the render is going.
+    fn cut_actions(&mut self, ui: &mut egui::Ui) {
         let missing: Vec<String> = self
             .film
             .cut
@@ -89,17 +121,6 @@ impl App {
         let state = self.render.lock().unwrap().clone();
         let running = matches!(state, Render::Running(_));
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled_ui(!files.is_empty(), |ui| {
-                    crate::icon_button(ui, "Play the cut", crate::play_icon)
-                })
-                .inner
-                .on_hover_text("play the cut: the takes as they are, back to back")
-                .on_disabled_hover_text("no shot has a take selected yet")
-                .clicked()
-            {
-                self.play(CUT, &files, false);
-            }
             let why = if missing.is_empty() {
                 String::new()
             } else {
@@ -223,21 +244,10 @@ impl App {
                 joins: vec![],
             });
         }
-        let playhead = self
-            .deck
-            .as_ref()
-            .filter(|d| d.title() == CUT)
-            .map(|d| d.position());
+        let playhead = self.shown_deck(CUT).map(|d| d.position());
         match lanes::show(ui, "cut", &video, &audio, end, playhead, &mut self.thumbs) {
-            Some(Hit::Seek(t)) => {
-                if self.deck.as_ref().is_none_or(|d| d.title() != CUT) {
-                    let files: Vec<PathBuf> = cut.iter().filter_map(|c| c.video.clone()).collect();
-                    self.play(CUT, &files, false);
-                }
-                if let Some(d) = &mut self.deck {
-                    d.seek(t, self.audio.as_ref());
-                }
-            }
+            Some(Hit::Seek(t)) => self.cut_seek(ui.ctx(), CUT, t, false),
+            Some(Hit::Scrub(t)) => self.cut_seek(ui.ctx(), CUT, t, true),
             Some(Hit::Open(r)) => {
                 self.tab = crate::Tab::Shots;
                 self.open_shot(r);
@@ -377,75 +387,56 @@ impl App {
         let sequences = edits.iter().map(|e| e.sequences.len()).sum::<usize>();
         let now = self.edit_sequence().map(|(f, s)| (f, s.name));
         let mut pick = None;
-        let mut open = None;
-        ui.horizontal_wrapped(|ui| {
-            for e in edits {
-                let file = e.file.file_name().unwrap_or_default().to_string_lossy();
-                if let Some(why) = &e.error {
-                    ui.label(RichText::new(format!("{file} can't be read")).color(theme::FLAG))
-                        .on_hover_text(why);
-                    continue;
-                }
-                if e.sequences.is_empty() {
-                    ui.weak(format!("{file} has no sequences"));
-                }
-                if sequences < 2 {
-                    continue;
-                }
-                for seq in &e.sequences {
-                    let label = if several {
-                        format!("{file} · {}", seq.name)
-                    } else {
-                        seq.name.clone()
-                    };
-                    let on = now
-                        .as_ref()
-                        .is_some_and(|(f, s)| *f == e.file && *s == seq.name);
-                    if ui
-                        .selectable_label(on, label)
-                        .on_hover_text(format!("{} in {}", seq.name, self.project.rel(&e.file)))
-                        .clicked()
-                    {
-                        pick = Some((e.file.clone(), seq.name.clone()));
+        // Only when there's something to pick or to say about a project.
+        let row = sequences > 1
+            || edits
+                .iter()
+                .any(|e| e.error.is_some() || e.sequences.is_empty());
+        if row {
+            ui.horizontal_wrapped(|ui| {
+                for e in edits {
+                    let file = e.file.file_name().unwrap_or_default().to_string_lossy();
+                    if let Some(why) = &e.error {
+                        ui.label(RichText::new(format!("{file} can't be read")).color(theme::FLAG))
+                            .on_hover_text(why);
+                        continue;
+                    }
+                    if e.sequences.is_empty() {
+                        ui.weak(format!("{file} has no sequences"));
+                    }
+                    if sequences < 2 {
+                        continue;
+                    }
+                    for seq in &e.sequences {
+                        let label = if several {
+                            format!("{file} · {}", seq.name)
+                        } else {
+                            seq.name.clone()
+                        };
+                        let on = now
+                            .as_ref()
+                            .is_some_and(|(f, s)| *f == e.file && *s == seq.name);
+                        if ui
+                            .selectable_label(on, label)
+                            .on_hover_text(format!("{} in {}", seq.name, self.project.rel(&e.file)))
+                            .clicked()
+                        {
+                            pick = Some((e.file.clone(), seq.name.clone()));
+                        }
+                    }
+                    if several {
+                        ui.separator();
                     }
                 }
-                ui.separator();
-            }
-            let opening = self.edit_opening.is_some();
-            for (plugin, app) in &editors {
-                let shown = now
-                    .as_ref()
-                    .filter(|(f, _)| edits.iter().any(|e| e.file == *f && e.plugin == *plugin));
-                let has_own = edits.iter().any(|e| e.plugin == *plugin);
-                let hover = match (shown, has_own) {
-                    (Some(_), _) => format!(
-                        "change this sequence in {app}; it shows here again each time it's saved"
-                    ),
-                    (None, true) => format!("open the film's {app} project"),
-                    (None, false) => format!(
-                        "start a {app} project from this cut, in shared/{plugin}/; its \
-                         sequences then show here, and again each time it's saved"
-                    ),
-                };
-                if ui
-                    .add_enabled(!opening, egui::Button::new(format!("Open in {app}")))
-                    .on_hover_text(hover)
-                    .on_disabled_hover_text("opening it…")
-                    .clicked()
-                {
-                    open = Some((plugin.clone(), app.clone(), shown.cloned()));
-                }
-            }
-            if opening {
-                ui.spinner();
-            }
-        });
+            });
+        }
         if let Some(p) = pick {
             self.cut_view = Some(p);
         }
         let none_yet = main.is_none();
-        if let Some((plugin, app, shown)) = open {
-            self.open_in_editor(ui.ctx(), plugin, app, shown);
+        // Shown with the editor's cut instead, by its title.
+        if none_yet {
+            ui.horizontal(|ui| self.open_buttons(ui));
         }
         if none_yet {
             ui.add_space(4.0);
@@ -455,27 +446,67 @@ impl App {
                  cut: it shows here in place of this one, and both change it.",
             );
         }
-        ui.add_space(10.0);
+        if row || none_yet || !self.edits.1.is_empty() {
+            ui.add_space(10.0);
+        }
+    }
+
+    /// "Open in FilmCraft" for each editor plugin: the shown sequence, or a new project.
+    fn open_buttons(&mut self, ui: &mut egui::Ui) {
+        let editors: Vec<(String, String)> = self
+            .plugins
+            .iter()
+            .filter(|d| d.editor)
+            .map(|d| {
+                let app = if d.app.is_empty() { &d.name } else { &d.app };
+                (d.name.clone(), app.clone())
+            })
+            .collect();
+        let now = self.edit_sequence().map(|(f, s)| (f, s.name));
+        let edits = &self.edits.0;
+        let mut open = None;
+        let opening = self.edit_opening.is_some();
+        for (plugin, app) in &editors {
+            let shown = now
+                .as_ref()
+                .filter(|(f, _)| edits.iter().any(|e| e.file == *f && e.plugin == *plugin));
+            let has_own = edits.iter().any(|e| e.plugin == *plugin);
+            let hover = match (shown, has_own) {
+                (Some(_), _) => format!(
+                    "change this sequence in {app}; it shows here again each time it's saved"
+                ),
+                (None, true) => format!("open the film's {app} project"),
+                (None, false) => format!(
+                    "start a {app} project from this cut, in shared/{plugin}/; its \
+                     sequences then show here, and again each time it's saved"
+                ),
+            };
+            if ui
+                .add_enabled(!opening, egui::Button::new(format!("Open in {app}")))
+                .on_hover_text(hover)
+                .on_disabled_hover_text("opening it…")
+                .clicked()
+            {
+                open = Some((plugin.clone(), app.clone(), shown.cloned()));
+            }
+        }
+        if opening {
+            ui.spinner();
+        }
+
+        if let Some((plugin, app, shown)) = open {
+            self.open_in_editor(ui.ctx(), plugin, app, shown);
+        }
     }
 
     /// An editor's sequence on its tracks, read only. Clips that are takes go by the take's name.
-    fn edit_lanes(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
-        let ctx = ui.ctx().clone();
+    /// The sequence's name and what it is, what to do with it, and what the preview leaves out.
+    fn edit_head(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
         let fps = if seq.fps.fract() == 0.0 {
             format!("{}", seq.fps)
         } else {
             format!("{:.3}", seq.fps)
         };
-        hint(
-            ui,
-            &format!(
-                "{} · {} × {} · {fps} fps · {}",
-                self.project.rel(file),
-                seq.width,
-                seq.height,
-                crate::player::clock(seq.length()),
-            ),
-        );
         let (plugin, app) = self
             .edits
             .0
@@ -483,8 +514,56 @@ impl App {
             .find(|e| e.file == file)
             .map(|e| (e.plugin.clone(), e.app.clone()))
             .unwrap_or_default();
+        // Its name and what it is on the left, what to do with it on the right.
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(&seq.name)
+                    .size(18.0)
+                    .color(theme::PAPER)
+                    .strong(),
+            );
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} × {} · {fps} fps · {}",
+                    seq.width,
+                    seq.height,
+                    crate::player::clock(seq.length()),
+                ))
+                .color(theme::DUST),
+            )
+            .on_hover_text(self.project.rel(file));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !plugin.is_empty() {
+                    self.edit_render(ui, &plugin, file, seq);
+                }
+                self.open_buttons(ui);
+            });
+        });
+        ui.label(
+            RichText::new(self.project.rel(file))
+                .small()
+                .color(theme::DUST),
+        );
         self.take_sync(ui, &app, seq);
-        ui.add_space(8.0);
+        let out = self.preview_of(seq);
+        if let Some((_, skipped)) = self.seq_playing.as_ref().filter(|(p, _)| *p == out)
+            && !skipped.is_empty()
+        {
+            ui.label(
+                RichText::new(format!(
+                    "Left out of the preview: {}",
+                    short(&skipped.join("; "), 200)
+                ))
+                .color(theme::DUST),
+            )
+            .on_hover_text(skipped.join("\n"));
+        }
+    }
+
+    /// The sequence's tracks along the bottom, and its preview above them as big as fits.
+    fn edit_lanes(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
+        let ctx = ui.ctx().clone();
         let lanes_of = |tracks: &[TrackInfo], sound: bool| -> Vec<Lane> {
             tracks
                 .iter()
@@ -516,82 +595,64 @@ impl App {
         let video = lanes_of(&seq.video, false);
         let audio = lanes_of(&seq.audio, true);
         let out = self.preview_of(seq);
-        self.sequence_made(&ctx);
-        let making = self.seq_making.as_ref().is_some_and(|m| m.out == out);
+        self.sequence_made();
         let title = seq_title(file, seq);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled_ui(!making && seq.length() > 0.0, |ui| {
-                    crate::icon_button(ui, "Play the sequence", crate::play_icon)
-                })
-                .inner
-                .on_hover_text(
-                    "plays a preview: the top clip at each moment, the sound tracks mixed; \
-                     effects and transitions are left out",
-                )
-                .clicked()
-            {
-                self.play_sequence(&ctx, &title, seq, &out, 0.0);
+        // The player shows a preview: made once for what the sequence is now, and in the
+        // meantime the one before, if any.
+        let mut note = None;
+        if out.is_file() {
+            self.cut_deck_on(&title, std::slice::from_ref(&out));
+        } else {
+            let failed = self
+                .seq_failed
+                .as_ref()
+                .filter(|(f, _)| *f == out)
+                .map(|(_, e)| format!("can't make a preview to play: {}", short(e, 200)));
+            if failed.is_none() && self.seq_making.is_none() && seq.length() > 0.0 {
+                self.make_preview(&ctx, seq, &out);
             }
-            if making {
-                ui.spinner();
-                ui.weak("making a preview to play…");
-            }
-            if !plugin.is_empty() {
-                self.edit_render(ui, &plugin, file, seq);
-            }
-        });
-        let playing = self
-            .seq_playing
-            .as_ref()
-            .filter(|(p, _)| *p == out)
-            .and(self.deck.as_ref())
-            .filter(|d| d.title() == title);
-        if let Some((_, skipped)) = self.seq_playing.as_ref().filter(|(p, _)| *p == out)
-            && playing.is_some()
-            && !skipped.is_empty()
-        {
-            ui.label(
-                RichText::new(format!(
-                    "Left out of the preview: {}",
-                    short(&skipped.join("; "), 200)
-                ))
-                .color(theme::DUST),
-            )
-            .on_hover_text(skipped.join("\n"));
+            note = Some(failed.unwrap_or_else(|| "making a preview to play…".into()));
         }
-        let playhead = playing.map(|d| d.position());
-        ui.add_space(6.0);
-        match lanes::show(
-            ui,
-            "edit",
-            &video,
-            &audio,
-            seq.length(),
-            playhead,
-            &mut self.thumbs,
-        ) {
-            Some(Hit::Open(r)) => {
-                self.tab = crate::Tab::Shots;
-                self.open_shot(r);
-            }
-            Some(Hit::Seek(t)) if playhead.is_some() => {
-                if let Some(d) = &mut self.deck {
-                    d.seek(t, self.audio.as_ref());
+        let edge = egui::Margin::symmetric(PAGE.x as i8, 12);
+        egui::Panel::bottom("edit-timeline")
+            .frame(egui::Frame::new().fill(theme::RACK).inner_margin(edge))
+            .show(ui, |ui| {
+                // Above the tracks, so picking a clip doesn't move them.
+                ui.vertical(|ui| {
+                    ui.set_min_height(28.0);
+                    self.clip_tools(ui, file, seq);
+                });
+                ui.add_space(6.0);
+                let playhead = self.shown_deck(&title).map(|d| d.position());
+                match lanes::show(
+                    ui,
+                    "edit",
+                    &video,
+                    &audio,
+                    seq.length(),
+                    playhead,
+                    &mut self.thumbs,
+                ) {
+                    Some(Hit::Open(r)) => {
+                        self.tab = crate::Tab::Shots;
+                        self.open_shot(r);
+                    }
+                    Some(Hit::Seek(t)) => self.cut_seek(&ctx, &title, t, false),
+                    Some(Hit::Scrub(t)) => self.cut_seek(&ctx, &title, t, true),
+                    Some(Hit::Pick(id)) => {
+                        self.join_pick = None;
+                        self.clip_pick = (self.clip_pick.as_ref() != Some(&id)).then_some(id);
+                    }
+                    Some(Hit::PickJoin(id)) => {
+                        self.clip_pick = None;
+                        self.join_pick = (self.join_pick.as_ref() != Some(&id)).then_some(id);
+                    }
+                    _ => {}
                 }
-            }
-            Some(Hit::Seek(t)) if !making => self.play_sequence(&ctx, &title, seq, &out, t),
-            Some(Hit::Pick(id)) => {
-                self.join_pick = None;
-                self.clip_pick = (self.clip_pick.as_ref() != Some(&id)).then_some(id);
-            }
-            Some(Hit::PickJoin(id)) => {
-                self.clip_pick = None;
-                self.join_pick = (self.join_pick.as_ref() != Some(&id)).then_some(id);
-            }
-            _ => {}
-        }
-        self.clip_tools(ui, file, seq);
+            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme::BAY).inner_margin(edge))
+            .show(ui, |ui| self.show_cut_deck(ui, &title, note.as_deref()));
     }
 
     /// Asks the editor plugin to open the film's project there, at the sequence shown, or to
@@ -684,42 +745,16 @@ impl App {
     }
 
     /// Plays the preview from `at`, once it's made.
-    fn play_sequence(
-        &mut self,
-        ctx: &egui::Context,
-        title: &str,
-        seq: &SequenceInfo,
-        out: &Path,
-        at: f64,
-    ) {
-        let left_out = left_out(seq);
-        if out.is_file() {
-            let skipped = self
-                .seq_playing
-                .as_ref()
-                .filter(|(p, _)| p == out)
-                .map_or(left_out, |(_, s)| s.clone());
-            self.play(title, &[out.to_path_buf()], false);
-            if let Some(d) = &mut self.deck {
-                if at > 0.0 {
-                    d.seek(at, self.audio.as_ref());
-                }
-                self.seq_playing = Some((out.to_path_buf(), skipped));
-            }
-            return;
-        }
+    /// Has ffmpeg make the sequence's preview, off the UI thread.
+    fn make_preview(&mut self, ctx: &egui::Context, seq: &SequenceInfo, out: &Path) {
         let Some(ff) = self.ff.clone() else {
-            self.error("can't play without ffmpeg; install it or set SHOTLINE_FFMPEG".into());
             return;
         };
         let media = to_media(seq);
         let slot: Made = Arc::default();
         self.seq_making = Some(Making {
             out: out.to_path_buf(),
-            title: title.into(),
-            at,
-            left_out,
-            seq: seq.clone(),
+            left_out: left_out(seq),
             slot: slot.clone(),
         });
         let (out, ctx) = (out.to_path_buf(), ctx.clone());
@@ -730,8 +765,8 @@ impl App {
         });
     }
 
-    /// Plays a preview that's just been made.
-    fn sequence_made(&mut self, ctx: &egui::Context) {
+    /// Notes what a preview that's just been made left out; the player picks it up.
+    fn sequence_made(&mut self) {
         let Some(m) = &self.seq_making else {
             return;
         };
@@ -744,9 +779,79 @@ impl App {
                 let mut all = m.left_out.clone();
                 all.extend(skipped);
                 self.seq_playing = Some((m.out.clone(), all));
-                self.play_sequence(ctx, &m.title, &m.seq, &m.out, m.at);
             }
-            Err(e) => self.error(format!("can't make a preview of {}: {e}", m.title)),
+            // Said on the page, and not tried again until the sequence changes.
+            Err(e) => self.seq_failed = Some((m.out, e)),
+        }
+    }
+
+    /// Puts the Cut page's player on `files` as `title`, staying where it was when they
+    /// change.
+    fn cut_deck_on(&mut self, title: &str, files: &[PathBuf]) {
+        let key = files
+            .iter()
+            .map(|f| f.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if self.cut_deck.as_ref().is_none_or(|(k, _)| *k != key) {
+            let was = self
+                .shown_deck(title)
+                .map(|d| (d.position(), d.is_playing()));
+            let deck = match self.ff.clone() {
+                None => Err("ffmpeg isn't installed, so the cut can't be shown here".to_string()),
+                Some(_) if files.is_empty() => Err(String::new()),
+                Some(ff) => {
+                    self.audio();
+                    Player::new(&ff, title, files)
+                        .map(|p| Deck::new(title, p, false).fixed())
+                        .map_err(|e| format!("can't show {title}: {e}"))
+                }
+            };
+            if let Some(d) = self.cut_deck.as_mut().and_then(|(_, d)| d.as_mut().ok()) {
+                d.pause(self.audio.as_ref());
+            }
+            let mut deck = deck;
+            if let (Ok(d), Some((t, _))) = (&mut deck, was)
+                && t > 0.0
+            {
+                d.seek(t, self.audio.as_ref());
+            }
+            self.cut_deck = Some((key, deck));
+        }
+    }
+
+    fn show_cut_deck(&mut self, ui: &mut egui::Ui, title: &str, waiting: Option<&str>) {
+        // All the room there is, less Play and the timecode under it.
+        let height = (ui.available_height() - 40.0).max(120.0);
+        match &mut self.cut_deck {
+            Some((_, Ok(d))) if d.title() == title => d.monitor(ui, self.audio.as_ref(), height),
+            Some((_, Err(e))) if !e.is_empty() => blank_monitor(ui, height, e),
+            _ => blank_monitor(ui, height, waiting.unwrap_or("")),
+        }
+    }
+
+    /// The Cut page's player, while it shows `title`.
+    pub(crate) fn shown_deck(&self, title: &str) -> Option<&Deck> {
+        self.cut_deck
+            .as_ref()
+            .and_then(|(_, d)| d.as_ref().ok())
+            .filter(|d| d.title() == title)
+    }
+
+    /// The playhead put at `t` on the timeline: just the frame while it's dragged.
+    fn cut_seek(&mut self, ctx: &egui::Context, title: &str, t: f64, scrub: bool) {
+        let audio = self.audio.as_ref();
+        if let Some(d) = self
+            .cut_deck
+            .as_mut()
+            .and_then(|(_, d)| d.as_mut().ok())
+            .filter(|d| d.title() == title)
+        {
+            if scrub {
+                d.scrub(ctx, t);
+            } else {
+                d.seek(t, audio);
+            }
         }
     }
 
@@ -1042,10 +1147,7 @@ type Made = Arc<Mutex<Option<Result<Vec<String>, String>>>>;
 /// A sequence's preview being made in the background.
 pub(crate) struct Making {
     out: PathBuf,
-    title: String,
-    at: f64,
     left_out: Vec<String>,
-    seq: SequenceInfo,
     slot: Made,
 }
 
@@ -1064,6 +1166,23 @@ fn main_sequence(
         .find(|e| !e.plugin.is_empty() && e.file.starts_with(film.join("shared").join(&e.plugin)));
     let e = own.or_else(|| readable().next())?;
     Some((e.file.clone(), e.sequences[0].name.clone()))
+}
+
+/// A screen with nothing to show yet, the same size as the monitor, saying why.
+fn blank_monitor(ui: &mut egui::Ui, height: f32, note: &str) {
+    let (screen, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(screen, 4.0, egui::Color32::BLACK);
+    if !note.is_empty() {
+        ui.put(
+            screen.shrink(16.0),
+            egui::Label::new(RichText::new(note).color(theme::DUST)),
+        );
+    }
+    // Where the monitor's Play and timecode go.
+    ui.add_space(36.0);
 }
 
 fn seq_title(file: &Path, seq: &SequenceInfo) -> String {

@@ -49,6 +49,8 @@ pub(crate) struct Block {
 
 pub(crate) enum Hit {
     Seek(f64),
+    /// The playhead being dragged: show the frame there, seek once it's let go.
+    Scrub(f64),
     Open(ShotRef),
     Pick(String),
     /// A join, by the clip after it.
@@ -92,10 +94,16 @@ pub(crate) fn show(
     let ruler = Rect::from_min_size(span.min, vec2(span.width(), RULER));
     let seek = ui.interact(ruler, id.with("seek"), Sense::click_and_drag());
     seek.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Playhead"));
-    if (seek.clicked() || seek.dragged())
-        && let Some(at) = seek.interact_pointer_pos()
+    if let Some(at) = seek
+        .interact_pointer_pos()
+        .or_else(|| ui.ctx().pointer_latest_pos())
+        .filter(|_| seek.clicked() || seek.dragged() || seek.drag_stopped())
     {
-        hit = Some(Hit::Seek(t_of(at.x)));
+        if seek.clicked() || seek.drag_stopped() {
+            hit = Some(Hit::Seek(t_of(at.x)));
+        } else if seek.dragged() {
+            hit = Some(Hit::Scrub(t_of(at.x)));
+        }
     }
     p.rect_filled(ruler, 0.0, theme::RACK);
     let step = tick_step(pps);
@@ -248,6 +256,12 @@ pub(crate) fn show(
 
     if let Some(t) = playhead {
         let x = x_of(t.clamp(0.0, length));
+        // A handle to grab in the ruler.
+        p.rect_filled(
+            Rect::from_center_size(pos2(x, ruler.center().y), vec2(9.0, RULER - 4.0)),
+            2.0,
+            theme::TUNGSTEN,
+        );
         p.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
             Stroke::new(1.5, theme::TUNGSTEN),

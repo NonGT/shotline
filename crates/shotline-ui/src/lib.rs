@@ -278,6 +278,10 @@ pub struct App {
     seq_playing: Option<(PathBuf, Vec<String>)>,
     /// An editor being asked to open a project: what to call it, and how that went.
     edit_opening: Option<(String, Opened)>,
+    /// The Cut page's player, by what it shows, or why it can't.
+    cut_deck: Option<(String, Result<Deck, String>)>,
+    /// A preview that couldn't be made, and why.
+    seq_failed: Option<(PathBuf, String)>,
     /// The editor clip picked on the Cut page, by the editor's id.
     clip_pick: Option<String>,
     /// The join picked instead, by the editor's id for the clip after it.
@@ -594,6 +598,8 @@ impl App {
             seq_making: None,
             seq_playing: None,
             edit_opening: None,
+            cut_deck: None,
+            seq_failed: None,
             clip_pick: None,
             join_pick: None,
             fade_frames: 12,
@@ -971,6 +977,11 @@ impl App {
     pub fn is_playing(&self) -> bool {
         self.deck.as_ref().is_some_and(Deck::is_playing)
             || self
+                .cut_deck
+                .as_ref()
+                .and_then(|(_, d)| d.as_ref().ok())
+                .is_some_and(Deck::is_playing)
+            || self
                 .in_cut
                 .as_ref()
                 .and_then(|(_, d)| d.as_ref())
@@ -1242,6 +1253,12 @@ impl App {
         // Only on the Shots tab; it doesn't go on playing out of sight.
         if self.tab != Tab::Shots
             && let Some((_, Some(d))) = &mut self.in_cut
+            && d.is_playing()
+        {
+            d.pause(self.audio.as_ref());
+        }
+        if self.tab != Tab::Cut
+            && let Some((_, Ok(d))) = &mut self.cut_deck
             && d.is_playing()
         {
             d.pause(self.audio.as_ref());

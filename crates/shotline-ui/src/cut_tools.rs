@@ -102,7 +102,6 @@ impl App {
         if join.is_none() {
             self.join_pick = None;
         }
-        ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| match (&picked, &join) {
             (Some(c), _) => self.picked_tools(ui, &plugin, file, seq, c, busy.is_none()),
             (None, Some((a, b, fade))) => self.join_tools(

@@ -1798,7 +1798,7 @@ fn an_editor_s_sequence_on_the_cut_page() {
     // The editor's cut is the film's cut now: shown in place of shotline's, with nothing to
     // switch to while it's the only sequence.
     assert!(wait_for(&mut h, |h| h
-        .query_by_label_contains("shared/edit.fcproj · 720 × 1280 · 24 fps")
+        .query_by_label_contains("720 × 1280 · 24 fps")
         .is_some()));
     h.get_by_role_and_label(Role::Button, "rain.wav");
     assert!(h.query_by_label("This film's cut").is_none());
@@ -1937,6 +1937,14 @@ fn on_main_edit_with(
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::Button, take)
         .is_some()));
+    // The player above settles first, a preview or why there's none, so nothing moves under
+    // a click.
+    assert!(wait_for(&mut h, |h| {
+        h.query_by_label_contains("can't make a preview to play")
+            .is_some()
+            || h.query_all_by_label("edit.fcproj · Main edit").count() == 1
+    }));
+    wait(&mut h, 0.1);
     let asked = p.root.join("edited-by-filmcraft.jsonl");
     let lines = move || -> Vec<EditParams> {
         std::fs::read_to_string(&asked)
@@ -1957,7 +1965,7 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
     let (mut h, lines) = on_main_edit(tmp.path(), &p);
     // A clip with the editor's id is picked rather than opened.
     h.get_by_role_and_label(Role::Button, "01-010#1").click();
-    h.run();
+    wait(&mut h, 0.1);
     assert_eq!(h.state().tab(), Tab::Cut);
     h.get_by_label("Open the shot");
     assert!(
@@ -1965,7 +1973,7 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
             .is_some()
     );
     h.get_by_label("Swap take").click();
-    h.run();
+    wait(&mut h, 0.1);
     h.get_by_label("01-010#3").click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let ask = &lines()[0];
@@ -1983,6 +1991,8 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
     );
     let undo = "Undo swap 01-010#1 for 01-010#3";
     assert!(wait_for(&mut h, |h| h.query_by_label(undo).is_some()));
+    // The timeline's panel grows a frame later to fit it.
+    wait(&mut h, 0.1);
     h.get_by_label(undo).click();
     assert!(wait_for(&mut h, |_| lines().len() == 2));
     assert_eq!(
@@ -2003,7 +2013,7 @@ fn dissolves_a_join_in_an_editor() {
     write_edits(&p, clips.clone(), vec![]);
     let (mut h, lines) = on_main_edit(tmp.path(), &p);
     h.get_by_label("Join 01-010#1 to 01-010#3").click();
-    h.run();
+    wait(&mut h, 0.1);
     h.get_by_label("Match colour to 01-010#1");
     assert!(h.query_by_label("Straight cut").is_none());
     h.get_by_label("Dissolve").click();
@@ -2054,6 +2064,10 @@ fn renders_an_editor_sequence() {
     let (video, _) = another_take(&p);
     write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
     let (mut h, _) = on_main_edit(tmp.path(), &p);
+    // Its file isn't a real video, so the player says so above first.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("can't make a preview to play")
+        .is_some()));
     h.get_by_label("Render").click();
     let made = || {
         std::fs::read_dir(p.root.join("renders"))
@@ -2078,10 +2092,16 @@ fn processes_the_used_part_of_a_clip() {
     }
     write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
     let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    // The preview shows in the player above first, which moves everything down.
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("edit.fcproj · Main edit")
+        .count()
+        == 1));
+    wait(&mut h, 0.2);
     h.get_by_role_and_label(Role::Button, "01-010#1").click();
-    h.run();
+    wait(&mut h, 0.1);
     h.get_by_label("Process").click();
-    h.run();
+    wait(&mut h, 0.1);
     h.get_by_label("video.interpolate · local ffmpeg/minterpolate")
         .click();
     assert!(wait_for(&mut h, |h| h.query_by_label("Go").is_some()));
@@ -2126,7 +2146,7 @@ fn matches_a_join_with_shotlines_lut() {
     write_edits(&p, vec![first, second], vec![]);
     let (mut h, lines) = on_main_edit(tmp.path(), &p);
     h.get_by_label("Join 01-010#1 to 01-010#3").click();
-    h.run();
+    wait(&mut h, 0.1);
     h.get_by_label("Match with shotline's LUT").click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let ask = &lines()[0];
@@ -2187,18 +2207,16 @@ fn shows_the_editor_cut_shotline_made_first() {
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
-    let shown = "shared/filmcraft/Rain.fcproj · 720 × 1280";
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label_contains(shown)
-        .is_some()));
+    let shown = "shared/filmcraft/Rain.fcproj";
+    assert!(wait_for(&mut h, |h| h.query_by_label(shown).is_some()));
     assert!(h.query_by_label("This film's cut").is_none());
     // Two sequences to pick from; the pick stays when the editor saves again.
     h.get_by_label("other.fcproj · Someone's").click();
     h.run();
-    h.get_by_label_contains("shared/other.fcproj · 720 × 1280");
+    h.get_by_label("shared/other.fcproj");
     write();
     wait(&mut h, 1.5);
-    h.get_by_label_contains("shared/other.fcproj · 720 × 1280");
+    h.get_by_label("shared/other.fcproj");
 }
 
 #[test]
@@ -2410,29 +2428,23 @@ fn plays_compares_and_plays_the_cut() {
     wait(&mut h, 0.1);
 
     h.get_by_label("Cut").click();
-    wait(&mut h, 0.1);
-    h.get_by_label("Play the cut").click();
-    wait(&mut h, 0.3);
+    // The cut's player is there already, stopped, with its picture; it can't be closed.
     assert!(wait_for(&mut h, |h| h
         .query_all_by_label("the cut")
         .count()
-        == 2));
-    assert!(h.state().is_playing());
+        == 1));
+    assert!(!h.state().is_playing());
+    assert!(h.query_by_label("Close player").is_none());
+    h.get_by_label("Play").click();
+    assert!(wait_for(&mut h, |h| h.state().is_playing()));
     // The cut doesn't loop: it stops after its one second.
     wait(&mut h, 1.0);
     assert!(wait_for(&mut h, |h| !h.state().is_playing()));
-    h.get_by_label("Close player").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_all_by_label("the cut")
-        .count()
-        == 0));
 
-    // On its track, the playhead starts the cut where it's put, and the take opens its shot.
+    // Clicked on the ruler, the playhead moves there without playing; the take opens its shot.
     h.get_by_role_and_label(Role::Slider, "Playhead").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_all_by_label("the cut")
-        .count()
-        == 2));
+    wait(&mut h, 0.2);
+    assert!(!h.state().is_playing());
     h.get_by_role_and_label(Role::Button, "01-010#1").click();
     wait(&mut h, 0.1);
     assert_eq!(h.state().tab(), Tab::Shots);
@@ -3823,18 +3835,15 @@ fn plays_an_editor_sequence() {
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Play the sequence")
-        .is_some()));
-
-    // A preview is made first, then it plays.
-    h.get_by_label("Play the sequence").click();
-    assert!(wait_for(&mut h, |h| h.state().is_playing()));
-    // Its title, then its picture once the first frame is in.
+    // A preview is made on its own, then shows in the player: its title, then its picture
+    // once the first frame is in.
     assert!(wait_for(&mut h, |h| h
         .query_all_by_label("edit.fcproj · Main edit")
         .count()
-        == 2));
+        == 1));
+    assert!(!h.state().is_playing());
+    h.get_by_label("Play").click();
+    assert!(wait_for(&mut h, |h| h.state().is_playing()));
     h.get_by_label_contains("Left out of the preview: Title: made in the editor");
     let made: Vec<_> = std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
         .unwrap()
@@ -3843,11 +3852,9 @@ fn plays_an_editor_sequence() {
     wait(&mut h, 1.2);
     assert!(wait_for(&mut h, |h| !h.state().is_playing()));
 
-    // Made once: the playhead starts it again straight away.
-    h.get_by_label("Close player").click();
-    wait(&mut h, 0.1);
+    // Made once: the playhead moves in it without making it again.
     h.get_by_role_and_label(Role::Slider, "Playhead").click();
-    assert!(wait_for(&mut h, |h| h.state().is_playing()));
+    wait(&mut h, 0.2);
     assert_eq!(
         std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
             .unwrap()
