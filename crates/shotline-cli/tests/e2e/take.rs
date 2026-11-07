@@ -230,3 +230,33 @@ fn credits_need_a_rate_or_a_plugin_one() {
         .success()
         .stdout("01-030  fake fake/credits  3s  30 fake-credit (0.3 USD)\n");
 }
+
+#[test]
+fn a_done_take_goes_to_the_editors() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    let exe = assert_cmd::cargo::cargo_bin("shotline");
+    tmp.child(".home/plugins/fake-editor/shotline-plugin.toml")
+        .write_str(&format!(
+            "name = \"fake-editor\"\nexec = {:?}\nargs = [\"__fake-editor\"]\nprotocol = 1\n",
+            exe.display().to_string()
+        ))
+        .unwrap();
+    shotline(&tmp)
+        .args(["take", "01-010", "--yes"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("01-010#1 done")
+                .and(predicate::str::contains("sent to Fake Editor")),
+        );
+    let sent =
+        std::fs::read_to_string(tmp.path().join("film/shared/fake-editor/imported.jsonl")).unwrap();
+    let t: serde_json::Value = serde_json::from_str(sent.trim()).unwrap();
+    assert_eq!(
+        (t["name"].as_str(), t["shot"].as_str()),
+        (Some("01-010#1"), Some("01-010"))
+    );
+    let file = std::path::PathBuf::from(t["file"].as_str().unwrap());
+    assert!(file.is_absolute() && file.is_file(), "{}", file.display());
+}

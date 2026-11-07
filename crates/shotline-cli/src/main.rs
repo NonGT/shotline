@@ -196,6 +196,9 @@ enum Cmd {
     /// Serves the built-in fake plugin over stdio, for tests and dry runs
     #[command(name = "__fake-plugin", hide = true)]
     FakePlugin,
+    /// Serves a fake editor plugin over stdio, for tests
+    #[command(name = "__fake-editor", hide = true)]
+    FakeEditor,
 }
 
 #[derive(clap::Args)]
@@ -1347,6 +1350,10 @@ fn run(cli: Cli) -> Result<()> {
             plugins::runtime().block_on(shotline_plugin::serve(
                 shotline_plugin::fake::FakePlugin::default(),
             ))?;
+        }
+        Cmd::FakeEditor => {
+            plugins::runtime()
+                .block_on(shotline_plugin::serve(shotline_plugin::fake::FakeEditor))?;
         }
     }
     Ok(())

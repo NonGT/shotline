@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use shotline_core::ledger::{Books, money, pricing};
-use shotline_core::protocol::{MediaKind, Op, Quote, Rate, Reference, Request, State};
+use shotline_core::protocol::{MediaKind, Op, Quote, Rate, Reference, Request, State, TakeFile};
 use shotline_core::{
     DraftFor, Job, JobStatus, Project, ShotRef, Translated, UserConfig, build_draft, finish_draft,
     looks_english, user_dir,
@@ -426,9 +426,29 @@ pub fn take_at(
     drop(opened);
     let spent = spent(&outcome);
     match &outcome.error {
-        None => Ok(format!("{} done · {spent}", outcome.take)),
+        None => {
+            let sent = to_editors(p, &outcome);
+            let sent: String = sent.iter().map(|l| format!(" · {l}")).collect();
+            Ok(format!("{} done · {spent}{sent}", outcome.take))
+        }
         Some(e) => bail!("{} {}: {e} ({spent})", outcome.take, outcome.job.status),
     }
+}
+
+/// The finished take, handed to the editor plugins so it's at hand there.
+fn to_editors(p: &Project, outcome: &shotline_engine::Outcome) -> Vec<String> {
+    let Some(file) = outcome.job.outputs.first() else {
+        return vec![];
+    };
+    // The editor runs elsewhere, so no paths relative to here.
+    let film = std::path::absolute(&p.root).unwrap_or_else(|_| p.root.clone());
+    let take = TakeFile {
+        name: outcome.take.to_string(),
+        shot: outcome.take.shot.to_string(),
+        file: std::path::absolute(p.job_dir(outcome.job.id).join(file))
+            .unwrap_or_else(|_| film.join(file)),
+    };
+    crate::plugins::send_take(&crate::plugins::load(), &film, take)
 }
 
 fn spent(outcome: &shotline_engine::Outcome) -> String {
@@ -536,6 +556,9 @@ pub fn take(
                 .map(|f| p.rel(&p.job_dir(outcome.job.id).join(f)))
                 .unwrap_or_default();
             println!("{} done · {spent} · {file}", outcome.take);
+            for l in to_editors(p, &outcome) {
+                println!("{l}");
+            }
             if p.shot(r)?.selected_take.is_none() {
                 println!("pick it with `shotline select {}`", outcome.take);
             }

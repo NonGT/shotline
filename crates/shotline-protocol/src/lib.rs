@@ -359,6 +359,31 @@ pub struct SequencesParams {
     pub film: PathBuf,
 }
 
+/// Params of `import`: finished takes for the editor to have at hand.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ImportParams {
+    pub film: PathBuf,
+    pub takes: Vec<TakeFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TakeFile {
+    /// As shotline names it, e.g. `01-010#2`.
+    pub name: String,
+    /// Its shot, e.g. `01-010`.
+    pub shot: String,
+    pub file: PathBuf,
+}
+
+/// What `import` did: takes in the editor now, and ones kept until it's open.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Imported {
+    #[serde(default)]
+    pub sent: usize,
+    #[serde(default)]
+    pub waiting: usize,
+}
+
 /// Params of `open`: the film's project in the editor, made from `cut` when there's none yet.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct OpenParams {
@@ -372,6 +397,9 @@ pub struct OpenParams {
     /// shotline's cut: the selected takes back to back on V1, the music on A tracks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cut: Option<SequenceInfo>,
+    /// Takes to have at hand there too, as with `import`; sent with a new project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<TakeFile>,
 }
 
 /// Reply to `sequences`: the editor's projects for the film.

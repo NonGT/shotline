@@ -5,14 +5,16 @@
 //! Only what a cut needs is read: sequences, their tracks, and each clip's file and timing.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use shotline_plugin::protocol::{
-    ClipInfo, Description, EditInfo, ErrorKind, OpenParams, Outputs, PROTOCOL_VERSION, PluginError,
-    Quote, Request, SequenceInfo, Sequences, Status, TrackInfo,
+    ClipInfo, Description, EditInfo, ErrorKind, ImportParams, Imported, OpenParams, Outputs,
+    PROTOCOL_VERSION, PluginError, Quote, Request, SequenceInfo, Sequences, Status, TakeFile,
+    TrackInfo,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
@@ -74,6 +76,152 @@ impl Plugin for FilmCraft {
     async fn open(&self, ask: &OpenParams) -> Result<()> {
         open_in_filmcraft(ask).map_err(|e| fail(ErrorKind::Other, e))
     }
+
+    async fn import(&self, ask: &ImportParams) -> Result<Imported> {
+        send_takes(ask).map_err(|e| fail(ErrorKind::Other, e))
+    }
+}
+
+fn waiting_file(film: &Path) -> PathBuf {
+    film.join(".shotline/cache/filmcraft-waiting.json")
+}
+
+fn waiting(film: &Path) -> Vec<TakeFile> {
+    std::fs::read_to_string(waiting_file(film))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn keep_waiting(film: &Path, takes: &[TakeFile]) -> std::result::Result<(), String> {
+    let path = waiting_file(film);
+    let r = if takes.is_empty() {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        std::fs::create_dir_all(path.parent().unwrap_or(film)).and_then(|()| {
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(takes).unwrap_or_default(),
+            )
+        })
+    };
+    r.map_err(|e| format!("can't keep the takes for {APP}: {e}"))
+}
+
+fn add_waiting(film: &Path, takes: &[TakeFile]) -> std::result::Result<Vec<TakeFile>, String> {
+    let mut all = waiting(film);
+    for t in takes {
+        if !all.iter().any(|w| w.name == t.name) {
+            all.push(t.clone());
+        }
+    }
+    keep_waiting(film, &all)?;
+    Ok(all)
+}
+
+/// Adds the takes to the ones waiting, and sends them all if the film's project is open in a
+/// FilmCraft started from shotline.
+fn send_takes(ask: &ImportParams) -> std::result::Result<Imported, String> {
+    let film = &ask.film;
+    let all = add_waiting(film, &ask.takes)?;
+    let left = match control::Session::load(film).filter(control::Session::alive) {
+        Some(s) => deliver(&s, film, &all)?,
+        None => all.clone(),
+    };
+    keep_waiting(film, &left)?;
+    Ok(Imported {
+        sent: all.len() - left.len(),
+        waiting: left.len(),
+    })
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
+
+/// The bin called `name` right inside `bin`.
+fn bin_in(bin: &Value, name: &str) -> Option<u64> {
+    bin["children"]
+        .as_array()?
+        .iter()
+        .find(|c| c["children"].is_array() && c["name"] == name)
+        .and_then(|c| c["id"].as_u64())
+}
+
+fn find_bin(root: &Value, id: u64) -> Option<&Value> {
+    if root["id"].as_u64() == Some(id) {
+        return Some(root);
+    }
+    root["children"]
+        .as_array()?
+        .iter()
+        .find_map(|c| find_bin(c, id))
+}
+
+/// Imports takes into `shotline/<shot>` bins of the open project, each named as its take, and
+/// returns the ones that couldn't go: all of them when another project is open in FilmCraft.
+/// One already in its bin isn't imported twice; one whose file is gone is dropped.
+fn deliver(
+    s: &control::Session,
+    film: &Path,
+    takes: &[TakeFile],
+) -> std::result::Result<Vec<TakeFile>, String> {
+    if takes.is_empty() {
+        return Ok(vec![]);
+    }
+    let project = s.exec("project.inspect", json!({}))?;
+    let ours = project["path"]
+        .as_str()
+        .and_then(|p| Path::new(p).parent())
+        .is_some_and(|d| same_file(d, &own_dir(film)) || same_file(d, &film.join(SHARED_DIR)));
+    if !ours {
+        return Ok(takes.to_vec());
+    }
+    let mut root = project["root"].clone();
+    let mut bins: HashMap<String, u64> = HashMap::new();
+    let top = match bin_in(&root, "shotline") {
+        Some(id) => id,
+        None => s.exec("file.newBin", json!({"name": "shotline"}))?["bin"]
+            .as_u64()
+            .ok_or("file.newBin gave no bin")?,
+    };
+    for t in takes {
+        if !t.file.is_file() {
+            continue;
+        }
+        let bin = match bins.get(&t.shot) {
+            Some(b) => *b,
+            None => {
+                let found = find_bin(&root, top).and_then(|b| bin_in(b, &t.shot));
+                let b = match found {
+                    Some(b) => b,
+                    None => s.exec("file.newBin", json!({"name": t.shot, "parent": top}))?["bin"]
+                        .as_u64()
+                        .ok_or("file.newBin gave no bin")?,
+                };
+                bins.insert(t.shot.clone(), b);
+                b
+            }
+        };
+        let there = find_bin(&root, bin)
+            .and_then(|b| b["children"].as_array())
+            .is_some_and(|c| c.iter().any(|i| i["name"] == t.name));
+        if there {
+            continue;
+        }
+        let got = s.exec("file.import", json!({"paths": [t.file], "bin": bin}))?;
+        if let Some(e) = got["errors"].as_array().and_then(|e| e.first()) {
+            return Err(format!("{APP} couldn't import {}: {e}", t.name));
+        }
+        if let Some(item) = got["items"].as_array().and_then(|i| i.first()) {
+            let _ = s.exec("clip.rename", json!({"item": item, "name": t.name}));
+        }
+        root = s.exec("project.inspect", json!({}))?["root"].clone();
+    }
+    Ok(vec![])
 }
 
 fn fail(kind: ErrorKind, message: String) -> Error {
@@ -100,6 +248,9 @@ fn fcprojs(dir: &Path) -> Vec<PathBuf> {
 /// imports the cut and saves the project itself, so the file is always one it wrote.
 fn open_in_filmcraft(ask: &OpenParams) -> std::result::Result<(), String> {
     let film = &ask.film;
+    if !ask.takes.is_empty() {
+        add_waiting(film, &ask.takes)?;
+    }
     let target = ask
         .file
         .clone()
@@ -124,8 +275,9 @@ fn open_in_filmcraft(ask: &OpenParams) -> std::result::Result<(), String> {
         }
         None => make_project(film, ask.cut.as_ref(), running)?,
     };
+    let left = deliver(&s, film, &waiting(film));
     let _ = s.call("ui.focus", json!({}));
-    Ok(())
+    keep_waiting(film, &left?)
 }
 
 /// Opens `file` in a running FilmCraft, unless that would lose changes it hasn't saved.
@@ -203,6 +355,11 @@ fn make_project(
     }
     let file = dir.join(format!("{name}.fcproj"));
     s.exec("file.saveAs", json!({"path": file}))?;
+    // Takes waiting go in once the project is the film's; it's saved again with them.
+    if !waiting(film).is_empty() {
+        keep_waiting(film, &deliver(&s, film, &waiting(film))?)?;
+        s.exec("file.save", json!({}))?;
+    }
     if let Some(id) = got["sequences"].as_array().and_then(|a| a.first()) {
         let _ = s.exec("sequence.open", json!({"item": id}));
     }
@@ -572,6 +729,42 @@ mod tests {
         assert!(e.to_string().contains("no cut"), "{e}");
     }
 
+    #[tokio::test]
+    async fn takes_wait_while_filmcraft_is_closed() {
+        let film = tempfile::tempdir().unwrap();
+        let take = |name: &str| TakeFile {
+            name: name.into(),
+            shot: "01-010".into(),
+            file: film.path().join("jobs/x/out.mp4"),
+        };
+        let ask = |takes| ImportParams {
+            film: film.path().into(),
+            takes,
+        };
+        let got = FilmCraft
+            .import(&ask(vec![take("01-010#1")]))
+            .await
+            .unwrap();
+        assert_eq!((got.sent, got.waiting), (0, 1));
+        let got = FilmCraft
+            .import(&ask(vec![take("01-010#1"), take("01-010#2")]))
+            .await
+            .unwrap();
+        assert_eq!((got.sent, got.waiting), (0, 2));
+        assert_eq!(waiting(film.path()).len(), 2);
+    }
+
+    #[test]
+    fn finds_bins() {
+        let root = json!({"id": 0, "children": [
+            {"item": 1, "name": "shotline", "type": "Sequence"},
+            {"id": 3, "name": "shotline", "children": [{"id": 4, "name": "01-010", "children": []}]},
+        ]});
+        assert_eq!(bin_in(&root, "shotline"), Some(3));
+        assert_eq!(bin_in(find_bin(&root, 3).unwrap(), "01-010"), Some(4));
+        assert_eq!(bin_in(&root, "01-010"), None);
+    }
+
     #[test]
     fn finds_a_sequence_in_the_bins() {
         let root = json!({"children": [
@@ -627,8 +820,43 @@ mod tests {
             cut: Some(cut),
             ..OpenParams::default()
         };
+        // Made before FilmCraft was open: it waits, then goes in with the new project.
+        let take = |name: &str, shot: &str| ImportParams {
+            film: film.clone(),
+            takes: vec![TakeFile {
+                name: name.into(),
+                shot: shot.into(),
+                file: clip.clone(),
+            }],
+        };
+        let got = FilmCraft.import(&take("01-010#1", "01-010")).await.unwrap();
+        assert_eq!(got.waiting, 1);
         FilmCraft.open(&ask).await.unwrap();
+        assert!(waiting(&film).is_empty());
         let s = control::Session::load(&film).unwrap();
+        let bins = |s: &control::Session| {
+            let root = s.exec("project.inspect", json!({})).unwrap()["root"].clone();
+            let top = bin_in(&root, "shotline").unwrap();
+            find_bin(&root, top).unwrap().clone()
+        };
+        let shot = |b: &Value, name: &str| -> Vec<String> {
+            let b = find_bin(b, bin_in(b, name).unwrap()).unwrap();
+            b["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["name"].as_str().unwrap().into())
+                .collect()
+        };
+        assert_eq!(shot(&bins(&s), "01-010"), ["01-010#1"]);
+        let saved = s.exec("project.inspect", json!({})).unwrap();
+        assert_eq!(saved["dirty"], false, "saved with the takes in");
+
+        // Made while it's open: straight in, once.
+        let got = FilmCraft.import(&take("01-020#1", "01-020")).await.unwrap();
+        assert_eq!((got.sent, got.waiting), (1, 0));
+        FilmCraft.import(&take("01-020#1", "01-020")).await.unwrap();
+        assert_eq!(shot(&bins(&s), "01-020"), ["01-020#1"]);
         let project = own_dir(&film).join("fan.fcproj");
         assert!(project.is_file());
         let edits = shared_edits(&film);

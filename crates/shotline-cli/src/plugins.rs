@@ -2,7 +2,9 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use shotline_builtin::fal::{self, Fal};
-use shotline_core::protocol::{Description, EditInfo, OpenParams, VoiceInfo};
+use shotline_core::protocol::{
+    Description, EditInfo, ImportParams, OpenParams, TakeFile, VoiceInfo,
+};
 use shotline_core::{Catalog, Project, user_dir};
 use shotline_plugin::conformance::{self, Options};
 use shotline_plugin::discovery::{self, Entry, Source};
@@ -355,6 +357,35 @@ pub fn sequences(installed: &Installed, film: &Path) -> (Vec<EditInfo>, Vec<Stri
         }
     }
     (edits, problems)
+}
+
+/// Hands a finished take to every editor plugin; a line for each that took it or failed.
+pub fn send_take(installed: &Installed, film: &Path, take: TakeFile) -> Vec<String> {
+    let rt = runtime();
+    let mut said = vec![];
+    for p in &installed.plugins {
+        let Ok(d) = &p.description else { continue };
+        if !d.editor {
+            continue;
+        }
+        let app = if d.app.is_empty() { &p.name } else { &d.app };
+        let ask = ImportParams {
+            film: film.to_path_buf(),
+            takes: vec![take.clone()],
+        };
+        let got = open(installed, &p.name).map(|plugin| rt.block_on(plugin.import(&ask)));
+        match got {
+            Ok(Ok(i)) if i.waiting > 0 => said.push(format!(
+                "goes to {app} once it's opened from shotline ({} waiting)",
+                i.waiting
+            )),
+            Ok(Ok(_)) => said.push(format!("sent to {app}")),
+            Ok(Err(shotline_plugin::Error::Unsupported(_))) => {}
+            Ok(Err(e)) => said.push(format!("couldn't send it to {app}: {e}")),
+            Err(e) => said.push(format!("couldn't send it to {app}: {e}")),
+        }
+    }
+    said
 }
 
 /// Asks editor plugin `name` to open the film's project, making it if need be.

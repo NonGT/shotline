@@ -1831,6 +1831,11 @@ fn starts_an_editor_project_from_the_cut() {
     assert!((v1[0].length - 1.0).abs() < 0.1, "{}", v1[0].length);
     // Its sound under it.
     assert_eq!(cut.audio[0].clips.len(), 1);
+    // Every finished take goes in its bins too, by absolute path.
+    let names: Vec<&str> = ask.takes.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["01-010#1"]);
+    assert_eq!(ask.takes[0].shot, "01-010");
+    assert!(ask.takes[0].file.is_absolute());
 }
 
 /// A second of test pattern with a tone, or None without ffmpeg.

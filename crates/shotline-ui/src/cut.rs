@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
-use shotline_core::protocol::{ClipInfo, OpenParams, SequenceInfo, TrackInfo};
+use shotline_core::protocol::{ClipInfo, OpenParams, SequenceInfo, TakeFile, TrackInfo};
 use shotline_core::{MatchAt, ShotRef, Transition};
 
 use crate::edit::Action;
@@ -571,7 +571,10 @@ impl App {
             .filter(|t| t.volume > 0.0)
             .map(|t| (t.file.clone(), self.project.root.join(&t.file), t.at))
             .collect();
-        let (ff, film) = (self.ff.clone(), self.project.root.clone());
+        let has_own = self.edits.0.iter().any(|e| e.plugin == plugin);
+        let (ff, project) = (self.ff.clone(), self.project.clone());
+        // The editor runs elsewhere, so no paths relative to here.
+        let film = std::path::absolute(&project.root).unwrap_or_else(|_| project.root.clone());
         let slot: crate::Opened = Arc::default();
         self.edit_opening = Some((app, slot.clone()));
         let ctx = ctx.clone();
@@ -586,9 +589,10 @@ impl App {
                         ask.file = Some(file);
                         ask.sequence = Some(seq);
                     }
-                    None if !takes.is_empty() => {
+                    None if !has_own && !takes.is_empty() => {
                         let ff = ff.ok_or("can't measure the takes without ffmpeg")?;
                         ask.cut = Some(own_cut(&ff, &film, &takes, &music)?);
+                        ask.takes = all_takes(&project);
                     }
                     None => {}
                 }
@@ -998,6 +1002,27 @@ pub(crate) struct Making {
 fn seq_title(file: &Path, seq: &SequenceInfo) -> String {
     let file = file.file_name().unwrap_or_default().to_string_lossy();
     format!("{file} · {}", seq.name)
+}
+
+/// Every finished take of the film, for an editor's bins.
+fn all_takes(p: &shotline_core::Project) -> Vec<TakeFile> {
+    let mut all = vec![];
+    for (r, _) in p.shots(None).unwrap_or_default() {
+        for t in p.takes(r).unwrap_or_default() {
+            let Some(file) = t
+                .output()
+                .and_then(|j| Some(p.job_dir(j.id).join(j.outputs.first()?)))
+            else {
+                continue;
+            };
+            all.push(TakeFile {
+                name: t.to_string(),
+                shot: r.to_string(),
+                file: std::path::absolute(&file).unwrap_or(file),
+            });
+        }
+    }
+    all
 }
 
 /// The film's cut as an editor sequence: the takes back to back on V1 and their sound on A1,

@@ -251,8 +251,23 @@ or makes one when there's none yet. Params:
 `file` and `sequence` come from `sequences`; without `file` the plugin opens the film's own
 project, and when there's none it makes one from `cut`, shotline's cut in the same shape as a
 sequence above (the selected takes back to back on V1, their sound on A1, music on A2 and up).
-A plugin keeps what it makes under `shared/<plugin name>/`, and only lets the editor itself write
-its project file. Returns `{}` once the editor shows it.
+With a new project, `takes` lists every finished take of the film, as in `import` below. A plugin
+keeps what it makes under `shared/<plugin name>/`, and only lets the editor itself write its
+project file. Returns `{}` once the editor shows it.
+
+### import (optional)
+
+For an editor plugin: a take is done, so it should be at hand in the editor. Params:
+
+```json
+{"film": "/path/to/film",
+ "takes": [{"name": "01-010#2", "shot": "01-010", "file": "/path/to/film/jobs/01J.../out.mp4"}]}
+```
+
+Paths are absolute. Returns `{"sent": 1, "waiting": 0}`: takes now in the editor, and ones the
+plugin keeps until it can send them (the editor isn't open). The filmcraft plugin puts them in a
+`shotline/<shot>` bin named as the take, in the film's project when FilmCraft was opened from
+shotline, and sends the waiting ones next time it opens it.
 
 Leave out optional methods; answer with error code -32601 (method not found).
 
