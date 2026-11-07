@@ -40,6 +40,7 @@ my-film/
   jobs/<ulid>/         one folder per generation: job.toml + output files
   timeline.toml        optional: shot order, crossfades, colour match, music/sfx tracks
   renders/             rendered films
+  shared/              files shared with other apps, e.g. a video editor's project (see Editors)
   prompts/             optional overrides for the prompt templates
   models.toml          optional overrides for model capabilities
   .shotline/ledger.jsonl
@@ -239,12 +240,16 @@ cancel
 rates     -> optional: what one of its credit units costs
 balance   -> optional: what's left on the account, free to read
 usage     -> optional: what the provider actually charged, for reconciling
+sequences -> editor plugins: the film's projects in that editor, their sequences and clips
+open      -> editor plugins: open the film's project in the editor, making it if there's none
+import    -> editor plugins: a finished take, to have at hand in the editor
 ```
 
 Rules:
 
 - Plugins are stateless about the project. shotline passes absolute input paths and an output
-  folder; plugins never read or write the project themselves.
+  folder; plugins never read or write the project themselves. Editor plugins are the exception:
+  they read and write under `shared/`, and keep their own state in `.shotline/cache/`.
 - Only the env vars a plugin declares in `describe` are passed to it.
 - Errors come back in one shape: `{kind: validation | content_policy | auth | quota | other,
   message, field}`. `field` points into the request (`references[2]`, `audio`), which core maps
@@ -432,6 +437,37 @@ volume = 0.5
 clip to the first one's size and frame rate, colour matches, writes lossless intermediates under
 `.shotline/cache/`, then encodes once to H.264/AAC in `renders/` (ignored by git), with each
 clip's own sound kept in sync and the tracks mixed over it.
+
+## Editors
+
+A film can be cut in a real video editor next to shotline, from the same folder. The editor is
+linked by a plugin that says `"editor": true` (FilmCraft for now, `plugins/filmcraft`), so the core
+and the app don't know about any editor, and Resolve or Kdenlive could be linked the same way
+through OTIO or FCPXML.
+
+The editor's project lives under `shared/`, `shared/<plugin>/` for one made from shotline. shotline
+only ever reads it: an editor writes the whole file on save and doesn't merge, so anything written
+into it would be lost on the next save. Files handed to the editor (`cut.otio`) sit next to it.
+
+What's read: `sequences` gives each project's sequences, tracks and clips in seconds. The Cut page
+can switch between shotline's own cut and those sequences, drawn the same way, read only. A clip
+from a take's job folder is named by its take and opens its shot. A sequence plays from a preview
+ffmpeg makes into `.shotline/cache/sequences/`: the top enabled clip at each moment and the audio
+tracks mixed, without effects or transitions. The page watches `shared/` and reads it again when
+the editor saves.
+
+What's sent: "Open in FilmCraft" on the Cut page opens the film's project, or makes it when
+there's none. shotline sends its cut (the selected takes back to back on V1, their sound on A1,
+the music on A2 and up) and every finished take; the plugin writes the cut as OTIO, starts
+FilmCraft with a control port and a new token, has it import the cut and save the project itself,
+so the file is always one FilmCraft wrote. After that, each take that's done goes into a
+`shotline/<shot>` bin named as the take. FilmCraft doesn't watch folders, so takes made while it's
+closed, or showing another project, wait in `.shotline/cache/filmcraft-waiting.json` and go in the
+next time it's opened from shotline. The port and token are kept in
+`.shotline/cache/filmcraft-session.json` (mode 600), never in `shared/` or on a command line.
+
+Nothing the editor does comes back into shotline's own cut; its sequences are shown and played,
+and rendering stays with the editor.
 
 ## Money
 
@@ -623,7 +659,8 @@ stretched.
 The Cut tab lists the shots in play order with their takes, edits timeline.toml (crossfade,
 colour matching, music tracks with start and volume; a track from outside the film is copied into
 `music/`) and renders in the background with the same code as `shotline timeline render`, into
-`renders/`. Past renders play in the app.
+`renders/`. Past renders play in the app. With an editor plugin, the top of the Cut tab switches
+to the editor's sequences and opens the film in the editor (see Editors).
 
 The Cost tab charts spending per day as stacked bars, one colour per model (last 7 or 30 days,
 or all of it), with a table of models under it (usage, jobs, money) and the spend per shot. Under
@@ -734,6 +771,7 @@ crates/
   shotline-cli         the binary, clap; `mcp` via rmcp, `ui` behind the `ui` cargo feature
 plugins/
   venice/  elevenlabs/  wavespeed/  local/   external plugins, built and installed separately
+  filmcraft/           editor plugin: reads .fcproj, writes OTIO, drives FilmCraft's control port
 ```
 
 shotline-core knows nothing about HTTP or ffmpeg. The CLI, MCP server and UI are thin layers on top
@@ -778,6 +816,7 @@ windows.
 8. anchor image generation, storyboard frames, upscale/interpolate - done
 9. egui UI: browse the project, costs, open takes in mpv/ffplay - done
 10. built-in player over ffmpeg pipes, side by side takes, timeline playback - done
+11. editor plugins: FilmCraft's sequences on the Cut page, open the cut there, send takes - done
 
 ## Not sure yet
 
