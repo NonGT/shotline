@@ -524,7 +524,9 @@ fn a_match_lut_brings_the_next_clip_closer() {
             .args(["-v", "error", "-y", "-i"])
             .arg(&b)
             .arg("-vf")
-            .arg(format!("lut3d=file={}", cube.display()))
+            // Relative, since a drive letter's colon would end the option.
+            .arg("lut3d=file=luts/b.cube")
+            .current_dir(dir.path())
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
             .arg(&graded)
             .status()
