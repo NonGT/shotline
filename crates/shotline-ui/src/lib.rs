@@ -429,7 +429,40 @@ fn decode(path: &Path, px: u32) -> Option<egui::ColorImage> {
 pub(crate) const THUMB: u32 = 512;
 const BIG: u32 = 2048;
 /// The zoomed picture seen whole.
-const FIT: (f32, egui::Pos2) = (1.0, egui::pos2(0.5, 0.5));
+pub(crate) const FIT: (f32, egui::Pos2) = (1.0, egui::pos2(0.5, 0.5));
+
+/// Pinch and scroll over `rect` to zoom and look around a picture, drag to move it, double-click
+/// to see it whole. `view` is how far in and the middle of what shows, 0-1 across. Gives the part
+/// of the picture to draw.
+pub(crate) fn pan_zoom(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    r: &egui::Response,
+    view: &mut (f32, egui::Pos2),
+) -> egui::Rect {
+    let (scale, mid) = view;
+    if r.hovered() {
+        let (pinch, scroll, at) =
+            ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos()));
+        if pinch != 1.0 {
+            // The spot under the fingers stays put.
+            let off = (at.unwrap_or(rect.center()) - rect.center()) / rect.size();
+            let under = *mid + off / *scale;
+            *scale = (*scale * pinch).clamp(1.0, 8.0);
+            *mid = under - off / *scale;
+        } else if *scale > 1.0 {
+            *mid -= scroll / rect.size() / *scale;
+        }
+    }
+    *mid -= r.drag_delta() / rect.size() / *scale;
+    if r.double_clicked() {
+        *view = FIT;
+    }
+    let (scale, mid) = view;
+    let half = 0.5 / *scale;
+    *mid = mid.clamp(egui::pos2(half, half), egui::pos2(1.0 - half, 1.0 - half));
+    egui::Rect::from_center_size(*mid, egui::Vec2::splat(2.0 * half))
+}
 /// An anchor's card on an element's page, two to a row; the picture's box is the same for all.
 const ANCHOR_CARD: f32 = 290.0;
 const ANCHOR_IMAGE: egui::Vec2 = egui::vec2(128.0, 96.0);
@@ -1356,34 +1389,9 @@ impl App {
                     let size = t.size_vec2();
                     let size = size * (max / size).min_elem().min(1.0);
                     let (rect, img) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                    let (scale, mid) = &mut self.zoom_view;
-                    if img.hovered() {
-                        let (pinch, scroll, at) = ui.input(|i| {
-                            (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos())
-                        });
-                        if pinch != 1.0 {
-                            // The spot under the fingers stays put.
-                            let off = (at.unwrap_or(rect.center()) - rect.center()) / rect.size();
-                            let under = *mid + off / *scale;
-                            *scale = (*scale * pinch).clamp(1.0, 8.0);
-                            *mid = under - off / *scale;
-                        } else if *scale > 1.0 {
-                            *mid -= scroll / rect.size() / *scale;
-                        }
-                    }
-                    *mid -= img.drag_delta() / rect.size() / *scale;
-                    let half = 0.5 / *scale;
-                    *mid = mid.clamp(egui::pos2(half, half), egui::pos2(1.0 - half, 1.0 - half));
-                    ui.painter().image(
-                        t.id(),
-                        rect,
-                        egui::Rect::from_center_size(*mid, egui::Vec2::splat(2.0 * half)),
-                        egui::Color32::WHITE,
-                    );
-                    let zoomed = *scale > 1.0;
-                    if img.double_clicked() {
-                        self.zoom_view = FIT;
-                    }
+                    let uv = pan_zoom(ui, rect, &img, &mut self.zoom_view);
+                    ui.painter().image(t.id(), rect, uv, egui::Color32::WHITE);
+                    let zoomed = self.zoom_view.0 > 1.0;
                     // Clicking closes it, unless it's pinched in.
                     close = img.clicked() && !zoomed;
                     img.widget_info(|| {

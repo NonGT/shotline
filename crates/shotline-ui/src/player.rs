@@ -173,6 +173,10 @@ pub struct Player {
     scrubbing: Option<f64>,
     /// Sought, and its first frame not shown yet.
     waiting: bool,
+    /// Pinched in: how far, and the middle of what shows.
+    view: (f32, egui::Pos2),
+    /// Decoding at the file's own size, for a picture pinched in.
+    full: bool,
 }
 
 impl Player {
@@ -222,6 +226,8 @@ impl Player {
             strips,
             scrubbing: None,
             waiting: false,
+            view: crate::FIT,
+            full: false,
         })
     }
 
@@ -287,13 +293,21 @@ impl Player {
             .unwrap_or(0)
             .min(self.clips.len() - 1);
         let clip = &self.clips[self.index];
-        let (w, h) = preview_size(clip.info.width, clip.info.height, PREVIEW);
+        self.full = self.view.0 > 1.0;
+        let long = if self.full {
+            clip.info.width.max(clip.info.height)
+        } else {
+            PREVIEW
+        };
+        let (w, h) = preview_size(clip.info.width, clip.info.height, long);
         let fps = match clip.info.fps_value() {
             f if f > 0.0 => f,
             _ => 24.0,
         };
-        // Decoding from the very end gives no frame at all, so start on the last one.
-        let local = (t - clip.at).min(clip.info.duration - 1.0 / fps).max(0.0);
+        // Decoding from past the picture's end gives no frame at all, so start on its last one.
+        let local = (t - clip.at)
+            .min(clip.info.video_duration - 1.0 / fps)
+            .max(0.0);
         self.frames = None;
         self.pcm = None;
         self.clock = Clock::at(local);
@@ -339,6 +353,10 @@ impl Player {
             self.last = None;
             return true;
         }
+        if self.full != (self.view.0 > 1.0) && !self.waiting {
+            let at = self.position();
+            self.seek(at, audio);
+        }
         let t = if playing {
             let dt = self.last.map_or(0.0, |l| (now - l).as_secs_f64());
             self.clock.tick(dt, self.audible(audio))
@@ -371,17 +389,35 @@ impl Player {
         true
     }
 
-    pub fn show(&self, ui: &mut egui::Ui, height: f32) {
+    pub fn show(&mut self, ui: &mut egui::Ui, height: f32) {
         let size = egui::vec2(height * self.aspect(), height);
-        match &self.tex {
-            Some(t) => {
-                ui.add(egui::Image::new((t.id(), size)).alt_text(&self.label));
-            }
-            None => {
-                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
-            }
-        }
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
+        self.picture(ui, rect);
+    }
+
+    /// The frame in `rect`, to pinch in on.
+    fn picture(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let Some(t) = &self.tex else { return };
+        let r = ui.interact(
+            rect,
+            ui.scope_id().with(("picture", &self.label)),
+            egui::Sense::click_and_drag(),
+        );
+        let uv = crate::pan_zoom(ui, rect, &r, &mut self.view);
+        ui.painter().image(t.id(), rect, uv, egui::Color32::WHITE);
+        let zoomed = self.view.0 > 1.0;
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, &self.label));
+        let r = if zoomed {
+            r.on_hover_cursor(egui::CursorIcon::Grab)
+        } else {
+            r
+        };
+        r.on_hover_text(if zoomed {
+            "drag to look around; double-click to see it whole"
+        } else {
+            "pinch to zoom in"
+        });
     }
 }
 
@@ -518,19 +554,15 @@ impl Deck {
         let width = ui.available_width();
         let (screen, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
         ui.painter().rect_filled(screen, 4.0, egui::Color32::BLACK);
-        let p = &self.players[0];
+        let p = &mut self.players[0];
         let aspect = p.aspect().max(0.1);
         let (mut w, mut h) = (height * aspect, height);
         if w > width {
             (w, h) = (width, width / aspect);
         }
         let picture = egui::Rect::from_center_size(screen.center(), egui::vec2(w, h));
-        if let Some(t) = &p.tex {
-            ui.put(
-                picture,
-                egui::Image::new((t.id(), picture.size())).alt_text(&p.label),
-            );
-        }
+        p.picture(ui, picture);
+        let p = &self.players[0];
         if let Some(e) = &p.error {
             ui.painter().text(
                 screen.center(),
@@ -640,10 +672,11 @@ impl Deck {
         let height = (ui.available_width() / self.players.len() as f32 / self.players[0].aspect())
             .min(self.max_height);
         ui.horizontal(|ui| {
-            for p in &self.players {
+            let many = self.players.len() > 1;
+            for p in &mut self.players {
                 ui.vertical(|ui| {
                     p.show(ui, height);
-                    if self.players.len() > 1 {
+                    if many {
                         ui.weak(&p.label);
                     }
                     if let Some(e) = &p.error {
@@ -688,6 +721,8 @@ mod tests {
         let ok = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i"])
             .arg("testsrc=size=640x360:rate=24:duration=2")
+            // The sound runs on past the picture, as takes' often do.
+            .args(["-f", "lavfi", "-i", "sine=duration=2.1"])
             .arg(&clip)
             .status()
             .unwrap();
@@ -709,6 +744,70 @@ mod tests {
             p.update(&ctx, None, false, Instant::now());
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn pinching_zooms_the_picture() {
+        use egui_kittest::kittest::Queryable;
+        let Ok(ff) = Ffmpeg::find() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("a.mp4");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc=size=1280x720:rate=24:duration=1")
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let p = Player::new(&ff, "a", &[clip]).unwrap();
+        let mut h = egui_kittest::Harness::new_ui_state(
+            |ui, p: &mut Player| {
+                p.update(ui.ctx(), None, false, Instant::now());
+                p.show(ui, 360.0);
+                ui.ctx().request_repaint();
+            },
+            p,
+        );
+        let start = Instant::now();
+        while h.state().tex.is_none() {
+            assert!(start.elapsed().as_secs() < 5);
+            h.step();
+        }
+        h.step();
+        h.get_by_label("a").hover();
+        h.step();
+        h.event(egui::Event::Zoom(2.0));
+        h.step();
+        h.step();
+        assert!(
+            (h.state().view.0 - 2.0).abs() < 0.01,
+            "{:?}",
+            h.state().view
+        );
+        // Pinched in, it's decoded at the file's own size.
+        assert_eq!(h.state().tex.as_ref().unwrap().size()[0], 720);
+        let start = Instant::now();
+        while h.state().tex.as_ref().unwrap().size()[0] != 1280 {
+            assert!(start.elapsed().as_secs() < 5, "still the preview's size");
+            h.step();
+        }
+        // Dragged, it shows more of the left.
+        let at = h.get_by_label("a").rect().center();
+        let press = |pressed, pos| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        h.event(press(true, at));
+        h.step();
+        for x in [20.0, 40.0, 60.0] {
+            h.event(egui::Event::PointerMoved(at + egui::vec2(x, 0.0)));
+            h.step();
+        }
+        h.event(press(false, at + egui::vec2(60.0, 0.0)));
+        h.step();
+        assert!(h.state().view.1.x < 0.5, "{:?}", h.state().view);
     }
 
     /// Needs a sound device, so it only runs by hand: `cargo test -p shotline-ui -- --ignored`.
