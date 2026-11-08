@@ -446,15 +446,26 @@ and the app don't know about any editor, and Resolve or Kdenlive could be linked
 through OTIO or FCPXML.
 
 The editor's project lives under `shared/`, `shared/<plugin>/` for one made from shotline. shotline
-only ever reads it: an editor writes the whole file on save and doesn't merge, so anything written
-into it would be lost on the next save. Files handed to the editor (`cut.otio`) sit next to it.
+never writes it: an editor writes the whole file on save and doesn't merge, so anything written
+into it would be lost on the next save. Changes go through the editor's own commands instead. Files
+handed to the editor (`cut.otio`) sit next to it.
 
-What's read: `sequences` gives each project's sequences, tracks and clips in seconds. The Cut page
-can switch between shotline's own cut and those sequences, drawn the same way, read only. A clip
-from a take's job folder is named by its take and opens its shot. A sequence plays from a preview
-ffmpeg makes into `.shotline/cache/sequences/`: the top enabled clip at each moment and the audio
-tracks mixed, without effects or transitions. The page watches `shared/` and reads it again when
-the editor saves.
+What's read: `sequences` gives each project's sequences, tracks and clips in seconds. Once there's
+an editor project, its sequence is the film's cut: the Cut page shows it in place of shotline's own
+(the project shotline made first, with a picker when there's more than one sequence). shotline's
+cut, with its joins, music and render, only shows while there's no editor project, and is what
+starts one. `timeline.toml` stays as it was, so taking the project away brings it back. A clip from a take's
+job folder is named by its take. The Cut page's player shows a preview ffmpeg makes into
+`.shotline/cache/sequences/` whenever the sequence changes: the top enabled clip at each moment
+with its LUT files and dissolves, the audio tracks mixed. Other effects, Lumetri's sliders and
+built-in LUTs are left out. Once the sequence has stayed the same for 4 seconds while shotline's
+window is in front (so not while it's being cut in the editor), the editor plugin's `export`
+renders the saved file into the same folder (`<key>-full.mp4`), through `filmcraft-cli` so an open
+FilmCraft is left alone, and the player swaps to that, keeping its place.
+The folder keeps the 16 newest quick previews and the 3 newest full ones (about 100 MB each
+for 37 s at 1024 × 768). Render makes one into `renders/` to keep, through the open FilmCraft
+when there is one, so what isn't saved yet is in it. The page
+watches `shared/` and reads it again when the editor saves.
 
 What's sent: "Open in FilmCraft" on the Cut page opens the film's project, or makes it when
 there's none. shotline sends its cut (the selected takes back to back on V1, their sound on A1,
@@ -466,8 +477,21 @@ closed, or showing another project, wait in `.shotline/cache/filmcraft-waiting.j
 next time it's opened from shotline. The port and token are kept in
 `.shotline/cache/filmcraft-session.json` (mode 600), never in `shared/` or on a command line.
 
-Nothing the editor does comes back into shotline's own cut; its sequences are shown and played,
-and rendering stays with the editor.
+Both edit the same timeline. On the Cut page a clip of an editor's sequence can be picked to open
+its shot, swap in another take, match its colour to the clip before, give it a LUT, or run a video
+tool on it (interpolation, upscaling): the part in use plus half a second either side is cut out,
+the tool runs on it as a job with the usual quote, and the result is swapped in. A join between two
+clips can get a dissolve or lose one, or a colour match: the editor's own (Apply Match), or
+shotline's MKL match, the one its renders use, written as a 33-point `.cube` and set as the clip's
+input LUT. The plugin's `edit` makes each change with
+FilmCraft's commands: through the control port when shotline opened it, through `filmcraft-cli`
+when it's closed (after copying the project into `.shotline/cache/filmcraft-backups/`, the last
+20), and not at all while a FilmCraft shotline didn't start is running or the CLI's version isn't
+the app's. Each change comes back with steps that undo just it, kept in
+`.shotline/cache/editor-undo.json`, since FilmCraft keeps no undo history in the file.
+
+When the sequence uses a take that isn't the shot's selected one, the page says so and offers to
+select it. Render on the sequence asks the editor to render it into `renders/`.
 
 ## Money
 

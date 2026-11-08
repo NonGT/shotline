@@ -256,6 +256,14 @@ impl Player {
         }
     }
 
+    /// Frames a second of the first clip.
+    pub fn fps(&self) -> f64 {
+        match self.clips[0].info.fps_value() {
+            f if f > 0.0 => f,
+            _ => 24.0,
+        }
+    }
+
     /// The first clip's picture, in pixels.
     pub fn size(&self) -> (u32, u32) {
         let i = &self.clips[0].info;
@@ -390,6 +398,16 @@ pub struct Deck {
     pub keys: bool,
     /// What it last told the sound output, so a paused deck leaves a line's playback alone.
     sounding: Option<bool>,
+    /// Has a close button; one that's always there doesn't.
+    closable: bool,
+}
+
+/// `HH:MM:SS:FF`, as editors write it.
+pub(crate) fn timecode(t: f64, fps: f64) -> String {
+    let fps = fps.round().max(1.0) as u64;
+    let frames = (t.max(0.0) * fps as f64).round() as u64;
+    let (f, s) = (frames % fps, frames / fps);
+    format!("{:02}:{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60, f)
 }
 
 pub(crate) fn clock(t: f64) -> String {
@@ -408,6 +426,22 @@ impl Deck {
             max_height: 420.0,
             keys: true,
             sounding: None,
+            closable: true,
+        }
+    }
+
+    /// Stopped on its first frame and always there: no close button.
+    pub fn fixed(mut self) -> Deck {
+        self.playing = false;
+        self.closable = false;
+        self
+    }
+
+    /// Shows the frame nearest `t` from the strips, while something is dragged; `seek` once
+    /// it's let go.
+    pub fn scrub(&mut self, ctx: &egui::Context, t: f64) {
+        for p in &mut self.players {
+            p.scrub(ctx, t);
         }
     }
 
@@ -467,6 +501,73 @@ impl Deck {
 
     /// Returns false when the deck should be closed.
     pub fn show(&mut self, ui: &mut egui::Ui, audio: Option<&Audio>) -> bool {
+        self.advance(ui.ctx(), audio);
+        let open = self.show_parts(ui, audio);
+        self.repaint(ui.ctx());
+        if !open {
+            self.pause(audio);
+        }
+        open
+    }
+
+    /// The Cut page's monitor: the picture on black in a `height` tall screen, and under it
+    /// Play and the timecode. No slider: the timeline's playhead does that.
+    pub fn monitor(&mut self, ui: &mut egui::Ui, audio: Option<&Audio>, height: f32) {
+        self.advance(ui.ctx(), audio);
+        let width = ui.available_width();
+        let (screen, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        ui.painter().rect_filled(screen, 4.0, egui::Color32::BLACK);
+        let p = &self.players[0];
+        let aspect = p.aspect().max(0.1);
+        let (mut w, mut h) = (height * aspect, height);
+        if w > width {
+            (w, h) = (width, width / aspect);
+        }
+        let picture = egui::Rect::from_center_size(screen.center(), egui::vec2(w, h));
+        if let Some(t) = &p.tex {
+            ui.put(
+                picture,
+                egui::Image::new((t.id(), picture.size())).alt_text(&p.label),
+            );
+        }
+        if let Some(e) = &p.error {
+            ui.painter().text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                e,
+                egui::FontId::proportional(13.0),
+                ui.visuals().error_fg_color,
+            );
+        }
+        let (t, total, fps) = (p.position(), p.duration(), p.fps());
+        ui.add_space(6.0);
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::hover());
+        let mut row = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(bar)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        // Centred: the button and the two timecodes, about 300 px.
+        row.add_space(((width - 300.0) / 2.0).max(0.0));
+        self.play_button(&mut row, audio);
+        row.add_space(10.0);
+        row.label(
+            egui::RichText::new(timecode(t, fps))
+                .monospace()
+                .size(15.0)
+                .color(crate::theme::PAPER),
+        );
+        row.label(
+            egui::RichText::new(format!("/ {}", timecode(total, fps)))
+                .monospace()
+                .size(15.0)
+                .color(crate::theme::DUST),
+        );
+        self.repaint(ui.ctx());
+    }
+
+    /// Moves the clocks on and keeps the sound in step.
+    fn advance(&mut self, ctx: &egui::Context, audio: Option<&Audio>) {
         let now = Instant::now();
         // Quiet while the slider is dragged.
         let scrubbing = self.players.iter().any(|p| p.scrubbing.is_some());
@@ -479,7 +580,7 @@ impl Deck {
         }
         let mut running = false;
         for p in &mut self.players {
-            running |= p.update(ui.ctx(), audio, self.playing, now);
+            running |= p.update(ctx, audio, self.playing, now);
         }
         if self.playing && !running {
             if self.looping {
@@ -488,11 +589,49 @@ impl Deck {
                 self.pause(audio);
             }
         }
+    }
+
+    /// Play or Pause, and Space for it.
+    fn play_button(&mut self, ui: &mut egui::Ui, audio: Option<&Audio>) {
+        let label = if self.playing { "Pause" } else { "Play" };
+        // Space is a space while something's being typed.
+        let key = self.keys
+            && ui.memory(|m| m.focused().is_none())
+            && ui.input(|i| i.key_pressed(egui::Key::Space));
+        let icon: fn(&egui::Painter, egui::Rect, egui::Stroke) = if self.playing {
+            crate::pause_icon
+        } else {
+            crate::play_icon
+        };
+        if crate::icon_button(ui, label, icon)
+            .on_hover_text(format!("{} (Space)", label.to_lowercase()))
+            .clicked()
+            || key
+        {
+            self.playing = !self.playing;
+            if self.playing {
+                // Sound attaches to a pipe when it's started.
+                let t = self.players[0].position();
+                self.seek(t, audio);
+            }
+        }
+    }
+
+    fn repaint(&self, ctx: &egui::Context) {
+        if self.playing {
+            ctx.request_repaint();
+        } else if self.players.iter().any(|p| p.tex.is_none() || p.waiting) {
+            // Still waiting for the first frame, or the first after a seek.
+            ctx.request_repaint_after(std::time::Duration::from_millis(15));
+        }
+    }
+
+    fn show_parts(&mut self, ui: &mut egui::Ui, audio: Option<&Audio>) -> bool {
         let mut open = true;
         if !self.bare {
             ui.horizontal(|ui| {
                 ui.strong(&self.title);
-                if ui.button("Close player").clicked() {
+                if self.closable && ui.button("Close player").clicked() {
                     open = false;
                 }
             });
@@ -515,28 +654,7 @@ impl Deck {
         let first = &self.players[0];
         let (mut t, total) = (first.position(), first.duration());
         ui.horizontal(|ui| {
-            let label = if self.playing { "Pause" } else { "Play" };
-            // Space is a space while something's being typed.
-            let key = self.keys
-                && ui.memory(|m| m.focused().is_none())
-                && ui.input(|i| i.key_pressed(egui::Key::Space));
-            let icon: fn(&egui::Painter, egui::Rect, egui::Stroke) = if self.playing {
-                crate::pause_icon
-            } else {
-                crate::play_icon
-            };
-            if crate::icon_button(ui, label, icon)
-                .on_hover_text(format!("{} (Space)", label.to_lowercase()))
-                .clicked()
-                || key
-            {
-                self.playing = !self.playing;
-                if self.playing {
-                    // Sound attaches to a pipe when it's started.
-                    let t = self.players[0].position();
-                    self.seek(t, audio);
-                }
-            }
+            self.play_button(ui, audio);
             let text = format!("{} / {}", clock(t), clock(total));
             ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(100.0);
             let slider = ui.add(
@@ -553,16 +671,6 @@ impl Deck {
                 self.seek(t, audio);
             }
         });
-        if self.playing {
-            ui.ctx().request_repaint();
-        } else if self.players.iter().any(|p| p.tex.is_none() || p.waiting) {
-            // Still waiting for the first frame, or the first after a seek.
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(15));
-        }
-        if !open {
-            self.pause(audio);
-        }
         open
     }
 }

@@ -18,6 +18,9 @@ const START: Duration = Duration::from_secs(40);
 pub struct Session {
     pub port: u16,
     pub token: String,
+    /// The app's process, to tell it from a FilmCraft opened some other way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 pub fn session_file(film: &Path) -> PathBuf {
@@ -113,9 +116,10 @@ pub fn program() -> PathBuf {
 
 /// Starts FilmCraft listening on a new port with a new token, and waits until it answers.
 pub fn start(film: &Path, args: &[OsString]) -> Result<Session, String> {
-    let s = Session {
+    let mut s = Session {
         port: free_port()?,
         token: token()?,
+        pid: None,
     };
     let exe = program();
     let mut c = std::process::Command::new(&exe);
@@ -134,6 +138,7 @@ pub fn start(film: &Path, args: &[OsString]) -> Result<Session, String> {
             exe.display()
         )
     })?;
+    s.pid = Some(child.id());
     s.save(film)
         .map_err(|e| format!("can't keep FilmCraft's port: {e}"))?;
     let until = Instant::now() + START;
@@ -167,6 +172,7 @@ mod tests {
         let s = Session {
             port: 4242,
             token: "ab".into(),
+            pid: Some(7),
         };
         s.save(film.path()).unwrap();
         assert_eq!(Session::load(film.path()), Some(s));
@@ -186,6 +192,7 @@ mod tests {
         let s = Session {
             port: free_port().unwrap(),
             token: "x".into(),
+            pid: None,
         };
         assert!(!s.alive());
     }

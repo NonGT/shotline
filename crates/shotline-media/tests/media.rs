@@ -66,6 +66,18 @@ fn last_frame() {
 }
 
 #[test]
+fn part_of_a_clip() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let v = clip(dir.path(), "a.mp4", RED, true);
+    let out = dir.path().join("cache/parts/a.mp4");
+    ff.part(&v, 0.25, 0.5, &out).unwrap();
+    let info = ff.probe(&out).unwrap();
+    assert!((info.duration - 0.5).abs() < 0.05, "{}", info.duration);
+    assert!(info.audio);
+}
+
+#[test]
 fn poster() {
     let Some(ff) = ff() else { return };
     let dir = tempfile::tempdir().unwrap();
@@ -409,6 +421,7 @@ fn a_sequence_made_into_a_preview() {
         length,
         from,
         speed: 1.0,
+        ..Piece::default()
     };
     let seq = Sequence {
         width: 320,
@@ -439,4 +452,102 @@ fn a_sequence_made_into_a_preview() {
     assert!(black.iter().all(|c| *c < 20.0), "a gap is black {black:?}");
     let again = at(1.75);
     assert!(again[0] > again[2], "red again {again:?}");
+}
+
+#[test]
+fn a_preview_has_luts_and_dissolves() {
+    use shotline_media::sequence::{Piece, Sequence};
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let red = clip(dir.path(), "red.mp4", RED, false);
+    let blue = clip(dir.path(), "blue.mp4", BLUE, false);
+    // Everything to green, somewhere a filter graph has to be careful with.
+    let cube = dir.path().join("my luts, v1 [x]/green's.cube");
+    std::fs::create_dir_all(cube.parent().unwrap()).unwrap();
+    std::fs::write(&cube, format!("LUT_3D_SIZE 2\n{}", "0 1 0\n".repeat(8))).unwrap();
+    let seq = Sequence {
+        width: 320,
+        height: 180,
+        fps: 24.0,
+        length: 1.5,
+        // Green from the LUT, then blue dissolving in over its last half second.
+        video: vec![
+            Piece {
+                path: red.clone(),
+                label: "red".into(),
+                length: 1.0,
+                speed: 1.0,
+                luts: vec![cube.clone(), dir.path().join("gone.cube")],
+                ..Piece::default()
+            },
+            Piece {
+                path: blue.clone(),
+                label: "blue".into(),
+                start: 0.5,
+                length: 1.0,
+                speed: 1.0,
+                fade_in: Some((0.5, 0.5)),
+                ..Piece::default()
+            },
+        ],
+        audio: vec![],
+    };
+    let out = dir.path().join("seq.mp4");
+    let skipped = ff.sequence_preview(&seq, &out).unwrap();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    let frames: Vec<Vec<u8>> = ff.frames(&out, 320, 180, "24/1", None).unwrap().collect();
+    let at = |t: f64| mean(&frames[(t * 24.0) as usize]);
+    let (g, mix, b) = (at(0.2), at(0.75), at(1.25));
+    assert!(g[1] > 0.6 && g[0] < 0.25 && g[2] < 0.25, "green {g:?}");
+    assert!(
+        mix[1] > 0.45 && mix[1] < 0.85 && mix[2] > 0.15,
+        "half way {mix:?}"
+    );
+    assert!(b[2] > b[1] && b[1] < 0.4, "blue {b:?}");
+}
+
+#[test]
+fn a_match_lut_brings_the_next_clip_closer() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let a = clip(dir.path(), "a.mp4", RED, false);
+    let b = clip(dir.path(), "b.mp4", BLUE, false);
+    let cube = dir.path().join("luts/b.cube");
+    ff.match_lut((&a, 1.0), (&b, 0.0), 5, 1.0, &cube).unwrap();
+    let text = std::fs::read_to_string(&cube).unwrap();
+    assert!(text.contains("LUT_3D_SIZE 33"));
+    assert_eq!(text.lines().count(), 2 + 33 * 33 * 33);
+    let graded = dir.path().join("b-graded.mp4");
+    let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    assert!(
+        Command::new(ffmpeg)
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&b)
+            .arg("-vf")
+            // Relative, since a drive letter's colon would end the option.
+            .arg("lut3d=file=luts/b.cube")
+            .current_dir(dir.path())
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&graded)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let first = |f: &Path| {
+        let info = ff.probe(f).unwrap();
+        ff.frames(f, info.width, info.height, &info.fps, Some(1))
+            .unwrap()
+            .next()
+            .unwrap()
+    };
+    let last_a = {
+        let info = ff.probe(&a).unwrap();
+        ff.frames(&a, info.width, info.height, &info.fps, None)
+            .unwrap()
+            .last()
+            .unwrap()
+    };
+    let before = distance(mean(&last_a), mean(&first(&b)));
+    let after = distance(mean(&last_a), mean(&first(&graded)));
+    assert!(after < before / 2.0, "{before} -> {after}");
 }

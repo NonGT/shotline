@@ -150,6 +150,8 @@ mod tests {
     #[test]
     fn a_cut_with_gaps_and_music() {
         let c = |name: &str, file: Option<&str>, start: f64, length: f64, from: f64| ClipInfo {
+            luts: vec![],
+            id: String::new(),
             name: name.into(),
             file: file.map(Into::into),
             start,
@@ -171,11 +173,13 @@ mod tests {
                     c("01-010#2", Some("/f/a.mp4"), 0.0, 2.0, 0.0),
                     c("title", None, 4.0, 1.0, 0.0),
                 ],
+                transitions: vec![],
             }],
             audio: vec![TrackInfo {
                 name: "A1".into(),
                 enabled: true,
                 clips: vec![c("music.wav", Some("/f/music.wav"), 0.0, 4.0, 0.0)],
+                transitions: vec![],
             }],
         };
         let t = timeline("fan", &cut);

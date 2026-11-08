@@ -1,5 +1,6 @@
 //! A video editor's sequence made into one small file to preview: at each moment the highest
-//! clip that's on, the sound tracks mixed. Effects and transitions are left out.
+//! clip that's on, with its LUTs and dissolves, the sound tracks mixed. Other effects are left
+//! out.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,7 +10,7 @@ use crate::{Error, Ffmpeg, Result, run};
 /// Longest side of the preview, in pixels.
 const LONGEST: u32 = 960;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Piece {
     pub path: PathBuf,
     /// For what's left out, e.g. the clip's name.
@@ -21,6 +22,12 @@ pub struct Piece {
     /// Where in the file it starts.
     pub from: f64,
     pub speed: f64,
+    /// .cube files, applied in order.
+    pub luts: Vec<PathBuf>,
+    /// Comes in over what's under it: (from, seconds), in sequence time.
+    pub fade_in: Option<(f64, f64)>,
+    /// Goes out to what's under it.
+    pub fade_out: Option<(f64, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +68,20 @@ fn tempo(mut speed: f64) -> String {
     parts.iter().map(|p| format!(",{p}")).collect()
 }
 
+/// A path as a filter option's value: escaped for the option, then for the graph.
+fn filter_path(p: &Path) -> String {
+    let esc = |s: &str, special: &str| {
+        s.chars().fold(String::new(), |mut o, c| {
+            if special.contains(c) {
+                o.push('\\');
+            }
+            o.push(c);
+            o
+        })
+    };
+    esc(&esc(&p.to_string_lossy(), "\\':"), "\\'[],;")
+}
+
 /// The preview's size: the sequence's shape, at most `LONGEST`, even.
 pub fn preview_size(width: u32, height: u32) -> (u32, u32) {
     let (w, h) = (width.max(2) as f64, height.max(2) as f64);
@@ -99,11 +120,21 @@ impl Ffmpeg {
             }
             true
         };
-        let video: Vec<&Piece> = seq
-            .video
-            .iter()
-            .filter(|p| usable(p, &mut skipped))
-            .collect();
+        let mut video: Vec<Piece> = vec![];
+        for p in &seq.video {
+            if !usable(p, &mut skipped) {
+                continue;
+            }
+            let mut p = p.clone();
+            p.luts.retain(|l| {
+                let ok = l.is_file();
+                if !ok {
+                    skipped.push(format!("{}: LUT {} isn't a file", p.label, l.display()));
+                }
+                ok
+            });
+            video.push(p);
+        }
         let mut audio = vec![];
         for p in &seq.audio {
             if !usable(p, &mut skipped) {
@@ -137,11 +168,26 @@ impl Ffmpeg {
             }
             cmd.arg("-i").arg(&p.path);
             let end = p.start + p.length;
+            let luts: String = p
+                .luts
+                .iter()
+                .map(|l| format!("lut3d=file={},", filter_path(l)))
+                .collect();
+            let mut fades = String::new();
+            if p.fade_in.is_some() || p.fade_out.is_some() {
+                fades.push_str(",format=yuva420p");
+            }
+            for (way, f) in [("in", p.fade_in), ("out", p.fade_out)] {
+                if let Some((at, d)) = f.filter(|f| f.1 > 0.0) {
+                    fades.push_str(&format!(",fade=t={way}:st={at:.4}:d={d:.4}:alpha=1"));
+                }
+            }
+            // A piece run past its file's end (a dissolve's handle) holds its last frame.
             fc.push(format!(
-                "[{n}:v]setpts=(PTS-STARTPTS)/{s:.6}+{st:.4}/TB,\
+                "[{n}:v]setpts=(PTS-STARTPTS)/{s:.6}+{st:.4}/TB,{luts}\
                  scale={w}:{h}:force_original_aspect_ratio=decrease,\
-                 pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1[c{i}];\
-                 [b{i}][c{i}]overlay=eof_action=pass:enable='between(t,{st:.4},{end:.4})'[b{j}]",
+                 pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1{fades}[c{i}];\
+                 [b{i}][c{i}]overlay=eof_action=repeat:enable='between(t,{st:.4},{end:.4})'[b{j}]",
                 s = p.speed,
                 st = p.start,
                 j = i + 1,
@@ -202,6 +248,13 @@ mod tests {
         assert_eq!(tempo(1.5), ",atempo=1.500000");
         assert_eq!(tempo(4.0), ",atempo=2,atempo=2.000000");
         assert_eq!(tempo(0.25), ",atempo=0.5,atempo=0.500000");
+    }
+
+    #[test]
+    fn paths_in_a_filter_are_escaped_twice() {
+        assert_eq!(filter_path(Path::new("/a/b.cube")), "/a/b.cube");
+        assert_eq!(filter_path(Path::new("C:\\x.cube")), "C\\\\:\\\\\\\\x.cube");
+        assert_eq!(filter_path(Path::new("/a,b.cube")), "/a\\,b.cube");
     }
 
     #[test]

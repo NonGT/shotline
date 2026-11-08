@@ -1,6 +1,7 @@
 //! A cut drawn the way editors draw one: a time ruler, video tracks stacked above the audio
 //! tracks (the highest V on top, A1 right under V1), each clip a block as long as it lasts, and a
-//! playhead. Read only; clicking or dragging along the ruler moves the playhead.
+//! playhead. Clicking or dragging along the ruler moves the playhead; clicking a clip opens its
+//! shot, or picks it when it can be changed.
 
 use std::path::PathBuf;
 
@@ -16,6 +17,19 @@ pub(crate) struct Lane {
     pub sound: bool,
     /// Shown (video) or heard (audio).
     pub enabled: bool,
+    /// Where two of its clips meet, when they can be picked.
+    pub joins: Vec<Join>,
+}
+
+pub(crate) struct Join {
+    pub at: f64,
+    /// The editor's id for the clip after it.
+    pub id: String,
+    /// "01-010#1 to 01-020#1".
+    pub name: String,
+    pub picked: bool,
+    /// A transition across it: where it starts and how long it lasts.
+    pub fade: Option<(f64, f64)>,
 }
 
 pub(crate) struct Block {
@@ -28,11 +42,19 @@ pub(crate) struct Block {
     pub enabled: bool,
     /// A take's shot, to open on click.
     pub shot: Option<ShotRef>,
+    /// The editor's id for it, when it can be picked to change it; a click picks it instead.
+    pub id: Option<String>,
+    pub picked: bool,
 }
 
 pub(crate) enum Hit {
     Seek(f64),
+    /// The playhead being dragged: show the frame there, seek once it's let go.
+    Scrub(f64),
     Open(ShotRef),
+    Pick(String),
+    /// A join, by the clip after it.
+    PickJoin(String),
 }
 
 const HEAD: f32 = 36.0;
@@ -72,10 +94,16 @@ pub(crate) fn show(
     let ruler = Rect::from_min_size(span.min, vec2(span.width(), RULER));
     let seek = ui.interact(ruler, id.with("seek"), Sense::click_and_drag());
     seek.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Playhead"));
-    if (seek.clicked() || seek.dragged())
-        && let Some(at) = seek.interact_pointer_pos()
+    if let Some(at) = seek
+        .interact_pointer_pos()
+        .or_else(|| ui.ctx().pointer_latest_pos())
+        .filter(|_| seek.clicked() || seek.dragged() || seek.drag_stopped())
     {
-        hit = Some(Hit::Seek(t_of(at.x)));
+        if seek.clicked() || seek.drag_stopped() {
+            hit = Some(Hit::Seek(t_of(at.x)));
+        } else if seek.dragged() {
+            hit = Some(Hit::Scrub(t_of(at.x)));
+        }
     }
     p.rect_filled(ruler, 0.0, theme::RACK);
     let step = tick_step(pps);
@@ -129,7 +157,7 @@ pub(crate) fn show(
             let resp = ui.interact(
                 r,
                 id.with((&lane.name, i)),
-                if b.shot.is_some() {
+                if b.shot.is_some() || b.id.is_some() {
                     Sense::click()
                 } else {
                     Sense::hover()
@@ -142,18 +170,18 @@ pub(crate) fn show(
                 (false, true) => theme::VIDEO_CLIP,
                 (true, true) => theme::AUDIO_CLIP,
             };
-            let fill = if resp.hovered() && b.shot.is_some() {
+            let fill = if resp.hovered() && (b.shot.is_some() || b.id.is_some()) {
                 fill.gamma_multiply(1.25)
             } else {
                 fill
             };
             p.rect_filled(r, 2.0, fill);
-            p.rect_stroke(
-                r,
-                2.0,
-                Stroke::new(1.0, theme::LINE),
-                egui::StrokeKind::Inside,
-            );
+            let (width, colour) = if b.picked {
+                (2.0, theme::TUNGSTEN)
+            } else {
+                (1.0, theme::LINE)
+            };
+            p.rect_stroke(r, 2.0, Stroke::new(width, colour), egui::StrokeKind::Inside);
             let inner = r.shrink(3.0);
             let p = p.with_clip_rect(inner);
             let mut text_left = inner.left();
@@ -176,10 +204,51 @@ pub(crate) fn show(
             if !b.hover.is_empty() {
                 resp.clone().on_hover_text(&b.hover);
             }
-            if resp.clicked()
-                && let Some(s) = b.shot
-            {
-                hit = Some(Hit::Open(s));
+            if resp.clicked() {
+                hit = match (&b.id, b.shot) {
+                    (Some(id), _) => Some(Hit::Pick(id.clone())),
+                    (None, Some(s)) => Some(Hit::Open(s)),
+                    (None, None) => hit,
+                };
+            }
+        }
+        for (i, j) in lane.joins.iter().enumerate() {
+            if let Some((start, length)) = j.fade {
+                let band = Rect::from_min_max(
+                    pos2(x_of(start), row.top() + 4.0),
+                    pos2(x_of(start + length), row.bottom() - 4.0),
+                )
+                .intersect(span);
+                p.rect_filled(band, 2.0, theme::TUNGSTEN.gamma_multiply(0.35));
+            }
+            let x = x_of(j.at);
+            let mark = Rect::from_center_size(pos2(x, row.bottom() - 8.0), vec2(14.0, 16.0));
+            let resp = ui.interact(mark, id.with((&lane.name, "join", i)), Sense::click());
+            resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Join {}", j.name))
+            });
+            let colour = if j.picked || resp.hovered() {
+                theme::TUNGSTEN
+            } else {
+                theme::PAPER
+            };
+            let c = mark.center();
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(c.x, c.y - 6.0),
+                    pos2(c.x + 5.0, c.y),
+                    pos2(c.x, c.y + 6.0),
+                    pos2(c.x - 5.0, c.y),
+                ],
+                colour,
+                Stroke::new(1.0, theme::LINE),
+            ));
+            let resp = resp.on_hover_text(match j.fade {
+                Some((_, l)) => format!("{}: dissolve, {l:.2} s", j.name),
+                None => format!("{}: a straight cut", j.name),
+            });
+            if resp.clicked() {
+                hit = Some(Hit::PickJoin(j.id.clone()));
             }
         }
         y += h + GAP;
@@ -187,6 +256,12 @@ pub(crate) fn show(
 
     if let Some(t) = playhead {
         let x = x_of(t.clamp(0.0, length));
+        // A handle to grab in the ruler.
+        p.rect_filled(
+            Rect::from_center_size(pos2(x, ruler.center().y), vec2(9.0, RULER - 4.0)),
+            2.0,
+            theme::TUNGSTEN,
+        );
         p.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
             Stroke::new(1.5, theme::TUNGSTEN),

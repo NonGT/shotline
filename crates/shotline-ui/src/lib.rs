@@ -6,6 +6,7 @@ mod anchor;
 mod browse;
 mod cost;
 mod cut;
+mod cut_tools;
 mod edit;
 mod git;
 mod grouped;
@@ -110,6 +111,41 @@ pub trait Host: Send + Sync {
     /// Free.
     fn sequences(&self, _film: &Path) -> (Vec<EditInfo>, Vec<String>) {
         (vec![], vec![])
+    }
+    /// What one operation outside any shot would cost, e.g. "0.00 USD". Free.
+    fn op_quote(
+        &self,
+        _film: &Path,
+        plugin: &str,
+        _req: &shotline_core::protocol::Request,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("{plugin} can't be run from here")
+    }
+    /// Runs it, if the price is still `at`. Returns what it made.
+    fn run_op(
+        &self,
+        _film: &Path,
+        plugin: &str,
+        _req: &shotline_core::protocol::Request,
+        _at: &str,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("{plugin} can't be run from here")
+    }
+    /// Renders a sequence of an editor's project through its plugin into `out`.
+    fn export_edit(
+        &self,
+        plugin: &str,
+        _ask: &shotline_core::protocol::ExportParams,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("{plugin} can't render")
+    }
+    /// Changes a clip of an editor's sequence through its plugin, and says how to undo it.
+    fn edit_clip(
+        &self,
+        plugin: &str,
+        _ask: &shotline_core::protocol::EditParams,
+    ) -> anyhow::Result<shotline_core::protocol::Edited> {
+        anyhow::bail!("{plugin} can't change clips")
     }
     /// Opens the film's project in an editor plugin's app, made from the cut if there's none.
     fn open_edit(&self, plugin: &str, _ask: &OpenParams) -> anyhow::Result<()> {
@@ -242,6 +278,27 @@ pub struct App {
     seq_playing: Option<(PathBuf, Vec<String>)>,
     /// An editor being asked to open a project: what to call it, and how that went.
     edit_opening: Option<(String, Opened)>,
+    /// The Cut page's player, by what it shows, or why it can't.
+    cut_deck: Option<(String, Result<Deck, String>)>,
+    /// A preview that couldn't be made, and why.
+    seq_failed: Option<(PathBuf, String)>,
+    /// The editor rendering a preview, into this file.
+    full_making: Option<(PathBuf, cut::FullSlot)>,
+    full_failed: Option<(PathBuf, String)>,
+    /// The editor preview wanted now, and since when.
+    seq_seen: Option<(PathBuf, std::time::Instant)>,
+    /// The editor clip picked on the Cut page, by the editor's id.
+    clip_pick: Option<String>,
+    /// The join picked instead, by the editor's id for the clip after it.
+    join_pick: Option<String>,
+    /// How long a dissolve put on a join is, in frames.
+    fade_frames: u32,
+    changing: Option<cut_tools::Changing>,
+    /// Undo for clip changes made from here, read from the film's cache when first needed.
+    undo: Option<Vec<cut_tools::Undo>>,
+    /// A video tool on a clip, waiting for its price to be agreed.
+    process: Option<cut_tools::Process>,
+    edit_rendering: Option<cut_tools::Rendering>,
     shot: Option<ShotRef>,
     takes: Vec<Take>,
     status: Option<(String, bool)>,
@@ -546,6 +603,18 @@ impl App {
             seq_making: None,
             seq_playing: None,
             edit_opening: None,
+            cut_deck: None,
+            seq_failed: None,
+            full_making: None,
+            full_failed: None,
+            seq_seen: None,
+            clip_pick: None,
+            join_pick: None,
+            fade_frames: 12,
+            changing: None,
+            undo: None,
+            process: None,
+            edit_rendering: None,
             shot: None,
             takes: vec![],
             status: None,
@@ -916,6 +985,11 @@ impl App {
     pub fn is_playing(&self) -> bool {
         self.deck.as_ref().is_some_and(Deck::is_playing)
             || self
+                .cut_deck
+                .as_ref()
+                .and_then(|(_, d)| d.as_ref().ok())
+                .is_some_and(Deck::is_playing)
+            || self
                 .in_cut
                 .as_ref()
                 .and_then(|(_, d)| d.as_ref())
@@ -1187,6 +1261,12 @@ impl App {
         // Only on the Shots tab; it doesn't go on playing out of sight.
         if self.tab != Tab::Shots
             && let Some((_, Some(d))) = &mut self.in_cut
+            && d.is_playing()
+        {
+            d.pause(self.audio.as_ref());
+        }
+        if self.tab != Tab::Cut
+            && let Some((_, Ok(d))) = &mut self.cut_deck
             && d.is_playing()
         {
             d.pause(self.audio.as_ref());

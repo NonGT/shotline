@@ -406,6 +406,9 @@ pub struct OpenParams {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Sequences {
     pub edits: Vec<EditInfo>,
+    /// Something to fix on the editor's side, shown on the Cut page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// One editor project, or why it couldn't be read.
@@ -456,11 +459,29 @@ pub struct TrackInfo {
     /// Shown (video) or not muted (audio).
     pub enabled: bool,
     pub clips: Vec<ClipInfo>,
+    /// Dissolves and the like where two clips meet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transitions: Vec<TransitionInfo>,
+}
+
+/// A transition between two clips of a track, by their ids. Times in seconds.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct TransitionInfo {
+    pub id: String,
+    /// "cross_dissolve".
+    pub name: String,
+    pub from: String,
+    pub to: String,
+    pub start: f64,
+    pub length: f64,
 }
 
 /// A clip on a track. Times in seconds.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ClipInfo {
+    /// The editor's own id for it, to ask for changes to it by.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     /// None for what isn't a file: a nested sequence, a title, a generator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -472,6 +493,74 @@ pub struct ClipInfo {
     pub from: f64,
     pub speed: f64,
     pub enabled: bool,
+    /// LUTs the editor puts on it, in the order it applies them: .cube files, or the editor's
+    /// own names for ones it has built in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub luts: Vec<PathBuf>,
+}
+
+/// Params of `edit`: one change to a clip of an editor's sequence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditParams {
+    pub film: PathBuf,
+    /// The project, as `sequences` named it.
+    pub file: PathBuf,
+    #[serde(default)]
+    pub sequence: String,
+    /// The clip's `id` from `sequences`.
+    #[serde(default)]
+    pub clip: String,
+    pub change: Change,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Change {
+    /// Puts `file` over the clip, from `from` seconds into it, at the same place and length.
+    /// The clip's sound stays when the file has none.
+    Replace { file: PathBuf, from: f64 },
+    /// The clip's input LUT, a `.cube` file; none takes it off.
+    Lut {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<PathBuf>,
+    },
+    /// Matches the clip's colour to the sequence's frame at `to` seconds.
+    Match { to: f64 },
+    /// A dissolve this many frames long into the clip from the one before it, centred on the
+    /// cut; 0 takes the one there off.
+    Crossfade { frames: u32 },
+    /// Takes an earlier change back: its `undo`, as the plugin gave it.
+    Undo { steps: serde_json::Value },
+}
+
+/// Params of `export`: a sequence of an editor project rendered to a video file.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ExportParams {
+    pub film: PathBuf,
+    pub file: PathBuf,
+    pub sequence: String,
+    /// Where the video goes; its extension says the format.
+    pub out: PathBuf,
+    /// Render the project as saved, leaving an open editor alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub saved: bool,
+}
+
+/// What `export` made.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Exported {
+    pub file: PathBuf,
+}
+
+/// What `edit` did.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Edited {
+    /// How to take it back, for a later `Change::Undo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo: Option<serde_json::Value>,
+    /// In the project file now; false when it's in the open editor, not saved yet.
+    #[serde(default)]
+    pub saved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

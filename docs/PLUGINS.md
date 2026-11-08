@@ -227,16 +227,24 @@ film, read only, for the Cut page. It must be free to call.
   "sequences": [
   {"name": "Main edit", "width": 720, "height": 1280, "fps": 23.976,
    "video": [{"name": "Video 1", "enabled": true, "clips": [
-     {"name": "01-010#1", "file": "/path/to/film/jobs/01K.../out.mp4", "start": 0, "length": 2,
-      "from": 0.5, "speed": 1, "enabled": true}]}],
+     {"id": "29", "name": "01-010#1", "file": "/path/to/film/jobs/01K.../out.mp4", "start": 0,
+      "length": 2, "from": 0.5, "speed": 1, "enabled": true}]}],
    "audio": []}]}]}
 ```
+
+A track may also list `transitions`, each `{"id", "name", "from", "to", "start", "length"}` with
+`from` and `to` the ids of the clips it joins, so the Cut page can show them.
 
 Times are seconds. `video` starts at V1, `audio` at A1. A clip that isn't a file (a title, a
 nested sequence) has no `file`; one in a take's job folder shows as that take. A project that
 can't be read comes back with an `error` and no sequences, so the others still show. shotline
 asks again when the film is read again or a file in `shared/` (or a project's own file)
-changes. `app` names the editor for people, as in the Cut page's "Open in FilmCraft".
+changes. `app` names the editor for people, as in the Cut page's "Open in FilmCraft". `id` is the
+editor's own name for a clip, for `edit`; leave it out if the editor can't be told to change one.
+A clip's `luts` lists the LUTs the editor puts on it, in order: .cube files, or the editor's own
+name for a built-in one (the preview leaves those out). A
+`warnings` list next to `edits` (strings) shows on the Cut page as is, for problems on the
+editor's side the user has to fix, like a filmcraft-cli that doesn't match the app's version.
 
 ### open (optional)
 
@@ -254,6 +262,41 @@ sequence above (the selected takes back to back on V1, their sound on A1, music 
 With a new project, `takes` lists every finished take of the film, as in `import` below. A plugin
 keeps what it makes under `shared/<plugin name>/`, and only lets the editor itself write its
 project file. Returns `{}` once the editor shows it.
+
+### edit (optional)
+
+For an editor plugin: one change to a clip of a sequence from `sequences`, made by the editor
+itself (never by writing its project file). Params:
+
+```json
+{"film": "/path/to/film", "file": "/path/to/film/shared/filmcraft/fan.fcproj",
+ "sequence": "Main edit", "clip": "29",
+ "change": {"kind": "replace", "file": "/path/to/film/jobs/01K.../out.mp4", "from": 0.5}}
+```
+
+`change` is one of:
+
+- `{"kind": "replace", "file", "from"}`: the file over the clip, from `from` seconds into it, at the
+  same place and length; the clip's sound stays when the file has none
+- `{"kind": "lut", "file"}`: the clip's input LUT (`.cube`); without `file` it comes off
+- `{"kind": "match", "to"}`: the clip's colour matched to the sequence's frame at `to` seconds
+- `{"kind": "crossfade", "frames"}`: a dissolve that many frames long into the clip from the one
+  before, centred on the cut; 0 takes the one there off
+- `{"kind": "undo", "steps"}`: takes an earlier change back
+
+Returns `{"undo": ..., "saved": true}`. `undo` is whatever the plugin needs to take the change
+back; shotline keeps it as it is and sends it as `steps` to undo. It should only touch what the
+change touched, so edits made in the editor since stay. `saved` says the change is in the
+project file; false when it's only in the open editor so far. An editor that can't be reached
+answers with an error saying why.
+
+### export (optional)
+
+For an editor plugin: renders a sequence with the editor's own renderer and waits for the file.
+Params: `{"film", "file", "sequence", "out", "saved"}`, with `out` the video to write (its
+extension says the format). With `"saved": true` it renders the file as saved, without going
+through an open editor, so changes not saved yet are left out; shotline asks for that for the cut
+page preview. Returns `{"file": "/path/to/film/renders/Main_edit-20261107-221500.mp4"}`.
 
 ### import (optional)
 

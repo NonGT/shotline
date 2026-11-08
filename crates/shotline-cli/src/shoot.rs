@@ -642,6 +642,16 @@ pub fn run(p: &Project, a: RunArgs) -> Result<()> {
     Ok(())
 }
 
+/// Runs one operation outside any shot if it still costs `at`; its first output.
+pub fn op_at(p: &Project, plugin: &str, req: &Request, at: &str) -> Result<PathBuf> {
+    let job = spend_once(p, plugin, req, None, &req.op.to_string(), None, Go::At(at))?
+        .ok_or_else(|| anyhow::anyhow!("nothing spent"))?;
+    match job.outputs.first() {
+        Some(f) => Ok(p.job_dir(job.id).join(f)),
+        None => bail!("{plugin} made nothing"),
+    }
+}
+
 pub fn job_cost(job: &Job) -> String {
     job.cost
         .as_ref()
