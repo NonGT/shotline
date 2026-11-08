@@ -474,6 +474,10 @@ enum ShotCmd {
         duration: Option<f64>,
         #[arg(long)]
         transition: Option<Transition>,
+        /// For a continue shot: the take of the shot before to start on, e.g. 3 or #3, instead of
+        /// the one it has
+        #[arg(long)]
+        continue_from: Option<String>,
         /// How lines are spoken: spoken, lip-synced, a recipe from shotline.toml, or "" for not
         /// at all
         #[arg(long)]
@@ -954,6 +958,7 @@ fn run(cli: Cli) -> Result<()> {
             ref frame_prompt,
             duration,
             transition,
+            ref continue_from,
             ref recipe,
             ref model,
             ref plugin,
@@ -1005,6 +1010,18 @@ fn run(cli: Cli) -> Result<()> {
             }
             s.duration = duration.or(s.duration);
             s.transition = transition.unwrap_or(s.transition);
+            if s.transition == Transition::Cut {
+                s.continue_from = None;
+            } else if let Some(t) = continue_from {
+                let Some(prev) = p.previous_shot(shot)? else {
+                    bail!("{shot} is the first shot, there's nothing to continue from");
+                };
+                let t = p.take(prev, t)?;
+                if t.output().is_none() {
+                    bail!("{t} is {}, it has no last frame", t.status());
+                }
+                s.continue_from = Some(t.id.to_string());
+            }
             p.save_shot(shot, &s)?;
             println!("{shot} saved");
         }
@@ -1264,6 +1281,17 @@ fn run(cli: Cli) -> Result<()> {
             let p = open()?;
             let t = p.select_take(shot, &take)?;
             println!("{t} selected");
+            if let Some(next) = p.next_shot(shot)?
+                && p.shot(next)?.transition == shotline_core::Transition::Continue
+                && let Some(from) = p.continued_take(next)?
+                && from.id != t.id
+            {
+                println!(
+                    "{next} still starts on {from}'s last frame; \
+                     `shotline shot set {next} --continue-from {}` moves it",
+                    t.number
+                );
+            }
             // Kept to pick from in the app, and for a shot continuing from this one.
             let video = t
                 .output()

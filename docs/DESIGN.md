@@ -68,6 +68,7 @@ plot = "พักเท้ากลางทาง มะลิถ่ายค�
 prompt = "Handheld medium shot, @mali films a check-in while @kan argues with @paka ..."
 duration = 8
 transition = "continue"    # or "cut"
+continue_from = "01JBX9Q4..."   # continue shots: the take of the shot before it starts on
 recipe = "talking"         # optional, project default otherwise
 elements = ["paka", "kan", "mali", "deep-forest"]
 selected_take = "01JBX9Q3T7K2M8V5N4R6P1W0YZ"
@@ -404,8 +405,12 @@ to the pixel, and the app says so in amber rather than refusing. Models that dec
 
 ## Continuity
 
-For a continue shot, the last frame of the previous shot's selected take is sent as the start frame
-along with the references. Not every model accepts a start frame and references together (Venice's
+For a continue shot, the last frame of a take of the previous shot is sent as the start frame along
+with the references. The shot keeps which take in `continue_from`: the one in the cut when continue
+was turned on, or when no take is named, the one in the cut now. Putting another take of the shot
+before in the cut asks first and leaves the continue shot on the old frame; the shot's page then
+offers the new one ("Use new previous shot last frame", or `shot set --continue-from`). A take a
+continue shot starts on can't be removed. Not every model accepts a start frame and references together (Venice's
 h3 doesn't); `shotline prompt` says so before you pay for anything.
 
 The frame is taken with ffmpeg the first time a take of the continue shot is quoted, and kept as

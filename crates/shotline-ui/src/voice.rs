@@ -536,10 +536,7 @@ impl App {
         } else if ui
             .add_enabled(full.is_none(), egui::Button::new("Add line"))
             .on_disabled_hover_text(full.map_or(String::new(), |(max, model)| {
-                format!(
-                    "{model} takes at most {max} lines, one clip each; \
-                     have them lip synced after for more"
-                )
+                format!("{model} takes at most {max} lines, one clip each")
             }))
             .clicked()
         {

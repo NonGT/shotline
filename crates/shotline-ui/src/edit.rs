@@ -25,6 +25,8 @@ pub(crate) struct Form {
     pub frame_prompt: String,
     pub duration: f64,
     pub transition: Transition,
+    /// The take of the shot before it starts on, by id; None for that shot's selected take.
+    pub continue_from: Option<String>,
     pub recipe: Option<String>,
     /// Plugin and model instead of the film's.
     pub model: Option<(String, String)>,
@@ -187,6 +189,7 @@ pub(crate) enum Field {
     FramePrompt(String),
     Duration(f64),
     Transition(Transition),
+    ContinueFrom(Option<String>),
     Recipe(Option<String>),
     Model(Option<(String, String)>),
     Resolution(Option<String>),
@@ -329,7 +332,17 @@ impl Action {
                 }
                 out
             }
-            Action::Select(t) => p.shot_path(t.shot).into_iter().collect(),
+            // The shot after may be kept on the take it started from.
+            Action::Select(t) => p
+                .shot_path(t.shot)
+                .into_iter()
+                .chain(
+                    p.next_shot(t.shot)
+                        .ok()
+                        .flatten()
+                        .and_then(|n| p.shot_path(n).ok()),
+                )
+                .collect(),
             Action::RemoveTake(t) => p
                 .shot_path(t.shot)
                 .into_iter()
@@ -495,6 +508,7 @@ impl Form {
             frame_prompt: s.frame_prompt.clone().unwrap_or_default(),
             duration: s.duration.unwrap_or(default_duration),
             transition: s.transition,
+            continue_from: s.continue_from.clone(),
             recipe: s.recipe.clone(),
             model: video_model(s),
             resolution: s.model.as_ref().and_then(|m| m.resolution.clone()),
@@ -528,6 +542,10 @@ impl Form {
         set(
             self.transition != s.transition,
             Field::Transition(self.transition),
+        );
+        set(
+            self.continue_from != s.continue_from,
+            Field::ContinueFrom(self.continue_from.clone()),
         );
         set(self.recipe != s.recipe, Field::Recipe(self.recipe.clone()));
         set(
@@ -729,6 +747,7 @@ impl App {
                         s.duration = Some(d);
                     }
                     Field::Transition(t) => s.transition = t,
+                    Field::ContinueFrom(t) => s.continue_from = t,
                     Field::Recipe(rc) => s.recipe = rc,
                     Field::Model(m) => s.set_video_model(m),
                     Field::Resolution(r) => s.set_resolution(r),
@@ -783,13 +802,20 @@ impl App {
                     .output()
                     .and_then(|j| j.outputs.first().map(|f| p.job_dir(j.id).join(f)));
                 let last = p.last_frame(&t).filter(|f| !f.is_file());
-                match (&self.ff, video, last) {
-                    (Some(ff), Some(v), Some(png)) => match ff.last_frame(&v, &png) {
-                        Ok(()) => format!("{t} selected").into(),
-                        Err(e) => format!("{t} selected; can't take its last frame: {e}").into(),
-                    },
-                    _ => format!("{t} selected").into(),
+                let mut said = format!("{t} selected");
+                if let Some(next) = p.next_shot(t.shot)?
+                    && p.shot(next)?.transition == Transition::Continue
+                    && let Some(from) = p.continued_take(next)?
+                    && from.id != t.id
+                {
+                    said += &format!("; {next} still starts on {from}'s last frame");
                 }
+                if let (Some(ff), Some(v), Some(png)) = (&self.ff, video, last)
+                    && let Err(e) = ff.last_frame(&v, &png)
+                {
+                    said += &format!("; can't take its last frame: {e}");
+                }
+                said.into()
             }
             Action::RemoveTake(t) => {
                 let t = p.remove_take(t.shot, &t.number.to_string())?;

@@ -362,6 +362,9 @@ pub struct ShotSet {
     frame_prompt: Option<String>,
     duration: Option<f64>,
     transition: Option<String>,
+    /// For a continue shot: the take number of the shot before whose last frame it starts on,
+    /// instead of the one it has. Selecting another take of that shot doesn't move it.
+    continue_from: Option<String>,
     /// How lines are spoken: "spoken" (the video model lip syncs them), "lip-synced" (lip
     /// synced after), a recipe from shotline.toml, or "" for not at all
     recipe: Option<String>,
@@ -796,6 +799,7 @@ impl Server {
         opt(&mut args, "--frame-prompt", p.frame_prompt);
         opt(&mut args, "--duration", p.duration);
         opt(&mut args, "--transition", p.transition);
+        opt(&mut args, "--continue-from", p.continue_from);
         opt(&mut args, "--recipe", p.recipe);
         opt(&mut args, "--model", p.model);
         opt(&mut args, "--plugin", p.plugin);

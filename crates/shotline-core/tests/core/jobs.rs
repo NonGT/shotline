@@ -231,3 +231,39 @@ fn made_images_and_what_they_were_for() {
     p.set_discarded(frame.id, true).unwrap();
     assert_eq!(p.made_images().unwrap().len(), 3);
 }
+
+#[test]
+fn a_continue_shot_keeps_the_take_it_started_on() {
+    let (_d, p, a) = project();
+    take(&p, a, 1, JobStatus::Done);
+    take(&p, a, 1, JobStatus::Done);
+    let b = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                prompt: "y".into(),
+                transition: shotline_core::Transition::Continue,
+                ..Shot::default()
+            },
+        )
+        .unwrap();
+    let first = p.select_take(a, "1").unwrap();
+    assert_eq!(p.continued_take(b).unwrap().unwrap().id, first.id);
+    assert_eq!(p.continued_by(a, &first).unwrap(), Some(b));
+    let e = p.remove_take(a, "1").unwrap_err().to_string();
+    assert!(e.contains("continues from"), "{e}");
+
+    // Another take in the cut; the shot after still starts where it did.
+    let second = p.select_take(a, "2").unwrap();
+    assert_eq!(p.shot(b).unwrap().continue_from, Some(first.id.to_string()));
+    assert_eq!(p.continued_take(b).unwrap().unwrap().id, first.id);
+    assert_eq!(p.continued_by(a, &second).unwrap(), None);
+    assert!(p.remove_take(a, "1").is_err());
+
+    let mut s = p.shot(b).unwrap();
+    s.continue_from = Some(second.id.to_string());
+    p.save_shot(b, &s).unwrap();
+    p.remove_take(a, "1").unwrap();
+    assert!(p.remove_take(a, "2").is_err());
+}

@@ -573,3 +573,17 @@ fn outfit_can_be_left_free() {
             .ends_with("face and hair exactly as in their reference images.")
     );
 }
+
+#[test]
+fn continue_keeps_its_frame_when_the_cut_changes() {
+    let (_d, p) = film();
+    let first = add(&p, "@paka walks in.", |_| {});
+    finished_take(&p, first);
+    finished_take(&p, first);
+    p.select_take(first, "1").unwrap();
+    let r = add(&p, "@paka stops.", |s| s.transition = Transition::Continue);
+    p.select_take(first, "2").unwrap();
+    let job = p.takes(first).unwrap()[0].output().unwrap().id;
+    let sf = build(&p, r).unwrap().start_frame.unwrap();
+    assert_eq!(sf.path, format!("jobs/{job}/last.png"));
+}

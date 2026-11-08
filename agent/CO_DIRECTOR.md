@@ -43,6 +43,9 @@ the ... budget", stop and tell the user. Never raise a budget or retry around it
    it to have a selected take first, so shoot in order.
 8. Pick: `takes` lists them with their files. Let the user watch and choose, then `select`.
    Offer another take or a prompt change if none works; don't pick for them.
+   Selecting another take for a shot that the next one continues from leaves the next shot on
+   the old take's last frame; `select` says so. Ask before moving it with `shot_set`
+   `continue_from`.
 9. Cut: `timeline` shows what's ready, `timeline_render` joins it. Music and sound tracks are set
    in timeline.toml.
 10. `cost` shows what the film has cost so far.

@@ -70,6 +70,10 @@ pub struct Shot {
     pub elements: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_take: Option<String>,
+    /// For a continue shot, the take of the shot before whose last frame it starts on; without
+    /// one, that shot's selected take.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_from: Option<String>,
     /// Name of a recipe in shotline.toml; without one a take is a single video.generate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
@@ -631,6 +635,16 @@ impl Project {
             .map(|(r, _)| r)
             .take_while(|&x| x != r)
             .last())
+    }
+
+    /// The shot after `r` in film order.
+    pub fn next_shot(&self, r: ShotRef) -> Result<Option<ShotRef>> {
+        Ok(self
+            .shots(None)?
+            .into_iter()
+            .map(|(r, _)| r)
+            .skip_while(|&x| x != r)
+            .nth(1))
     }
 
     /// Adds a shot to a chapter. Handles mentioned in the prompt are added to `elements`
