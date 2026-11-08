@@ -255,7 +255,7 @@ impl Player {
         let Some(f) = frames.get(n) else {
             return;
         };
-        let image = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], &f.rgba);
+        let image = egui::ColorImage::from_rgba_premultiplied([*w as usize, *h as usize], &f.rgba);
         match &mut self.tex {
             Some(tex) => tex.set(image, Default::default()),
             None => self.tex = Some(ctx.load_texture(&self.label, image, Default::default())),
@@ -369,7 +369,8 @@ impl Player {
         };
         if let Some(f) = frames.at(t) {
             self.waiting = false;
-            let image = egui::ColorImage::from_rgba_unmultiplied(
+            // Video is opaque, so as premultiplied it needs no converting.
+            let image = egui::ColorImage::from_rgba_premultiplied(
                 [frames.width as usize, frames.height as usize],
                 &f.rgba,
             );
