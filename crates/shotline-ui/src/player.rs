@@ -287,12 +287,13 @@ impl Player {
             .unwrap_or(0)
             .min(self.clips.len() - 1);
         let clip = &self.clips[self.index];
-        let local = (t - clip.at).max(0.0);
         let (w, h) = preview_size(clip.info.width, clip.info.height, PREVIEW);
         let fps = match clip.info.fps_value() {
             f if f > 0.0 => f,
             _ => 24.0,
         };
+        // Decoding from the very end gives no frame at all, so start on the last one.
+        let local = (t - clip.at).min(clip.info.duration - 1.0 / fps).max(0.0);
         self.frames = None;
         self.pcm = None;
         self.clock = Clock::at(local);
@@ -678,6 +679,37 @@ impl Deck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_last_frame_comes_sharp_after_a_scrub() {
+        let Ok(ff) = Ffmpeg::find() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("a.mp4");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc=size=640x360:rate=24:duration=2")
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let ctx = egui::Context::default();
+        let mut p = Player::new(&ff, "a", &[clip]).unwrap();
+        let start = Instant::now();
+        while p.strips.lock().unwrap().is_empty() {
+            assert!(start.elapsed().as_secs() < 10);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let end = p.duration();
+        p.scrub(&ctx, end);
+        assert_eq!(p.tex.as_ref().unwrap().size()[0], 240);
+        p.seek(end, None);
+        let start = Instant::now();
+        while p.tex.as_ref().unwrap().size()[0] != 640 {
+            assert!(start.elapsed().as_secs() < 5, "still the strip's frame");
+            p.update(&ctx, None, false, Instant::now());
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     /// Needs a sound device, so it only runs by hand: `cargo test -p shotline-ui -- --ignored`.
     #[test]
