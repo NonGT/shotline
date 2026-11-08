@@ -260,3 +260,49 @@ fn a_done_take_goes_to_the_editors() {
     let file = std::path::PathBuf::from(t["file"].as_str().unwrap());
     assert!(file.is_absolute() && file.is_file(), "{}", file.display());
 }
+
+#[test]
+fn a_continue_shot_stays_on_its_take() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    for _ in 0..2 {
+        shotline(&tmp)
+            .args(["take", "01-010"])
+            .write_stdin("y\n")
+            .assert()
+            .success();
+    }
+    shotline(&tmp)
+        .args(["select", "01-010#1"])
+        .assert()
+        .success();
+    shotline(&tmp)
+        .args(["shot", "set", "01-020", "--transition", "continue"])
+        .assert()
+        .success();
+    shotline(&tmp)
+        .args(["select", "01-010#2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "01-020 still starts on 01-010#1's last frame",
+        ));
+    let shot = || std::fs::read_to_string(tmp.path().join("film/chapters/01-one/shots/020.toml"));
+    assert!(shot().unwrap().contains("continue_from"));
+    shotline(&tmp)
+        .args(["shot", "set", "01-020", "--continue-from", "2"])
+        .assert()
+        .success();
+    shotline(&tmp)
+        .args(["select", "01-010#1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "01-020 still starts on 01-010#2's last frame",
+        ));
+    shotline(&tmp)
+        .args(["shot", "set", "01-020", "--transition", "cut"])
+        .assert()
+        .success();
+    assert!(!shot().unwrap().contains("continue_from"));
+}

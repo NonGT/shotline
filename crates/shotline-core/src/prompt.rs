@@ -184,12 +184,12 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
             None => warnings.push("first shot can't continue from anything, it's a cut".into()),
             Some(prev) => {
                 check_start_frame(spec, &references, &mut warnings);
-                let selected = project.shot(prev)?.selected_take;
-                match (selected.is_some(), project.selected_take(prev)?) {
+                let named =
+                    shot.continue_from.is_some() || project.shot(prev)?.selected_take.is_some();
+                match (named, project.continued_take(r)?) {
                     (_, Some(take)) => {
-                        let job = take.output().expect("only done takes get selected");
-                        match job.outputs.first() {
-                            Some(file) => {
+                        match take.output().and_then(|j| Some((j, j.outputs.first()?))) {
+                            Some((job, file)) => {
                                 start_frame = Some(StartFrame {
                                     from: Some(prev),
                                     path: format!("jobs/{}/last.png", job.id),
@@ -200,6 +200,9 @@ pub fn build(project: &Project, catalog: &Catalog, r: ShotRef) -> Result<Built> 
                                 .push(format!("{take} made no file, so there's no start frame")),
                         }
                     }
+                    (true, None) if shot.continue_from.is_some() => warnings.push(format!(
+                        "the take of {prev} it continues from is gone, so there's no start frame"
+                    )),
                     (true, None) => warnings.push(format!(
                         "{prev}'s selected take is gone, so there's no start frame"
                     )),

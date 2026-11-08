@@ -30,8 +30,8 @@ use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
 use shotline_core::protocol::{Description, EditInfo, ModelInfo, Op, OpenParams, VoiceInfo};
 use shotline_core::{
-    Chapter, CutShot, Element, Git, JobStatus, Kind, LIP_SYNCED, Project, SPOKEN, Shot, ShotRef,
-    Take, Timeline, Transition,
+    Chapter, CutShot, Element, Git, JobStatus, Kind, Project, SPOKEN, Shot, ShotRef, Take,
+    Timeline, Transition,
 };
 use shotline_media::Ffmpeg;
 
@@ -301,6 +301,12 @@ pub struct App {
     edit_rendering: Option<cut_tools::Rendering>,
     shot: Option<ShotRef>,
     takes: Vec<Take>,
+    /// The shot before's takes, for one continuing from it.
+    prev_takes: Vec<Take>,
+    /// The shot after, when it continues from one of this shot's takes, and that take's id.
+    continued: Option<(ShotRef, String)>,
+    /// A take to use in the cut once it's agreed the shot after keeps its start.
+    confirm_select: Option<Take>,
     status: Option<(String, bool)>,
     /// The job that made the zoomed picture, once Details is asked for.
     zoom_details: Option<(PathBuf, Option<shotline_core::Job>)>,
@@ -423,7 +429,40 @@ fn decode(path: &Path, px: u32) -> Option<egui::ColorImage> {
 pub(crate) const THUMB: u32 = 512;
 const BIG: u32 = 2048;
 /// The zoomed picture seen whole.
-const FIT: (f32, egui::Pos2) = (1.0, egui::pos2(0.5, 0.5));
+pub(crate) const FIT: (f32, egui::Pos2) = (1.0, egui::pos2(0.5, 0.5));
+
+/// Pinch and scroll over `rect` to zoom and look around a picture, drag to move it, double-click
+/// to see it whole. `view` is how far in and the middle of what shows, 0-1 across. Gives the part
+/// of the picture to draw.
+pub(crate) fn pan_zoom(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    r: &egui::Response,
+    view: &mut (f32, egui::Pos2),
+) -> egui::Rect {
+    let (scale, mid) = view;
+    if r.hovered() {
+        let (pinch, scroll, at) =
+            ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos()));
+        if pinch != 1.0 {
+            // The spot under the fingers stays put.
+            let off = (at.unwrap_or(rect.center()) - rect.center()) / rect.size();
+            let under = *mid + off / *scale;
+            *scale = (*scale * pinch).clamp(1.0, 8.0);
+            *mid = under - off / *scale;
+        } else if *scale > 1.0 {
+            *mid -= scroll / rect.size() / *scale;
+        }
+    }
+    *mid -= r.drag_delta() / rect.size() / *scale;
+    if r.double_clicked() {
+        *view = FIT;
+    }
+    let (scale, mid) = view;
+    let half = 0.5 / *scale;
+    *mid = mid.clamp(egui::pos2(half, half), egui::pos2(1.0 - half, 1.0 - half));
+    egui::Rect::from_center_size(*mid, egui::Vec2::splat(2.0 * half))
+}
 /// An anchor's card on an element's page, two to a row; the picture's box is the same for all.
 const ANCHOR_CARD: f32 = 290.0;
 const ANCHOR_IMAGE: egui::Vec2 = egui::vec2(128.0, 96.0);
@@ -617,6 +656,9 @@ impl App {
             edit_rendering: None,
             shot: None,
             takes: vec![],
+            prev_takes: vec![],
+            continued: None,
+            confirm_select: None,
             status: None,
             zoom_details: None,
             zoom_view: FIT,
@@ -1081,9 +1123,25 @@ impl App {
     }
 
     fn load_takes(&mut self) -> anyhow::Result<()> {
-        self.takes = match self.shot {
-            Some(r) => self.project.takes(r)?,
-            None => vec![],
+        let p = &self.project;
+        (self.takes, self.prev_takes, self.continued) = match self.shot {
+            Some(r) => {
+                let prev = match p.previous_shot(r)? {
+                    Some(prev) => p.takes(prev)?,
+                    None => vec![],
+                };
+                let mut continued = None;
+                if let Some(next) = p.next_shot(r)? {
+                    let n = p.shot(next)?;
+                    if n.transition == Transition::Continue
+                        && let Some(id) = n.continue_from.or(p.shot(r)?.selected_take)
+                    {
+                        continued = Some((next, id));
+                    }
+                }
+                (p.takes(r)?, prev, continued)
+            }
+            None => (vec![], vec![], None),
         };
         self.load_recordings()
     }
@@ -1331,34 +1389,9 @@ impl App {
                     let size = t.size_vec2();
                     let size = size * (max / size).min_elem().min(1.0);
                     let (rect, img) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                    let (scale, mid) = &mut self.zoom_view;
-                    if img.hovered() {
-                        let (pinch, scroll, at) = ui.input(|i| {
-                            (i.zoom_delta(), i.smooth_scroll_delta, i.pointer.hover_pos())
-                        });
-                        if pinch != 1.0 {
-                            // The spot under the fingers stays put.
-                            let off = (at.unwrap_or(rect.center()) - rect.center()) / rect.size();
-                            let under = *mid + off / *scale;
-                            *scale = (*scale * pinch).clamp(1.0, 8.0);
-                            *mid = under - off / *scale;
-                        } else if *scale > 1.0 {
-                            *mid -= scroll / rect.size() / *scale;
-                        }
-                    }
-                    *mid -= img.drag_delta() / rect.size() / *scale;
-                    let half = 0.5 / *scale;
-                    *mid = mid.clamp(egui::pos2(half, half), egui::pos2(1.0 - half, 1.0 - half));
-                    ui.painter().image(
-                        t.id(),
-                        rect,
-                        egui::Rect::from_center_size(*mid, egui::Vec2::splat(2.0 * half)),
-                        egui::Color32::WHITE,
-                    );
-                    let zoomed = *scale > 1.0;
-                    if img.double_clicked() {
-                        self.zoom_view = FIT;
-                    }
+                    let uv = pan_zoom(ui, rect, &img, &mut self.zoom_view);
+                    ui.painter().image(t.id(), rect, uv, egui::Color32::WHITE);
+                    let zoomed = self.zoom_view.0 > 1.0;
                     // Clicking closes it, unless it's pinched in.
                     close = img.clicked() && !zoomed;
                     img.widget_info(|| {
@@ -2129,10 +2162,9 @@ impl App {
             let mut picks: Vec<(Option<String>, String)> = vec![
                 (None, "no".into()),
                 (Some(SPOKEN.into()), "by the video model".into()),
-                (Some(LIP_SYNCED.into()), "lip synced after".into()),
             ];
             for rc in self.project.config.recipes.keys() {
-                if rc != SPOKEN && rc != LIP_SYNCED {
+                if rc != SPOKEN {
                     picks.push((Some(rc.clone()), format!("recipe {rc}")));
                 }
             }
@@ -2157,8 +2189,7 @@ impl App {
                 .response
                 .on_hover_text(
                     "by the video model: each line is made with the speaker's voice and sent \
-                     along for the video model to lip sync. Lip synced after: the video is \
-                     made as usual, then lip synced with WaveSpeed.",
+                     along for the video model to lip sync",
                 )
                 .labelled_by(l.id);
         });
@@ -2194,15 +2225,18 @@ impl App {
     /// from the shot before, which needs that one's selected take.
     fn start(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
         let prev = self.project.previous_shot(r).ok().flatten();
-        let ready = prev.is_some_and(|p| {
+        let selected = prev.and_then(|p| {
             self.film
                 .chapters
                 .iter()
                 .flat_map(|(_, s)| s)
-                .any(|(x, s)| *x == p && s.selected_take.is_some())
+                .find(|(x, _)| *x == p)
+                .and_then(|(_, s)| s.selected_take.clone())
         });
+        let ready = selected.is_some();
         let f = &mut self.form;
-        let mut on = f.transition == Transition::Continue;
+        let was = f.transition == Transition::Continue;
+        let mut on = was;
         // Left on, it can still be turned off.
         ui.add_enabled(
             on || ready,
@@ -2217,19 +2251,28 @@ impl App {
         } else {
             Transition::Cut
         };
+        if on != was {
+            // Started from the take in the cut now, and kept on it.
+            f.continue_from = if on { selected.clone() } else { None };
+        }
         if on {
-            let why = match (prev, ready) {
-                (Some(p), true) => {
-                    format!("On the last frame of {p}'s selected take, colour matched in the cut.")
+            match prev {
+                Some(p) => {
+                    ui.add_space(8.0);
+                    egui::Frame::new()
+                        .stroke(egui::Stroke::new(1.0, theme::LINE))
+                        .corner_radius(4.0)
+                        .inner_margin(10.0)
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            self.continued_frame(ui, p, selected);
+                        });
                 }
-                (Some(p), false) => {
-                    format!("{p} has no selected take yet, so there's nothing to carry on from.")
-                }
-                (None, _) => {
-                    "It's the first shot, so there's nothing before it to carry on from.".into()
-                }
-            };
-            hint(ui, &why);
+                None => hint(
+                    ui,
+                    "It's the first shot, so there's nothing before it to carry on from.",
+                ),
+            }
             return;
         }
         ui.add_space(8.0);
@@ -2241,6 +2284,81 @@ impl App {
                 ui.set_width(ui.available_width());
                 self.frame(ui, r, s);
             });
+    }
+
+    /// The last frame of the shot before's take that this one starts on, and a way onto the take
+    /// in the cut when that's another.
+    fn continued_frame(&mut self, ui: &mut egui::Ui, prev: ShotRef, selected: Option<String>) {
+        heading(ui, "Previous shot last frame").on_hover_text(
+            "The first frame of the video, carried on from the shot before and colour matched in \
+             the cut.",
+        );
+        ui.add_space(8.0);
+        let from = self.form.continue_from.clone().or(selected.clone());
+        let take = from
+            .as_ref()
+            .and_then(|id| self.prev_takes.iter().find(|t| t.id.to_string() == *id));
+        match take {
+            Some(t) => {
+                let video = t
+                    .output()
+                    .and_then(|j| Some(self.project.job_dir(j.id).join(j.outputs.first()?)));
+                if let (Some(png), Some(video)) = (self.project.last_frame(t), video) {
+                    let name = format!("last frame of {t}");
+                    if png.is_file() {
+                        if self.thumbs.show(ui, &png, 150.0, &name) {
+                            self.zoom = Some(png);
+                        }
+                    } else {
+                        make_still(
+                            ui.ctx(),
+                            (self.ff.as_ref(), &self.posters),
+                            &video,
+                            &png,
+                            true,
+                        );
+                        let (rect, r) = ui.allocate_exact_size(
+                            egui::vec2(150.0 * 16.0 / 9.0, 150.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 2.0, theme::RACK);
+                        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, &name));
+                    }
+                }
+                ui.label(
+                    RichText::new(format!("{t}'s last frame"))
+                        .small()
+                        .color(theme::DUST),
+                );
+            }
+            None => {
+                let why = match from {
+                    Some(_) => format!("The take of {prev} it started from is gone."),
+                    None => format!(
+                        "{prev} has no take in the cut yet, so there's nothing to carry on from."
+                    ),
+                };
+                ui.label(RichText::new(why).color(theme::FLAG));
+            }
+        }
+        if let Some(sel) = selected
+            && from.as_ref() != Some(&sel)
+        {
+            let now = self
+                .prev_takes
+                .iter()
+                .find(|t| t.id.to_string() == sel)
+                .map_or_else(|| "another take".to_string(), |t| format!("#{}", t.number));
+            ui.add_space(6.0);
+            hint(ui, &format!("{prev} plays {now} in the cut now."));
+            if ui
+                .button(RichText::new("Use new previous shot last frame").color(theme::FLAG))
+                .on_hover_text(format!("start on the last frame of {prev}'s {now} instead"))
+                .clicked()
+            {
+                self.form.continue_from = Some(sel);
+            }
+        }
     }
 
     /// The storyboard frame: a still the video starts on, and what it's made from.
@@ -2474,16 +2592,26 @@ impl App {
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if t.status().is_finished() {
-                                let rm = remove_button(ui);
+                                let next = self
+                                    .continued
+                                    .as_ref()
+                                    .filter(|(_, id)| *id == t.id.to_string())
+                                    .map(|(next, _)| *next);
+                                let rm = ui.add_enabled_ui(next.is_none(), remove_button).inner;
                                 rm.widget_info(|| {
                                     egui::WidgetInfo::labeled(
                                         egui::Role::Button,
-                                        true,
+                                        next.is_none(),
                                         format!("Remove #{n}"),
                                     )
                                 });
                                 if rm
                                     .on_hover_text("off the list; what it cost stays in the ledger")
+                                    .on_disabled_hover_text(format!(
+                                        "{} starts on its last frame; have it start on another \
+                                         take first",
+                                        next.map(|n| n.to_string()).unwrap_or_default()
+                                    ))
                                     .clicked()
                                 {
                                     acts.push(Action::RemoveTake(t.clone()));
@@ -2502,7 +2630,15 @@ impl App {
                                     .on_hover_text("the take this shot plays in the cut")
                                     .clicked()
                             {
-                                acts.push(Action::Select(t.clone()));
+                                if self
+                                    .continued
+                                    .as_ref()
+                                    .is_some_and(|(_, id)| *id != t.id.to_string())
+                                {
+                                    self.confirm_select = Some(t.clone());
+                                } else {
+                                    acts.push(Action::Select(t.clone()));
+                                }
                             }
                         });
                     });
@@ -2517,10 +2653,45 @@ impl App {
         if let Some(t) = watch {
             self.watch(ui, t);
         }
+        self.confirm_select(ui, acts);
         if let Some(pieces) = splice
             && let Some(r) = self.shot
         {
             self.open_splicer(r, pieces);
+        }
+    }
+
+    /// Asks before another take goes in the cut while the shot after starts on this one's frame.
+    fn confirm_select(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
+        let (Some(t), Some((next, id))) = (&self.confirm_select, &self.continued) else {
+            self.confirm_select = None;
+            return;
+        };
+        let from = self
+            .takes
+            .iter()
+            .find(|x| x.id.to_string() == *id)
+            .map_or("a take".to_string(), |x| format!("#{}", x.number));
+        let (mut yes, mut no) = (false, false);
+        let modal = crate::modal(ui.ctx(), "keep the next start", |ui| {
+            ui.set_width(420.0);
+            ui.heading(format!("Use #{} in the cut?", t.number));
+            ui.add_space(6.0);
+            ui.label(format!(
+                "{next} continues from the last frame of {from}. It keeps starting on that \
+                 frame; pick the new one in {next} when you want it to follow."
+            ));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                yes = ui.button(format!("Use #{}", t.number)).clicked();
+                no = ui.button("Cancel").clicked();
+            });
+        });
+        if yes {
+            acts.push(Action::Select(t.clone()));
+        }
+        if yes || no || modal.should_close() {
+            self.confirm_select = None;
         }
     }
 
@@ -2821,9 +2992,20 @@ fn in_use(film: &Film, root: &Path) -> HashMap<PathBuf, String> {
 /// Takes `video`'s still into `png` in the background, unless it's being taken already.
 pub(crate) fn make_poster(
     ctx: &egui::Context,
+    make: (Option<&Ffmpeg>, &Arc<Mutex<HashSet<PathBuf>>>),
+    video: &Path,
+    png: &Path,
+) {
+    make_still(ctx, make, video, png, false);
+}
+
+/// A video's first frame, or its last, into `png` in the background.
+pub(crate) fn make_still(
+    ctx: &egui::Context,
     (ff, making): (Option<&Ffmpeg>, &Arc<Mutex<HashSet<PathBuf>>>),
     video: &Path,
     png: &Path,
+    last: bool,
 ) {
     if let Some(ff) = ff
         && making.lock().unwrap().insert(png.to_path_buf())
@@ -2831,7 +3013,11 @@ pub(crate) fn make_poster(
         let (ff, video, png) = (ff.clone(), video.to_path_buf(), png.to_path_buf());
         let (making, ctx) = (making.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = ff.poster(&video, &png);
+            let _ = if last {
+                ff.last_frame(&video, &png)
+            } else {
+                ff.poster(&video, &png)
+            };
             // Left in, a failed one isn't tried again every frame.
             if png.is_file() {
                 making.lock().unwrap().remove(&png);

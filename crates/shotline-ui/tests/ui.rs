@@ -1730,6 +1730,92 @@ fn a_selected_take_s_last_frame() {
 }
 
 #[test]
+fn a_continue_shot_keeps_its_start_until_told() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let next = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                title: "Paka stops".into(),
+                ..Shot::default()
+            },
+        )
+        .unwrap();
+    let (video, _) = another_take(&p);
+    if clip(&video).is_none() {
+        return;
+    }
+    let first = p.select_take(R, "1").unwrap();
+    let third = p.take(R, "3").unwrap();
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 1800.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    let open = |h: &mut Harness<App>, name: &str| {
+        h.get_by_label_contains(name).click();
+        h.run();
+        h.run();
+    };
+
+    // On, it starts from the take in the cut, shown where the storyboard frame was.
+    open(&mut h, &format!("{next}  Paka stops"));
+    h.get_by_label("Continue from previous shot").click();
+    h.run();
+    assert!(h.query_by_label("Storyboard frame").is_none());
+    h.get_by_label("Previous shot last frame");
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("last frame of 01-010#1")
+        .is_some()));
+    assert!(
+        h.query_by_label("Use new previous shot last frame")
+            .is_none()
+    );
+    open(&mut h, "01-010  Paka walks in");
+    assert_eq!(
+        p.shot(next).unwrap().continue_from,
+        Some(first.id.to_string())
+    );
+
+    // Its take can't go, and another in the cut is asked about first.
+    assert!(h.get_by_label("Remove #1").accesskit_node().is_disabled());
+    h.get_by_label("Use in the cut #3").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Use #3 in the cut?");
+    h.get_by_label("Use #3").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().selected_take, Some(third.id.to_string()));
+    assert_eq!(
+        p.shot(next).unwrap().continue_from,
+        Some(first.id.to_string())
+    );
+
+    open(&mut h, &format!("{next}  Paka stops"));
+    h.get_by_label("last frame of 01-010#1");
+    h.get_by_label_contains("01-010 plays #3 in the cut now");
+    h.get_by_label("Use new previous shot last frame").click();
+    h.run();
+    h.run();
+    assert!(
+        h.query_by_label("Use new previous shot last frame")
+            .is_none()
+    );
+    open(&mut h, "01-010  Paka walks in");
+    assert_eq!(
+        p.shot(next).unwrap().continue_from,
+        Some(third.id.to_string())
+    );
+    assert!(!h.get_by_label("Remove #1").accesskit_node().is_disabled());
+    assert!(h.get_by_label("Remove #3").accesskit_node().is_disabled());
+}
+
+#[test]
 fn an_editor_s_sequence_on_the_cut_page() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
@@ -2767,7 +2853,7 @@ fn how_lines_are_spoken() {
     h.get_by_role_and_label(Role::ComboBox, "Lines spoken")
         .click();
     h.run();
-    h.get_by_label("lip synced after");
+    assert!(h.query_by_label("lip synced after").is_none());
     h.get_by_label("by the video model").click();
     h.run();
     h.run();

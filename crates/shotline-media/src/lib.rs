@@ -39,6 +39,8 @@ pub struct Info {
     /// As ffprobe gives it, e.g. `24/1` or `30000/1001`.
     pub fps: String,
     pub duration: f64,
+    /// The picture's own length; the sound can run on a little past it.
+    pub video_duration: f64,
     pub audio: bool,
 }
 
@@ -118,14 +120,14 @@ impl Ffmpeg {
             .find(|s| s["codec_type"] == "video")
             .ok_or_else(|| Error::Invalid(format!("{} has no video", path.display())))?;
         let num = |x: &serde_json::Value| x.as_u64().unwrap_or(0) as u32;
+        let secs = |x: &serde_json::Value| x.as_str().and_then(|d| d.parse::<f64>().ok());
+        let duration = secs(&v["format"]["duration"]).unwrap_or(0.0);
         Ok(Info {
             width: num(&video["width"]),
             height: num(&video["height"]),
             fps: video["r_frame_rate"].as_str().unwrap_or("24/1").into(),
-            duration: v["format"]["duration"]
-                .as_str()
-                .and_then(|d| d.parse().ok())
-                .unwrap_or(0.0),
+            duration,
+            video_duration: secs(&video["duration"]).unwrap_or(duration),
             audio: streams.iter().any(|s| s["codec_type"] == "audio"),
         })
     }

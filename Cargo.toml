@@ -21,6 +21,11 @@ fdeflate.opt-level = 3
 miniz_oxide.opt-level = 3
 crc32fast.opt-level = 3
 simd-adler32.opt-level = 3
+# A video frame through ColorImage takes ~20 ms unoptimised, half a frame's time at 24 fps.
+ecolor.opt-level = 3
+epaint.opt-level = 3
+emath.opt-level = 3
+egui.opt-level = 3
 
 [profile.release]
 lto = "thin"

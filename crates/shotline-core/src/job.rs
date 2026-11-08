@@ -7,7 +7,7 @@ use shotline_protocol::Op;
 use ulid::Ulid;
 
 use crate::error::invalid;
-use crate::{Error, Project, Result, ShotRef, fsx};
+use crate::{Error, Project, Result, ShotRef, Transition, fsx};
 
 /// Where time and ids come from, so tests can pin them.
 pub trait Clock: fmt::Debug + Send + Sync {
@@ -507,9 +507,47 @@ impl Project {
             ));
         }
         let mut s = self.shot(shot)?;
-        s.selected_take = Some(take.id.to_string());
+        let was = s.selected_take.replace(take.id.to_string());
+        // The shot after keeps starting on the frame it had.
+        if let Some(was) = was.filter(|w| *w != take.id.to_string())
+            && let Some(next) = self.next_shot(shot)?
+        {
+            let mut n = self.shot(next)?;
+            if n.transition == Transition::Continue && n.continue_from.is_none() {
+                n.continue_from = Some(was);
+                self.save_shot(next, &n)?;
+            }
+        }
         self.save_shot(shot, &s)?;
         Ok(take)
+    }
+
+    /// The shot after `shot` when it continues from `take`.
+    pub fn continued_by(&self, shot: ShotRef, take: &Take) -> Result<Option<ShotRef>> {
+        let Some(next) = self.next_shot(shot)? else {
+            return Ok(None);
+        };
+        let n = self.shot(next)?;
+        let from = n.continue_from.or(self.shot(shot)?.selected_take);
+        Ok(
+            (n.transition == Transition::Continue && from == Some(take.id.to_string()))
+                .then_some(next),
+        )
+    }
+
+    /// For a continue shot, the take of the shot before that it starts from: the one it names,
+    /// else that shot's selected take. None when there's none, or it's gone.
+    pub fn continued_take(&self, shot: ShotRef) -> Result<Option<Take>> {
+        let Some(prev) = self.previous_shot(shot)? else {
+            return Ok(None);
+        };
+        let Some(id) = self.shot(shot)?.continue_from else {
+            return self.selected_take(prev);
+        };
+        Ok(self
+            .takes(prev)?
+            .into_iter()
+            .find(|t| t.id.to_string() == id))
     }
 
     /// Throws a finished take out. Its files stay (it's in the ledger) and the others keep their
@@ -518,6 +556,11 @@ impl Project {
         let take = self.take(shot, spec)?;
         if !take.status().is_finished() {
             return invalid(format!("{take} is still {}", take.status()));
+        }
+        if let Some(next) = self.continued_by(shot, &take)? {
+            return invalid(format!(
+                "{next} continues from {take}'s last frame; have {next} start on another take first"
+            ));
         }
         for j in take.jobs.iter().filter(|j| j.op != Op::AudioTts) {
             self.set_discarded(j.id, true)?;
