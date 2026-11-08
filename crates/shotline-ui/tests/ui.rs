@@ -475,8 +475,16 @@ impl Host for TestHost {
         (edits, warnings)
     }
 
-    /// Writes a stand-in video where it was asked to.
+    /// Writes a stand-in video where it was asked to. Previews are of the saved file; Render
+    /// takes what's open in the editor.
     fn export_edit(&self, _plugin: &str, ask: &ExportParams) -> anyhow::Result<PathBuf> {
+        let to_keep = ask.out.parent().is_some_and(|d| d.ends_with("renders"));
+        anyhow::ensure!(
+            ask.saved != to_keep,
+            "saved = {} for {:?}",
+            ask.saved,
+            ask.out
+        );
         std::fs::create_dir_all(ask.out.parent().unwrap())?;
         std::fs::write(&ask.out, "mp4")?;
         Ok(ask.out.clone())

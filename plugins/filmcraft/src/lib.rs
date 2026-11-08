@@ -1128,6 +1128,7 @@ mod tests {
             file: project.clone(),
             sequence: "fan".into(),
             out: film.join("renders").join(name),
+            saved: false,
         };
         let length = |f: &Path| {
             let out = std::process::Command::new("ffprobe")
@@ -1153,6 +1154,15 @@ mod tests {
             "{}",
             length(&got.file)
         );
+        if editor::cli_program().is_some() {
+            // The saved file, rendered beside the open app.
+            let ask = ExportParams {
+                saved: true,
+                ..render("saved.mp4")
+            };
+            let got = FilmCraft.export(&ask).await.unwrap();
+            assert!((length(&got.file) - 6.0).abs() < 0.2);
+        }
 
         let _ = s.call("app.quit", json!({}));
         let pid = s.pid.unwrap();

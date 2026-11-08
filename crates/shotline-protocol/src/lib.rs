@@ -541,6 +541,9 @@ pub struct ExportParams {
     pub sequence: String,
     /// Where the video goes; its extension says the format.
     pub out: PathBuf,
+    /// Render the project as saved, leaving an open editor alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub saved: bool,
 }
 
 /// What `export` made.

@@ -858,6 +858,7 @@ impl App {
             file: file.to_path_buf(),
             sequence: seq.name.clone(),
             out: part.clone(),
+            saved: true,
         };
         let slot: FullSlot = Arc::default();
         let (s, host, p, ctx, to) = (

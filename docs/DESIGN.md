@@ -460,9 +460,11 @@ job folder is named by its take. The Cut page's player shows a preview ffmpeg ma
 with its LUT files and dissolves, the audio tracks mixed. Other effects, Lumetri's sliders and
 built-in LUTs are left out. Once the sequence has stayed the same for 4 seconds while shotline's
 window is in front (so not while it's being cut in the editor), the editor plugin's `export`
-renders it into the same folder (`<key>-full.mp4`) and the player swaps to that, keeping its place.
+renders the saved file into the same folder (`<key>-full.mp4`), through `filmcraft-cli` so an open
+FilmCraft is left alone, and the player swaps to that, keeping its place.
 The folder keeps the 16 newest quick previews and the 3 newest full ones (about 100 MB each
-for 37 s at 1024 × 768). Render makes the same into `renders/` to keep. The page
+for 37 s at 1024 × 768). Render makes one into `renders/` to keep, through the open FilmCraft
+when there is one, so what isn't saved yet is in it. The page
 watches `shared/` and reads it again when the editor saves.
 
 What's sent: "Open in FilmCraft" on the Cut page opens the film's project, or makes it when

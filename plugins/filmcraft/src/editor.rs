@@ -331,6 +331,21 @@ fn upgrade(app: &str, cli_version: &str, cli: &Path) -> String {
     }
 }
 
+/// The CLI on `project` as saved, for reads and renders only: an open FilmCraft is left alone
+/// and its changes not saved yet aren't in it.
+pub fn saved(project: &Path) -> Result<Editor, String> {
+    let exe = cli_program().ok_or("filmcraft-cli isn't installed")?;
+    if let Some(why) = mismatch(&exe) {
+        return Err(why);
+    }
+    Ok(Editor::Cli(Cli {
+        exe,
+        project: project.to_path_buf(),
+        backups: PathBuf::new(),
+        backed_up: Cell::new(true),
+    }))
+}
+
 /// How to edit `project` now, or why it has to wait.
 pub fn for_project(film: &Path, project: &Path) -> Result<Editor, String> {
     let ours = Session::load(film).filter(Session::alive);

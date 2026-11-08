@@ -229,7 +229,11 @@ fn lumetri_back(clip: u64, before: Option<(usize, Value)>, after: &Value) -> Vec
 
 /// Renders the sequence with FilmCraft's own export, waiting for the file.
 pub fn export(ask: &ExportParams) -> Result<Exported, String> {
-    let e = editor::for_project(&ask.film, &ask.file)?;
+    let e = if ask.saved {
+        editor::saved(&ask.file)?
+    } else {
+        editor::for_project(&ask.film, &ask.file)?
+    };
     let snap = snapshot(&e, &ask.film, &ask.file)?;
     let (id, _) = sequence(&snap, &ask.sequence)?;
     if let Some(dir) = ask.out.parent() {

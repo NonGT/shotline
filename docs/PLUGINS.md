@@ -293,8 +293,10 @@ answers with an error saying why.
 ### export (optional)
 
 For an editor plugin: renders a sequence with the editor's own renderer and waits for the file.
-Params: `{"film", "file", "sequence", "out"}`, with `out` the video to write (its extension says
-the format). Returns `{"file": "/path/to/film/renders/Main_edit-20261107-221500.mp4"}`.
+Params: `{"film", "file", "sequence", "out", "saved"}`, with `out` the video to write (its
+extension says the format). With `"saved": true` it renders the file as saved, without going
+through an open editor, so changes not saved yet are left out; shotline asks for that for the cut
+page preview. Returns `{"file": "/path/to/film/renders/Main_edit-20261107-221500.mp4"}`.
 
 ### import (optional)
 

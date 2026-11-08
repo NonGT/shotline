@@ -685,6 +685,7 @@ impl App {
                 file: file.to_path_buf(),
                 sequence: seq.name.clone(),
                 out: out.clone(),
+                saved: false,
             };
             let slot: Arc<Mutex<Option<_>>> = Arc::default();
             let (s, host, p, ctx) = (
