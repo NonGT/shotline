@@ -259,7 +259,7 @@ impl App {
     }
 
     /// Picks up what the editor plugins said, and asks them again once the film was read again.
-    fn refresh_edits(&mut self, ctx: &egui::Context) {
+    pub(crate) fn refresh_edits(&mut self, ctx: &egui::Context) {
         if let Some(slot) = &self.edits_asked {
             let Some(got) = slot.lock().unwrap().take() else {
                 return;
@@ -281,8 +281,35 @@ impl App {
                     }
                 }
             }
+            let mut bridges = crate::bridge::BridgeTakes::new();
+            for f in got
+                .0
+                .iter()
+                .flat_map(|e| &e.sequences)
+                .flat_map(|s| &s.video)
+                .flat_map(|t| &t.clips)
+                .filter_map(|c| c.file.as_ref())
+            {
+                if bridges.contains_key(f) || takes.contains_key(f) {
+                    continue;
+                }
+                if let Some(job) = self.project.bridge_of_file(f)
+                    && let Some(id) = job.bridge
+                {
+                    let n = self
+                        .project
+                        .bridge_takes(id)
+                        .unwrap_or_default()
+                        .iter()
+                        .find(|(_, j)| j.id == job.id)
+                        .map_or(0, |(n, _)| *n);
+                    bridges.insert(f.clone(), (id, job.id, n));
+                }
+            }
             self.edits = got;
             self.edit_takes = takes;
+            self.edit_bridges = bridges;
+            self.bridges_seen = None;
         }
         self.watch_edits(ctx);
         if !self.edits_stale {
@@ -548,6 +575,9 @@ impl App {
                 .color(theme::DUST),
         );
         self.take_sync(ui, &app, seq);
+        if !plugin.is_empty() {
+            self.missing_shots(ui, &plugin, &app, file, seq);
+        }
         let out = self.preview_of(seq);
         let full = full_of(&out);
         let making = self.full_making.as_ref().is_some_and(|(f, _)| *f == full);
@@ -1015,8 +1045,13 @@ impl App {
         {
             crate::make_poster(ctx, (self.ff.as_ref(), &self.posters), video, png);
         }
+        let bridge = c.file.as_ref().and_then(|f| self.edit_bridges.get(f));
         Block {
-            name: take.map_or_else(|| c.name.clone(), |t| t.to_string()),
+            name: match (take, bridge) {
+                (Some(t), _) => t.to_string(),
+                (None, Some((_, _, n))) => format!("bridge #{n}"),
+                (None, None) => c.name.clone(),
+            },
             start: c.start,
             length: c.length,
             still: still.map(|(_, png)| png),
@@ -1267,7 +1302,7 @@ pub(crate) struct Making {
 
 /// The sequence to show first: one in a project shotline made (under `shared/<plugin>/`), else
 /// the first one there is.
-fn main_sequence(
+pub(crate) fn main_sequence(
     film: &Path,
     edits: &[shotline_core::protocol::EditInfo],
 ) -> Option<(PathBuf, String)> {
@@ -1293,7 +1328,7 @@ fn full_of(quick: &Path) -> PathBuf {
     quick.with_file_name(format!("{stem}-full.mp4"))
 }
 
-fn plugin_of(edits: &[shotline_core::protocol::EditInfo], file: &Path) -> String {
+pub(crate) fn plugin_of(edits: &[shotline_core::protocol::EditInfo], file: &Path) -> String {
     edits
         .iter()
         .find(|e| e.file == file)

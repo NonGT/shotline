@@ -198,6 +198,8 @@ pub(crate) enum Field {
 pub(crate) enum Action {
     Set(ShotRef, Field),
     AddLine(ShotRef, LineForm),
+    /// A line added with a recording made somewhere else, copied in as what it sends.
+    ImportLine(ShotRef, LineForm, PathBuf),
     SetLine(ShotRef, usize, LineForm),
     RemoveLine(ShotRef, usize),
     /// The recording a line sends, by job id, or None to make it with each take.
@@ -256,6 +258,7 @@ impl Action {
         match self {
             Action::Set(r, _)
             | Action::AddLine(r, _)
+            | Action::ImportLine(r, ..)
             | Action::SetLine(r, ..)
             | Action::RemoveLine(r, _)
             | Action::PickRecording(r, ..)
@@ -293,6 +296,7 @@ impl Action {
         match self {
             Action::Set(r, _)
             | Action::AddLine(r, _)
+            | Action::ImportLine(r, ..)
             | Action::SetLine(r, ..)
             | Action::RemoveLine(r, _)
             | Action::PickRecording(r, ..)
@@ -654,7 +658,7 @@ impl App {
                     (f, s)
                 })
                 .collect();
-            let added = matches!(a, Action::AddLine(..));
+            let added = matches!(a, Action::AddLine(..) | Action::ImportLine(..));
             match self.write(a) {
                 Ok(done) => {
                     for (f, before) in files {
@@ -758,6 +762,26 @@ impl App {
             Action::AddLine(r, l) => {
                 let s = p.add_line(r, &l.who, &l.text, l.at()?)?;
                 format!("{r} has {} lines", s.lines.len()).into()
+            }
+            Action::ImportLine(r, l, file) => {
+                let at = l.at()?;
+                let job = p.import_recording(r, &l.who, &l.text, &file)?;
+                let s = match p.add_line(r, &l.who, &l.text, at) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(p.job_dir(job.id));
+                        return Err(e.into());
+                    }
+                };
+                p.set_line_audio(r, s.lines.len() - 1, Some(&job))?;
+                Done {
+                    msg: format!(
+                        "{r} has {} lines, the last sending {}",
+                        s.lines.len(),
+                        file.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    made: vec![p.job_dir(job.id)],
+                }
             }
             Action::SetLine(r, i, l) => {
                 p.set_line(r, i, &l.who, &l.text, l.at()?)?;

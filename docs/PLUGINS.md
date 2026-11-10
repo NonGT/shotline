@@ -94,6 +94,8 @@ Model fields other than `id` and `op` are optional; leave out what doesn't apply
 - `min_duration`, `max_duration` in seconds; `whole_seconds` if fractions aren't allowed.
 - `resolutions`, `aspects`: allowed values, as the API spells them.
 - `start_frame`, `start_frame_with_refs`, `audio_input`: what the model accepts.
+- `end_frame`: it takes a frame to end on too (`end_frame` in the request), so it can make a
+  bridge between two clips.
 - `audio_mix`: the model plays the audio as the soundtrack and takes one clip, so shotline mixes
   the shot's lines into one track at their times first. Without it each line goes as its own
   clip, and a shot can't have more lines than `max_audio`.
@@ -276,8 +278,12 @@ itself (never by writing its project file). Params:
 
 `change` is one of:
 
-- `{"kind": "replace", "file", "from"}`: the file over the clip, from `from` seconds into it, at the
-  same place and length; the clip's sound stays when the file has none
+- `{"kind": "replace", "file", "from", "length"}`: the file over the clip, from `from` seconds into
+  it, at the same place and length; the clip's sound stays when the file has none. With
+  `length`, that much of the file instead, and what follows moves by the difference
+- `{"kind": "insert", "file", "after", "sound"}`: all of the file put in just before the clip (or
+  just after it with `after`), moving what follows later on every track; only its picture unless
+  `sound`
 - `{"kind": "lut", "file"}`: the clip's input LUT (`.cube`); without `file` it comes off
 - `{"kind": "match", "to"}`: the clip's colour matched to the sequence's frame at `to` seconds
 - `{"kind": "crossfade", "frames"}`: a dissolve that many frames long into the clip from the one

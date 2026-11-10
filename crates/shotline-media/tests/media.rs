@@ -551,3 +551,41 @@ fn a_match_lut_brings_the_next_clip_closer() {
     let after = distance(mean(&last_a), mean(&first(&graded)));
     assert!(after < before / 2.0, "{before} -> {after}");
 }
+
+#[test]
+fn the_frame_showing_at_a_time() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    // Grey rising 8 a frame, so a frame says which it is.
+    let video = dir.path().join("ramp.mp4");
+    let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    assert!(
+        Command::new(&ffmpeg)
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+            .arg("color=c=black:size=64x64:rate=24:duration=1")
+            .args(["-vf", "geq=lum='16+8*N':cb=128:cr=128"])
+            .args(["-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p"])
+            .arg(&video)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let png = dir.path().join("f.png");
+    let number = |at: f64| {
+        ff.frame_at(&video, at, &png).unwrap();
+        let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+        let out = Command::new(ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&png)
+            .args(["-f", "rawvideo", "-pix_fmt", "gray", "-"])
+            .output()
+            .unwrap();
+        (out.stdout[0] as f64 / (8.0 * 255.0 / 219.0)).round() as i64
+    };
+    assert_eq!(number(0.0), 0);
+    assert_eq!(number(5.0 / 24.0), 5);
+    assert_eq!(number(5.5 / 24.0), 5);
+    assert_eq!(number(23.0 / 24.0), 23);
+    // Past the end: the last frame.
+    assert_eq!(number(3.0), 23);
+}

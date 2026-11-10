@@ -3,6 +3,7 @@
 //! both always agree.
 
 mod anchor;
+mod bridge;
 mod browse;
 mod cost;
 mod cut;
@@ -130,6 +131,26 @@ pub trait Host: Send + Sync {
         _at: &str,
     ) -> anyhow::Result<PathBuf> {
         anyhow::bail!("{plugin} can't be run from here")
+    }
+    /// What another take of a bridge would cost, with putting its prompt into English first
+    /// when `translate` and that's needed. Free.
+    fn bridge_quote(
+        &self,
+        _film: &Path,
+        _bridge: shotline_core::Ulid,
+        _translate: bool,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("bridges can't be made from here")
+    }
+    /// Makes a take of the bridge, if the price is still `at`. Returns its video.
+    fn bridge_take(
+        &self,
+        _film: &Path,
+        _bridge: shotline_core::Ulid,
+        _at: &str,
+        _translate: bool,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("bridges can't be made from here")
     }
     /// Renders a sequence of an editor's project through its plugin into `out`.
     fn export_edit(
@@ -266,6 +287,14 @@ pub struct App {
     edits: Edits,
     /// The takes the clips in them play, by file.
     edit_takes: HashMap<PathBuf, Take>,
+    edit_bridges: bridge::BridgeTakes,
+    bridge_win: Option<bridge::BridgeWin>,
+    /// Joins of the sequence shown that have a bridge, by the clip after them.
+    bridged: Vec<String>,
+    /// The film's bridges, read again after the sequences are.
+    bridges_seen: Option<Vec<(shotline_core::Ulid, shotline_core::Bridge)>>,
+    /// Each shot of the cut with the take it would go in the editor's sequence with.
+    cut_takes: Option<Vec<(Take, PathBuf)>>,
     /// Being asked again in the background; the answer lands here.
     edits_asked: Option<Arc<Mutex<Option<Edits>>>>,
     /// The film was read again, so the editors are asked again.
@@ -307,6 +336,8 @@ pub struct App {
     continued: Option<(ShotRef, String)>,
     /// A take to use in the cut once it's agreed the shot after keeps its start.
     confirm_select: Option<Take>,
+    /// Picked on the shot page, to go in the editor's sequence too once it's been read again.
+    cut_follow: Option<Take>,
     status: Option<(String, bool)>,
     /// The job that made the zoomed picture, once Details is asked for.
     zoom_details: Option<(PathBuf, Option<shotline_core::Job>)>,
@@ -636,6 +667,11 @@ impl App {
             cut_view: None,
             edits: (vec![], vec![]),
             edit_takes: HashMap::new(),
+            edit_bridges: HashMap::new(),
+            bridge_win: None,
+            bridged: vec![],
+            bridges_seen: None,
+            cut_takes: None,
             edits_asked: None,
             edits_stale: true,
             edits_seen: None,
@@ -659,6 +695,7 @@ impl App {
             prev_takes: vec![],
             continued: None,
             confirm_select: None,
+            cut_follow: None,
             status: None,
             zoom_details: None,
             zoom_view: FIT,
@@ -1119,6 +1156,7 @@ impl App {
         };
         self.film.in_use = in_use(&self.film, &self.project.root);
         self.edits_stale = true;
+        self.cut_takes = None;
         self.load_takes()
     }
 
@@ -1224,6 +1262,7 @@ impl App {
         self.add_made_anchor();
         self.shoot_finished();
         self.said();
+        self.follow_cut(ui.ctx());
         let tab = self.tab;
         egui::Panel::top("bar")
             .frame(
@@ -2638,6 +2677,7 @@ impl App {
                                     self.confirm_select = Some(t.clone());
                                 } else {
                                     acts.push(Action::Select(t.clone()));
+                                    self.cut_follow = Some(t.clone());
                                 }
                             }
                         });
@@ -2689,6 +2729,7 @@ impl App {
         });
         if yes {
             acts.push(Action::Select(t.clone()));
+            self.cut_follow = Some(t.clone());
         }
         if yes || no || modal.should_close() {
             self.confirm_select = None;
@@ -2811,7 +2852,7 @@ impl App {
                 (Some(f), Some(ff)) => Player::new(ff, &label, &[f]).ok(),
                 _ => None,
             }
-            .map(|p| Deck::new(&label, p, true).in_popup(320.0));
+            .map(|p| Deck::new(&label, p, true).in_popup(320.0).opens());
             if deck.is_some() {
                 self.audio();
             }
@@ -2842,6 +2883,9 @@ impl App {
             ui.add_space(24.0);
             ui.vertical(|ui| in_cut_details(ui, &take, size, length, left.bottom()));
         });
+        if d.clicked() {
+            self.watch(ui, take);
+        }
         true
     }
 
@@ -3434,6 +3478,20 @@ pub(crate) fn play_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) 
     ));
 }
 
+pub(crate) fn camera_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let s = s.expand(1.0);
+    let body = egui::Rect::from_min_max(egui::pos2(s.left(), s.top() + 2.5), s.max);
+    p.rect_stroke(body, 1.5, stroke, egui::StrokeKind::Middle);
+    p.line_segment(
+        [
+            egui::pos2(s.center().x - 2.0, s.top() + 1.0),
+            egui::pos2(s.center().x + 2.0, s.top() + 1.0),
+        ],
+        stroke,
+    );
+    p.circle_stroke(body.center(), body.height() * 0.28, stroke);
+}
+
 pub(crate) fn stop_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
     p.rect_filled(s.shrink(1.0), 1.0, stroke.color);
 }
@@ -3465,13 +3523,27 @@ pub(crate) fn modal<R>(
     let modals = egui::Id::unique("modal layers");
     let r = egui::Modal::new(egui::Id::unique(name)).show(ctx, content);
     let me = r.response.layer_id;
+    let shown = ctx.memory(|m| m.areas().visible_last_frame(&me));
+    // In the order they were opened: one opened from another stays above it, even though a
+    // click on the one below raises that.
     let others = ctx.data_mut(|d| {
         let all = d.get_temp_mut_or_default::<Vec<egui::LayerId>>(modals);
-        if !all.contains(&me) {
+        if !shown || !all.contains(&me) {
+            all.retain(|l| *l != me);
             all.push(me);
         }
         all.clone()
     });
+    let newest = ctx.memory(|m| {
+        others
+            .iter()
+            .rev()
+            .find(|l| **l == me || m.areas().visible_last_frame(l))
+            .copied()
+    });
+    if newest == Some(me) {
+        ctx.move_to_top(me);
+    }
     if r.is_top_modal {
         let popups = ctx.memory(|m| m.areas().visible_layer_ids());
         for l in popups {

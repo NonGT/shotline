@@ -568,6 +568,34 @@ impl Project {
         Ok(out)
     }
 
+    /// A recording made somewhere else of @`who` saying `text` in shot `r`, kept like one made
+    /// here.
+    pub fn import_recording(&self, r: ShotRef, who: &str, text: &str, file: &Path) -> Result<Job> {
+        self.shot(r)?;
+        if text.trim().is_empty() {
+            return invalid("type what they say first");
+        }
+        if !file.is_file() {
+            return invalid(format!("{} isn't a file", file.display()));
+        }
+        let ext = file
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| "wav".into());
+        let mut job = Job::new(Op::AudioTts, "shotline", "import");
+        job.brief = file.file_name().map(|n| n.to_string_lossy().to_string());
+        job.shot = Some(r);
+        job.who = Some(who.trim_start_matches('@').to_string());
+        job.prompt = Some(text.to_string());
+        let mut job = self.create_job(job)?;
+        let name = format!("out.{ext}");
+        fsx::copy(file, &self.job_dir(job.id).join(&name))?;
+        job.outputs = vec![name];
+        job.status = JobStatus::Done;
+        self.save_job(&job)?;
+        Ok(job)
+    }
+
     /// The recording line `i` sends with a take, if one's picked and still kept.
     pub fn line_audio(&self, r: ShotRef, i: usize) -> Result<Option<Job>> {
         let shot = self.shot(r)?;

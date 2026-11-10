@@ -287,30 +287,56 @@ fn apply(e: &Editor, ask: &EditParams, change: &Change) -> Result<Vec<Value>, St
     let clip = f.clip["id"].as_u64().ok_or("a clip without an id")?;
     let open = step("sequence.open", json!({"item": f.sequence}));
     match change {
-        Change::Replace { file, from } => {
-            if !file.is_file() {
-                return Err(format!("{} isn't there", file.display()));
+        Change::Replace { file, from, length } => {
+            let item = import(e, file)?;
+            let got = e.batch(&[open.clone(), place(&f, &item, ticks(*from))])?;
+            let mut undo = vec![open.clone()];
+            // Over the clip at its length first, then its end ripple trimmed to the new one.
+            let delta = length.map_or(0, |l| ticks(l) - f.clip["duration"].as_i64().unwrap_or(0));
+            if (delta as f64).abs() >= 0.5 * TICKS_PER_SECOND / f.fps {
+                let new = got
+                    .last()
+                    .and_then(|r| r["clips"].as_array()?.first().cloned())
+                    .ok_or("FilmCraft didn't say which clip it put in")?;
+                let trim = |delta: i64| {
+                    step(
+                        "timeline.trim",
+                        json!({"clip": new, "edge": "out", "mode": "ripple", "delta": delta,
+                               "linked": true}),
+                    )
+                };
+                e.batch(&[open.clone(), trim(delta)])?;
+                undo.push(trim(-delta));
             }
-            let got = e.exec("file.import", json!({"paths": [file]}))?;
-            if let Some(err) = got["errors"].as_array().and_then(|a| a.first()) {
-                return Err(format!(
-                    "FilmCraft couldn't import {}: {err}",
-                    file.display()
-                ));
+            undo.push(place(
+                &f,
+                &f.clip["item"],
+                f.clip["source_in"].as_i64().unwrap_or(0),
+            ));
+            Ok(undo)
+        }
+        Change::Insert { file, after, sound } => {
+            let item = import(e, file)?;
+            let mut time = f.clip["start"].as_i64().unwrap_or(0);
+            if *after {
+                time += f.clip["duration"].as_i64().unwrap_or(0);
             }
-            let item = got["items"]
-                .as_array()
-                .and_then(|a| a.first())
-                .cloned()
-                .ok_or("FilmCraft imported nothing")?;
-            e.batch(&[open.clone(), place(&f, &item, ticks(*from))])?;
+            let p = json!({
+                "item": item,
+                "track": f.track,
+                "time": time,
+                "insert": true,
+                "audio": sound,
+            });
+            let got = e.batch(&[open.clone(), step("timeline.place", p)])?;
+            let new = got
+                .last()
+                .and_then(|r| r["clips"].as_array().cloned())
+                .filter(|c| !c.is_empty())
+                .ok_or("FilmCraft didn't say which clip it put in")?;
             Ok(vec![
                 open,
-                place(
-                    &f,
-                    &f.clip["item"],
-                    f.clip["source_in"].as_i64().unwrap_or(0),
-                ),
+                step("timeline.delete", json!({"clips": new, "ripple": true})),
             ])
         }
         Change::Lut { file } => {
@@ -329,6 +355,24 @@ fn apply(e: &Editor, ask: &EditParams, change: &Change) -> Result<Vec<Value>, St
         Change::Crossfade { frames } => crossfade(e, &f, clip, *frames, open),
         Change::Undo { .. } => unreachable!("undo has no snapshot"),
     }
+}
+
+fn import(e: &Editor, file: &Path) -> Result<Value, String> {
+    if !file.is_file() {
+        return Err(format!("{} isn't there", file.display()));
+    }
+    let got = e.exec("file.import", json!({"paths": [file]}))?;
+    if let Some(err) = got["errors"].as_array().and_then(|a| a.first()) {
+        return Err(format!(
+            "FilmCraft couldn't import {}: {err}",
+            file.display()
+        ));
+    }
+    got["items"]
+        .as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .ok_or_else(|| "FilmCraft imported nothing".into())
 }
 
 /// Puts back a transition as it was, into `clip`.

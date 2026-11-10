@@ -67,6 +67,7 @@ impl App {
     /// Under an editor's sequence: the picked clip's tools, and undo for what was changed here.
     pub(crate) fn clip_tools(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
         self.change_done();
+        self.bridged = self.bridged_joins(seq);
         let Some(plugin) = self
             .edits
             .0
@@ -118,6 +119,7 @@ impl App {
             }
         });
         self.process_row(ui, file, seq);
+        self.bridge_window(ui, &plugin, file, seq);
         if let Some(what) = &busy {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -165,6 +167,7 @@ impl App {
         };
         let mut clips: Vec<&ClipInfo> = t.clips.iter().filter(|c| !c.id.is_empty()).collect();
         clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let bridged = &self.bridged;
         clips
             .windows(2)
             .filter(|w| meet(w[0], w[1], fps))
@@ -173,6 +176,7 @@ impl App {
                 id: w[1].id.clone(),
                 name: format!("{} to {}", name(w[0]), name(w[1])),
                 picked: self.join_pick.as_ref() == Some(&w[1].id),
+                bridged: bridged.contains(&w[1].id),
                 fade: t
                     .transitions
                     .iter()
@@ -255,7 +259,7 @@ impl App {
             )
             .on_disabled_hover_text("needs both clips' files, and ffmpeg");
         if lut.clicked()
-            && let Some((fa, fb)) = files
+            && let Some((fa, fb)) = files.clone()
         {
             let m = &self.timeline_form.colormatch;
             let (frames, strength) = (m.frames, m.strength);
@@ -288,6 +292,19 @@ impl App {
             };
             let a = ask(Change::Lut { file: None });
             self.start_made_change(ui.ctx(), plugin, what, a, undo, make);
+        }
+        let bridge = ui
+            .add_enabled(
+                free && files.is_some() && self.ff.is_some(),
+                egui::Button::new("Bridge…"),
+            )
+            .on_hover_text(format!(
+                "a short clip made from the last frame of {na} to the first of {nb}, put in \
+                 between them"
+            ))
+            .on_disabled_hover_text("needs both clips' files, and ffmpeg");
+        if bridge.clicked() {
+            self.open_bridge(ui.ctx(), seq, a, b);
         }
         ui.separator();
         ui.add(
@@ -349,8 +366,25 @@ impl App {
             .as_ref()
             .and_then(|f| self.edit_takes.get(f))
             .cloned();
-        let name = take.as_ref().map_or(c.name.clone(), |t| t.to_string());
+        let bridge = c
+            .file
+            .as_ref()
+            .and_then(|f| self.edit_bridges.get(f))
+            .copied();
+        let name = match (&take, bridge) {
+            (Some(t), _) => t.to_string(),
+            (None, Some((_, _, n))) => format!("bridge #{n}"),
+            (None, None) => c.name.clone(),
+        };
         ui.label(RichText::new(&name).strong().color(theme::PAPER));
+        if let Some((id, _, _)) = bridge
+            && ui
+                .add_enabled(free, egui::Button::new("Bridge…"))
+                .on_hover_text("its prompt and takes")
+                .clicked()
+        {
+            self.open_bridge_of(id);
+        }
         let film = self.project.root.clone();
         let ask = |change| EditParams {
             film: film.clone(),
@@ -380,9 +414,17 @@ impl App {
                 ui.menu_button("Swap take", |ui| {
                     for (o, video) in &others {
                         if ui.button(o).clicked() {
+                            // All of the new take from the same point, however long it is.
+                            let length = self
+                                .ff
+                                .as_ref()
+                                .and_then(|ff| ff.probe(video).ok())
+                                .map(|i| i.duration - c.from)
+                                .filter(|l| *l > 0.0);
                             let change = Change::Replace {
                                 file: video.clone(),
                                 from: c.from,
+                                length,
                             };
                             start = Some((format!("swap {name} for {o}"), ask(change)));
                             ui.close();
@@ -390,7 +432,7 @@ impl App {
                     }
                 })
                 .response
-                .on_hover_text("puts another take of the shot in its place, same length")
+                .on_hover_text("puts another take of the shot in its place; what follows moves when it's longer or shorter")
                 .on_disabled_hover_text("the shot has no other take with a video");
             });
         }
@@ -448,7 +490,7 @@ impl App {
 
     /// Asks the plugin off the UI thread. `undo` is kept once the plugin says how; without one
     /// it's an undo itself, taken off the list once it worked.
-    fn start_change(
+    pub(crate) fn start_change(
         &mut self,
         ctx: &egui::Context,
         plugin: &str,
@@ -606,6 +648,264 @@ impl App {
                 }
             })
             .collect()
+    }
+
+    /// Shots of the film with a take but none of them in the sequence, e.g. one added after the
+    /// editor's project was made, and where each would go: (take, video, clip, after it).
+    fn missing(&mut self, seq: &SequenceInfo) -> Vec<(Take, PathBuf, String, bool)> {
+        if self.cut_takes.is_none() {
+            let mut all = vec![];
+            for c in &self.film.cut {
+                let got = match (&c.take, &c.video) {
+                    (Some(t), Some(v)) => Some((t.clone(), v.clone())),
+                    _ => self
+                        .project
+                        .takes(c.shot)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .rev()
+                        .filter(|t| !t.removed())
+                        .find_map(|t| {
+                            let j = t.output()?;
+                            let v = self.project.job_dir(j.id).join(j.outputs.first()?);
+                            Some((t, v))
+                        }),
+                };
+                all.extend(got);
+            }
+            self.cut_takes = Some(all);
+        }
+        let mut out = vec![];
+        for (t, video) in self.cut_takes.iter().flatten() {
+            if let Some((clip, after)) = self.place_of(t.shot, seq) {
+                out.push((t.clone(), video.clone(), clip, after));
+            }
+        }
+        out
+    }
+
+    /// Where a shot the sequence hasn't got would go: next to which clip, and after it or not.
+    /// None when the sequence has it already.
+    fn place_of(&self, shot: ShotRef, seq: &SequenceInfo) -> Option<(String, bool)> {
+        let clips: Vec<(ShotRef, &ClipInfo)> = seq
+            .video
+            .iter()
+            .flat_map(|t| &t.clips)
+            .filter_map(|c| {
+                Some((
+                    c.file.as_ref().and_then(|f| self.edit_takes.get(f))?.shot,
+                    c,
+                ))
+            })
+            .collect();
+        if clips.iter().any(|(s, _)| *s == shot) {
+            return None;
+        }
+        let shots: Vec<ShotRef> = self.film.cut.iter().map(|c| c.shot).collect();
+        let i = shots.iter().position(|r| *r == shot)?;
+        // After the last clip of the nearest shot before it, or else before the first of
+        // the nearest one after it.
+        let before = shots[..i].iter().rev().find_map(|r| {
+            clips
+                .iter()
+                .filter(|(s, _)| s == r)
+                .max_by(|a, b| a.1.start.total_cmp(&b.1.start))
+                .map(|(_, c)| (c.id.clone(), true))
+        });
+        before.or_else(|| {
+            shots[i + 1..].iter().find_map(|r| {
+                clips
+                    .iter()
+                    .filter(|(s, _)| s == r)
+                    .min_by(|a, b| a.1.start.total_cmp(&b.1.start))
+                    .map(|(_, c)| (c.id.clone(), false))
+            })
+        })
+    }
+
+    /// A take picked on the shot page goes in the editor's sequence too: in place of the
+    /// shot's clip, or next to the shots around it when the sequence hasn't got the shot.
+    pub(crate) fn follow_cut(&mut self, ctx: &egui::Context) {
+        self.change_done();
+        if self.cut_follow.is_none() || self.changing.is_some() {
+            return;
+        }
+        if self.host.is_none() {
+            self.cut_follow = None;
+            return;
+        }
+        // The sequence as it is after the select, not before.
+        self.refresh_edits(ctx);
+        if self.edits_stale || self.edits_asked.is_some() {
+            return;
+        }
+        let Some(t) = self.cut_follow.take() else {
+            return;
+        };
+        let selected = self
+            .film
+            .cut
+            .iter()
+            .any(|c| c.take.as_ref().is_some_and(|s| s.id == t.id));
+        let Some((file, name)) = crate::cut::main_sequence(&self.project.root, &self.edits.0)
+        else {
+            return;
+        };
+        let plugin = crate::cut::plugin_of(&self.edits.0, &file);
+        let seq = self
+            .edits
+            .0
+            .iter()
+            .find(|e| e.file == file)
+            .and_then(|e| e.sequences.iter().find(|s| s.name == name))
+            .cloned();
+        let (Some(seq), Ok(video)) = (seq, self.project.take_video(t.id)) else {
+            return;
+        };
+        if !selected || plugin.is_empty() {
+            return;
+        }
+        let video = std::path::absolute(&video).unwrap_or(video);
+        let clips: Vec<ClipInfo> = seq
+            .video
+            .iter()
+            .flat_map(|tr| &tr.clips)
+            .filter(|c| {
+                c.file
+                    .as_ref()
+                    .and_then(|f| self.edit_takes.get(f))
+                    .is_some_and(|x| x.shot == t.shot)
+            })
+            .cloned()
+            .collect();
+        let (what, clip, change) = match &clips[..] {
+            [] => {
+                let Some((clip, after)) = self.place_of(t.shot, &seq) else {
+                    return;
+                };
+                let change = Change::Insert {
+                    file: video,
+                    after,
+                    sound: true,
+                };
+                (format!("{t} in"), clip, change)
+            }
+            [c] => {
+                let was = c.file.as_ref().and_then(|f| self.edit_takes.get(f));
+                if was.is_some_and(|w| w.id == t.id) {
+                    return;
+                }
+                let was = was.map_or(c.name.clone(), |w| w.to_string());
+                // All of the new take from the same point, as Swap take does.
+                let length = self
+                    .ff
+                    .as_ref()
+                    .and_then(|ff| ff.probe(&video).ok())
+                    .map(|i| i.duration - c.from)
+                    .filter(|l| *l > 0.0);
+                let change = Change::Replace {
+                    file: video,
+                    from: c.from,
+                    length,
+                };
+                (format!("swap {was} for {t}"), c.id.clone(), change)
+            }
+            _ => {
+                self.info(format!(
+                    "{t} selected; {} is cut from several clips in the sequence, so swap the \
+                     one you want on the Cut page",
+                    t.shot
+                ));
+                return;
+            }
+        };
+        let ask = EditParams {
+            film: self.project.root.clone(),
+            file: file.clone(),
+            sequence: seq.name.clone(),
+            clip,
+            change,
+        };
+        let undo = Undo {
+            plugin: plugin.clone(),
+            file,
+            sequence: seq.name.clone(),
+            what: what.clone(),
+            steps: serde_json::Value::Null,
+        };
+        self.start_change(ctx, &plugin, what, ask, Some(undo));
+    }
+
+    /// Offers to put shots the sequence hasn't got into it, sound and all.
+    pub(crate) fn missing_shots(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin: &str,
+        app: &str,
+        file: &Path,
+        seq: &SequenceInfo,
+    ) {
+        let missing = self.missing(seq);
+        let mut put = None;
+        for (t, video, clip, after) in missing {
+            ui.horizontal_wrapped(|ui| {
+                ui.weak(format!("{} isn't in {app}'s sequence.", t.shot));
+                let next_to = seq
+                    .video
+                    .iter()
+                    .flat_map(|t| &t.clips)
+                    .find(|c| c.id == clip)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+                let tip = format!(
+                    "{t} {} {next_to}, moving what follows later",
+                    if after { "after" } else { "before" }
+                );
+                if ui
+                    .add_enabled(
+                        self.changing.is_none(),
+                        egui::Button::new(format!("Put {t} in")),
+                    )
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    put = Some((t, video, clip, after));
+                }
+            });
+        }
+        let Some((t, video, clip, after)) = put else {
+            return;
+        };
+        let video = std::path::absolute(&video).unwrap_or(video);
+        let what = format!("{t} in");
+        let ask = EditParams {
+            film: self.project.root.clone(),
+            file: file.to_path_buf(),
+            sequence: seq.name.clone(),
+            clip,
+            change: Change::Insert {
+                file: video,
+                after,
+                sound: true,
+            },
+        };
+        let undo = Undo {
+            plugin: plugin.to_string(),
+            file: file.to_path_buf(),
+            sequence: seq.name.clone(),
+            what: what.clone(),
+            steps: serde_json::Value::Null,
+        };
+        let selected = self
+            .film
+            .cut
+            .iter()
+            .any(|c| c.take.as_ref().is_some_and(|s| s.id == t.id));
+        if !selected {
+            self.flush();
+            self.apply(vec![crate::edit::Action::Select(t)]);
+        }
+        self.start_change(ui.ctx(), plugin, what, ask, Some(undo));
     }
 
     /// Offers to select the takes the editor's sequence uses.
@@ -871,6 +1171,7 @@ impl App {
                     ask.change = Change::Replace {
                         file: std::path::absolute(&out).unwrap_or(out),
                         from: head,
+                        length: None,
                     };
                     host.edit_clip(&editor, &ask)
                 })

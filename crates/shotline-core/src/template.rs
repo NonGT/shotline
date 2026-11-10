@@ -40,6 +40,7 @@ const DEFAULTS: &[(&str, &str)] = &[
         "translate",
         include_str!("../../../assets/prompts/translate.md"),
     ),
+    ("bridge", include_str!("../../../assets/prompts/bridge.md")),
 ];
 
 impl Project {

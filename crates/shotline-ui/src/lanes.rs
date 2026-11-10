@@ -28,6 +28,8 @@ pub(crate) struct Join {
     /// "01-010#1 to 01-020#1".
     pub name: String,
     pub picked: bool,
+    /// Has a bridge made for it, not put in yet.
+    pub bridged: bool,
     /// A transition across it: where it starts and how long it lasts.
     pub fade: Option<(f64, f64)>,
 }
@@ -229,6 +231,8 @@ pub(crate) fn show(
             });
             let colour = if j.picked || resp.hovered() {
                 theme::TUNGSTEN
+            } else if j.bridged {
+                theme::TUNGSTEN_DEEP
             } else {
                 theme::PAPER
             };
@@ -243,9 +247,10 @@ pub(crate) fn show(
                 colour,
                 Stroke::new(1.0, theme::LINE),
             ));
+            let bridged = if j.bridged { "; has a bridge" } else { "" };
             let resp = resp.on_hover_text(match j.fade {
-                Some((_, l)) => format!("{}: dissolve, {l:.2} s", j.name),
-                None => format!("{}: a straight cut", j.name),
+                Some((_, l)) => format!("{}: dissolve, {l:.2} s{bridged}", j.name),
+                None => format!("{}: a straight cut{bridged}", j.name),
             });
             if resp.clicked() {
                 hit = Some(Hit::PickJoin(j.id.clone()));

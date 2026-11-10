@@ -239,6 +239,32 @@ fn lines_are_edited_and_removed() {
 }
 
 #[test]
+fn a_recording_made_elsewhere_is_one_of_the_speakers() {
+    let (dir, p) = new_project();
+    p.add_element(Kind::Cast, "Paka", None, "").unwrap();
+    p.add_chapter("Into the forest").unwrap();
+    let r = p.add_shot("1", None, Shot::default()).unwrap();
+    let file = dir.path().join("Paka says hi.MP3");
+    fs::write(&file, "mp3").unwrap();
+    assert!(p.import_recording(r, "paka", " ", &file).is_err());
+    assert!(
+        p.import_recording(r, "paka", "hi", &dir.path().join("none.mp3"))
+            .is_err()
+    );
+
+    let j = p.import_recording(r, "@paka", "hi", &file).unwrap();
+    assert_eq!(j.outputs, vec!["out.mp3".to_string()]);
+    assert_eq!(fs::read(p.job_dir(j.id).join("out.mp3")).unwrap(), b"mp3");
+    assert_eq!(j.brief.as_deref(), Some("Paka says hi.MP3"));
+    let all = p.recordings_by("paka", Some(r)).unwrap();
+    assert_eq!(all.iter().map(|x| x.id).collect::<Vec<_>>(), vec![j.id]);
+
+    p.add_line(r, "paka", "hi", None).unwrap();
+    p.set_line_audio(r, 0, Some(&j)).unwrap();
+    assert_eq!(p.line_audio(r, 0).unwrap().map(|x| x.id), Some(j.id));
+}
+
+#[test]
 fn format_is_set_without_touching_the_rest() {
     let (dir, mut p) = new_project();
     let path = dir.path().join("shotline.toml");

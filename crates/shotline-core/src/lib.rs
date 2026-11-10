@@ -1,3 +1,4 @@
+mod bridge;
 pub mod dotenv;
 mod draft;
 mod element;
@@ -16,6 +17,7 @@ pub mod slug;
 mod template;
 mod timeline;
 
+pub use bridge::{Bridge, Point};
 pub use draft::{BuiltDraft, Draft, DraftFor, build_draft, finish_draft, looks_english};
 pub use element::{Element, Kind, Voice};
 pub use error::{Error, Result};
@@ -35,3 +37,4 @@ pub use shot::{Chapter, Line, ModelOverride, Shot, ShotImage, ShotRef, Transitio
 pub use shotline_ledger as ledger;
 pub use shotline_protocol as protocol;
 pub use timeline::{ColourMatch, CutShot, MatchAt, TIMELINE_FILE, Timeline, Track};
+pub use ulid::Ulid;

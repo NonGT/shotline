@@ -130,6 +130,9 @@ pub struct ModelInfo {
     pub start_frame: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub start_frame_with_refs: bool,
+    /// Takes a frame to end on too, so it can make a clip between two others.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub end_frame: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub audio_input: bool,
     /// Audio only goes along with at least one reference image.
@@ -517,8 +520,23 @@ pub struct EditParams {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Change {
     /// Puts `file` over the clip, from `from` seconds into it, at the same place and length.
-    /// The clip's sound stays when the file has none.
-    Replace { file: PathBuf, from: f64 },
+    /// The clip's sound stays when the file has none. With `length`, that much of the file
+    /// instead, moving what follows by the difference.
+    Replace {
+        file: PathBuf,
+        from: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<f64>,
+    },
+    /// Puts all of `file` in just before the clip, or just after it, moving what follows on
+    /// every track later by its length. Its picture only, unless `sound`.
+    Insert {
+        file: PathBuf,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        after: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sound: bool,
+    },
     /// The clip's input LUT, a `.cube` file; none takes it off.
     Lut {
         #[serde(default, skip_serializing_if = "Option::is_none")]

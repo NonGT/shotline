@@ -39,6 +39,7 @@ my-film/
     shots/010.toml     ids go 010, 020, ... so there's room to insert
   jobs/<ulid>/         one folder per generation: job.toml + output files
   timeline.toml        optional: shot order, crossfades, colour match, music/sfx tracks
+  bridges/<ulid>.toml  clips made to join two clips of an editor's sequence (see Editors)
   renders/             rendered films
   shared/              files shared with other apps, e.g. a video editor's project (see Editors)
   prompts/             optional overrides for the prompt templates
@@ -410,8 +411,9 @@ with the references. The shot keeps which take in `continue_from`: the one in th
 was turned on, or when no take is named, the one in the cut now. Putting another take of the shot
 before in the cut asks first and leaves the continue shot on the old frame; the shot's page then
 offers the new one ("Use new previous shot last frame", or `shot set --continue-from`). A take a
-continue shot starts on can't be removed. Not every model accepts a start frame and references together (Venice's
-h3 doesn't); `shotline prompt` says so before you pay for anything.
+continue shot starts on can't be removed. Venice's h3 won't take a start frame beside references, so
+there the frame goes as one more reference picture that the prompt calls the first frame: the shot
+opens close to it rather than exactly on it. fal's h3 takes both.
 
 The frame is taken with ffmpeg the first time a take of the continue shot is quoted, and kept as
 `jobs/<job>/last.png` next to the video it came from.
@@ -483,7 +485,8 @@ next time it's opened from shotline. The port and token are kept in
 `.shotline/cache/filmcraft-session.json` (mode 600), never in `shared/` or on a command line.
 
 Both edit the same timeline. On the Cut page a clip of an editor's sequence can be picked to open
-its shot, swap in another take, match its colour to the clip before, give it a LUT, or run a video
+its shot, swap in another take (all of it from the same point in, with what follows moved
+when it runs longer or shorter), match its colour to the clip before, give it a LUT, or run a video
 tool on it (interpolation, upscaling): the part in use plus half a second either side is cut out,
 the tool runs on it as a job with the usual quote, and the result is swapped in. A join between two
 clips can get a dissolve or lose one, or a colour match: the editor's own (Apply Match), or
@@ -496,7 +499,52 @@ the app's. Each change comes back with steps that undo just it, kept in
 `.shotline/cache/editor-undo.json`, since FilmCraft keeps no undo history in the file.
 
 When the sequence uses a take that isn't the shot's selected one, the page says so and offers to
-select it. Render on the sequence asks the editor to render it into `renders/`.
+select it. A shot with a take but none in the sequence, like one added after the project was made,
+can be put in with its sound: after the last clip of the nearest shot before it in the film, or
+before the first of the nearest one after, moving what follows later. Its take (the selected one,
+or else the newest) gets selected too. The other way round, "Use in the cut" on a shot's page
+puts that take in the sequence as well: in place of the shot's clip (as Swap take does), or where
+a missing shot would go. A shot cut from several clips is left for the Cut page. Render on the
+sequence asks the editor to render it into `renders/`.
+
+Two clips that don't quite meet can be joined by a bridge: a short clip from a model that takes
+a start and an end frame (`end_frame` in its model info; h3 on fal does, and
+Venice's minimax-h3-max-image-to-video from 5 s), made from the frame shown
+last before the join and the one shown first after it. A bridge isn't a shot. It belongs to the
+join, so it follows the trims there, not the shots' takes:
+
+```toml
+# bridges/01K....toml
+sequence = "fan"
+start = "bridges/01K.../start-1762650000000.png"
+end = "bridges/01K.../end-1762650000000.png"
+prompt = "she turns to the window"
+length = 2.0
+plugin = "fal"
+model = "minimax/h3-max/reference-to-video"
+resolution = "768P"
+used = "01K..."            # the take put in the cut last
+
+[from]                     # inside the last frame shown before the join
+file = "jobs/01K.../out.mp4"
+at = 4.979
+
+[to]                       # inside the first one after it
+file = "jobs/01K.../out.mp4"
+at = 0.021
+```
+
+Bridge… on a join opens its window: the two frames, the prompt (put into English like a shot's,
+kept as `english`), the model, length and resolution, the price, Go, and the takes to play and
+put in. A take is a job with `bridge` set instead of a shot, quoted first and in the ledger like
+any other. The prompt goes with the note in `prompts/bridge.md` about keeping the motion going.
+Use in the cut asks the editor to `insert` it before the clip after the join, so what follows
+moves later; another take later goes in its place with `replace`. Bridges are silent: the clips'
+own sound stays where it was. When a trim moves either clip's end, the window says so and offers
+to take the frames again for the next takes. A join with a bridge not yet in is marked on the
+timeline, a bridge in the sequence is named `bridge #n`, and picking either opens the window
+again. One closed with no takes is thrown away. `shotline bridge ls` lists them and
+`shotline bridge take <id>` makes another take.
 
 ## Money
 
@@ -621,6 +669,7 @@ shotline import <shot> <file>
 shotline run <op> --plugin p --model m [--prompt ..] [--duration s] [--input name=file]
              [--ref file] [--param k=v] [--yes]          one-off operation outside a shot
 shotline timeline [render [-o file] [--no-colormatch] [--xfade s]]
+shotline bridge ls | take <id> [--no-translate] [--yes]
 shotline cost [--by chapter|shot|op|plugin|day] [--csv]
 shotline cost verify | rates | reconcile [--plugin p]
 shotline cost adjust <amount> <unit> --note ...

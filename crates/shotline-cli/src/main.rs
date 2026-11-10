@@ -7,6 +7,7 @@ use shotline_core::{
     Draft, Git, Kind, ModelOverride, Project, Shot, ShotRef, Transition, Voice, build,
 };
 
+mod bridge;
 mod cost;
 mod draft;
 mod fetch;
@@ -189,6 +190,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<TimelineCmd>,
     },
+    /// Clips made to join two clips of the editor's sequence, made on the Cut page
+    #[command(subcommand)]
+    Bridge(BridgeCmd),
     /// Serve the commands as MCP tools over stdio, for an agent to drive
     Mcp,
     /// Open the desktop app on the film
@@ -297,6 +301,20 @@ enum CostCmd {
         unit: String,
         #[arg(long, default_value = "")]
         note: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BridgeCmd {
+    Ls,
+    /// Make another take of a bridge, after showing the price
+    Take {
+        id: String,
+        /// Send the prompt as written, even if it isn't in English
+        #[arg(long)]
+        no_translate: bool,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -648,6 +666,28 @@ impl shotline_ui::Host for Plugins {
         at: &str,
     ) -> Result<PathBuf> {
         shoot::op_at(&Project::open(film)?, plugin, req, at)
+    }
+
+    fn bridge_quote(
+        &self,
+        film: &Path,
+        id: shotline_core::Ulid,
+        translate: bool,
+    ) -> Result<String> {
+        bridge::quote(&Project::open(film)?, id, translate)
+    }
+
+    fn bridge_take(
+        &self,
+        film: &Path,
+        id: shotline_core::Ulid,
+        at: &str,
+        translate: bool,
+    ) -> Result<PathBuf> {
+        let p = Project::open(film)?;
+        let job = bridge::take_at(&p, id, at, translate)?;
+        p.bridge_video(&job)
+            .with_context(|| format!("job {} made no video", job.id))
     }
 
     fn export_edit(
@@ -1384,6 +1424,35 @@ fn run(cli: Cli) -> Result<()> {
                 plugins::set_option(&mut p, plugin, model, key, value.as_deref())?
             )
         }
+        Cmd::Bridge(ref cmd) => {
+            let p = open()?;
+            match cmd {
+                BridgeCmd::Ls => bridge::ls(&p)?,
+                BridgeCmd::Take {
+                    id,
+                    no_translate,
+                    yes,
+                } => {
+                    let id = p
+                        .bridges()?
+                        .into_iter()
+                        .map(|(i, _)| i)
+                        .filter(|i| i.to_string().starts_with(&id.to_ascii_uppercase()))
+                        .collect::<Vec<_>>();
+                    let [id] = id[..] else {
+                        bail!("that names {} bridges; give more of its id", id.len());
+                    };
+                    let cost = bridge::quote(&p, id, !no_translate)?;
+                    if !yes && !shoot::confirm(&format!("spend {cost}?"))? {
+                        println!("nothing spent");
+                        return Ok(());
+                    }
+                    let job = bridge::take_at(&p, id, &cost, !no_translate)?;
+                    println!("done · {} · job {}", shoot::job_cost(&job), job.id);
+                }
+            }
+        }
+
         Cmd::Timeline { ref cmd } => {
             let p = open()?;
             match cmd {

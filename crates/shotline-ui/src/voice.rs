@@ -938,6 +938,20 @@ impl App {
                     self.ask(ui.ctx(), r, s.lines.len(), None);
                     return;
                 }
+                if ui
+                    .add_enabled(has, egui::Button::new("From a file…"))
+                    .on_hover_text("a recording made somewhere else, of these words")
+                    .on_disabled_hover_text("type what they say first")
+                    .clicked()
+                    && let Some(file) = rfd::FileDialog::new()
+                        // What the video models take as a voice.
+                        .add_filter("Audio", &["wav", "mp3", "m4a"])
+                        .pick_file()
+                {
+                    self.flush();
+                    self.apply(vec![Action::ImportLine(r, self.form.new.clone(), file)]);
+                    return;
+                }
                 let text = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.form.new.text)

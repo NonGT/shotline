@@ -116,6 +116,9 @@ pub struct Job {
     pub shot: Option<ShotRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take: Option<Ulid>,
+    /// The bridge it's a take of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<Ulid>,
     /// Position in the take's recipe, from 0.
     #[serde(default)]
     pub step: u32,
@@ -165,6 +168,7 @@ impl Job {
             model: model.into(),
             shot: None,
             take: None,
+            bridge: None,
             step: 0,
             inputs: vec![],
             params: toml::Table::new(),
@@ -288,7 +292,7 @@ impl Project {
         fsx::write_toml(&self.job_dir(id).join("job.toml"), &job)
     }
 
-    fn load_job(&self, id: Ulid) -> Result<Job> {
+    pub(crate) fn load_job(&self, id: Ulid) -> Result<Job> {
         let path = self.job_dir(id).join("job.toml");
         if !path.exists() {
             return invalid(format!("no job {id}"));

@@ -975,14 +975,16 @@ mod tests {
     async fn edits_with_filmcraft() {
         let tmp = tempfile::tempdir().unwrap();
         let film = tmp.path().join("fan");
-        let (a, b, c) = (
+        let (a, b, c, d) = (
             film.join("jobs/a/out.mp4"),
             film.join("jobs/b/out.mp4"),
             film.join("jobs/c/out.mp4"),
+            film.join("jobs/d/out.mp4"),
         );
         colour_clip(&a, "red", 3, true);
         colour_clip(&b, "blue", 3, true);
         colour_clip(&c, "green", 4, false);
+        colour_clip(&d, "yellow", 2, true);
         let piece = |name: &str, file: &Path, start: f64| ClipInfo {
             name: name.into(),
             file: Some(file.into()),
@@ -1079,6 +1081,7 @@ mod tests {
                 Change::Replace {
                     file: c.clone(),
                     from: 0.5,
+                    length: None,
                 },
             ))
             .await
@@ -1090,6 +1093,70 @@ mod tests {
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         let (v, _) = at(3.0);
         assert_eq!((v.file.as_ref(), v.from), (Some(&b), 0.0));
+        // All 4 s of green over the red 3 s, so blue and its sound move a second later.
+        let done = FilmCraft
+            .edit(&ask(
+                &at(0.0).0.id,
+                Change::Replace {
+                    file: c.clone(),
+                    from: 0.0,
+                    length: Some(4.0),
+                },
+            ))
+            .await
+            .unwrap();
+        let (v, _) = at(0.0);
+        assert_eq!((v.file.as_ref(), v.length), (Some(&c), 4.0));
+        let (v, snd) = at(4.0);
+        assert_eq!((v.file.as_ref(), snd.file.as_ref()), (Some(&b), Some(&b)));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        let (v, snd) = at(0.0);
+        assert_eq!((v.file.as_ref(), v.length), (Some(&a), 3.0));
+        assert_eq!(snd.file.as_ref(), Some(&a));
+        assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+        let inserted = async || {
+            // The green clip in at the join, the blue one and its sound moved on by its length.
+            let done = FilmCraft
+                .edit(&ask(
+                    &at(3.0).0.id,
+                    Change::Insert {
+                        file: c.clone(),
+                        after: false,
+                        sound: false,
+                    },
+                ))
+                .await
+                .unwrap();
+            let (green, (blue, snd)) = (seq().video[0].clips[1].clone(), at(7.0));
+            assert_eq!((green.file.as_ref(), green.start), (Some(&c), 3.0));
+            assert_eq!(blue.file.as_ref(), Some(&b));
+            assert_eq!(snd.file.as_ref(), Some(&b));
+            assert_eq!(seq().audio[0].clips.len(), 2, "the bridge is silent");
+            done
+        };
+        let done = inserted().await;
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+
+        // A new shot's take after the last clip, with its sound.
+        let done = FilmCraft
+            .edit(&ask(
+                &at(3.0).0.id,
+                Change::Insert {
+                    file: d.clone(),
+                    after: true,
+                    sound: true,
+                },
+            ))
+            .await
+            .unwrap();
+        let (v, snd) = at(6.0);
+        assert_eq!((v.file.as_ref(), snd.file.as_ref()), (Some(&d), Some(&d)));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert_eq!(seq().video[0].clips.len(), 2);
+        assert_eq!(seq().audio[0].clips.len(), 2);
+        // Undo can give the clips new ids.
+        let v = at(3.0).0;
 
         // A colour match adds a Lumetri; undo takes it off again.
         let done = FilmCraft
@@ -1208,11 +1275,15 @@ mod tests {
                 Change::Replace {
                     file: c.clone(),
                     from: 0.0,
+                    length: None,
                 },
             ))
             .await
             .unwrap();
         assert_eq!(at(3.0).0.file.as_ref(), Some(&c));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+        let done = inserted().await;
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
 

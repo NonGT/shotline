@@ -107,6 +107,19 @@ pub fn models() -> Vec<ModelInfo> {
         })),
         ..ModelInfo::default()
     }];
+    // No references or audio, but it ends on a frame, so it can bridge two clips.
+    models.push(ModelInfo {
+        id: "minimax-h3-max-image-to-video".into(),
+        op: Op::VideoGenerate,
+        min_duration: Some(5.0),
+        max_duration: Some(15.0),
+        whole_seconds: true,
+        resolutions: vec!["480P".into(), "768P".into(), "1080P".into()],
+        start_frame: true,
+        end_frame: true,
+        price: Some("by length and resolution, e.g. about $0.21 for 5 s at 480P".into()),
+        ..ModelInfo::default()
+    });
     for id in TEXTS {
         models.push(ModelInfo {
             id: id.to_string(),
@@ -715,27 +728,52 @@ pub fn body(req: &Request) -> Result<(Map<String, Value>, Vec<usize>)> {
             }
         }
     }
+    // Venice won't take a start or end frame beside references, so with references they go as
+    // two more pictures, named in the prompt. Close to the frame, not exactly on it.
+    let with_refs = !images.is_empty();
+    let mut frames = vec![];
+    for (key, path, name, says) in [
+        (
+            "image_url",
+            &req.start_frame,
+            "start_frame",
+            "is the first frame: the video opens on this picture and carries on from it",
+        ),
+        (
+            "end_image_url",
+            &req.end_frame,
+            "end_frame",
+            "is the last frame: the video ends on this picture",
+        ),
+    ] {
+        let Some(p) = path else { continue };
+        let url = picture_url(p, name, 1920)?;
+        if with_refs {
+            images.push(url);
+            frames.push(format!("<Picture {}> {says}.", images.len()));
+        } else {
+            m.insert(key.into(), json!(url));
+        }
+    }
+    if !frames.is_empty() {
+        let prompt = m
+            .get("prompt")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .trim_end();
+        let said = frames.join("\n");
+        let prompt = if prompt.is_empty() {
+            said
+        } else {
+            format!("{prompt}\n{said}")
+        };
+        m.insert("prompt".into(), json!(prompt));
+    }
     if !images.is_empty() {
         m.insert("reference_image_urls".into(), json!(images));
     }
     if let Some(a) = audio {
         m.insert("audio_url".into(), json!(a));
-    }
-    for (key, path, name) in [
-        ("image_url", &req.start_frame, "start_frame"),
-        ("end_image_url", &req.end_frame, "end_frame"),
-    ] {
-        if let Some(p) = path {
-            if !images.is_empty() {
-                return Err(PluginError::new(
-                    ErrorKind::Validation,
-                    "Venice doesn't take a start or end frame together with reference images",
-                )
-                .field(name)
-                .into());
-            }
-            m.insert(key.into(), json!(picture_url(p, name, 1920)?));
-        }
     }
     for (k, v) in &req.params {
         m.insert(k.clone(), v.clone());

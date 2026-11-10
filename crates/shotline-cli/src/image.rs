@@ -83,7 +83,16 @@ fn make(
         text: m.prompt,
         english,
     };
-    let Some(job) = crate::shoot::spend(p, &plugin, &req, shot, label, Some(brief), element, go)?
+    let Some(job) = crate::shoot::spend(
+        p,
+        &plugin,
+        &req,
+        (shot, None),
+        label,
+        Some(brief),
+        element,
+        go,
+    )?
     else {
         return Ok(None);
     };
