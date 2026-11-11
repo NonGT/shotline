@@ -1,11 +1,11 @@
-//! ElevenLabs text to speech.
+//! ElevenLabs text to speech, and sound effects.
 //!
 //! `POST /v1/text-to-speech/{voice_id}?output_format=mp3_44100_128` with `xi-api-key` answers with
 //! the audio straight away, so `run` does the work and `poll` just says it's done. ElevenLabs bills
 //! in credits per character; quotes count one credit per character (`elevenlabs-credit`).
 //! `GET /v1/user/subscription` (needs a key with `user_read`) gives what a credit costs, the next
 //! invoice over the month's credits, and how many credits are left. `GET /v1/voices` lists the
-//! account's voices.
+//! account's voices. Sound effects are `POST /v1/sound-generation`, also answered straight away.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -32,8 +32,47 @@ const MODELS: &[&str] = &[
     "eleven_turbo_v2_5",
 ];
 
+/// Sound effects from a description.
+const SFX_MODELS: &[&str] = &["eleven_text_to_sound_v2", "eleven_text_to_sound_v3"];
+
+/// Credits a sound effect takes: per second when its length is set, a flat amount when the model
+/// picks it. From ElevenLabs' docs; the balance check after a run books what it really took.
+const SFX_PER_SECOND: f64 = 40.0;
+const SFX_FLAT: f64 = 200.0;
+
+fn sfx_models() -> Vec<ModelInfo> {
+    SFX_MODELS
+        .iter()
+        .map(|id| ModelInfo {
+            id: (*id).into(),
+            op: Op::AudioSfx,
+            min_duration: Some(0.5),
+            max_duration: Some(30.0),
+            price: Some(
+                "about 40 credits a second with a length set, 200 without, from your ElevenLabs plan"
+                    .into(),
+            ),
+            params_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "prompt_influence": {
+                        "type": "number", "minimum": 0, "maximum": 1, "default": 0.3,
+                        "title": "Prompt influence",
+                        "description": "higher sticks to the words, lower varies more"
+                    },
+                    "loop": {
+                        "type": "boolean", "default": false, "title": "Loop",
+                        "description": "ends where it starts, to repeat smoothly"
+                    }
+                }
+            })),
+            ..ModelInfo::default()
+        })
+        .collect()
+}
+
 pub fn models() -> Vec<ModelInfo> {
-    MODELS
+    let mut out: Vec<ModelInfo> = MODELS
         .iter()
         .map(|id| ModelInfo {
             id: (*id).into(),
@@ -60,7 +99,9 @@ pub fn models() -> Vec<ModelInfo> {
             })),
             ..ModelInfo::default()
         })
-        .collect()
+        .collect();
+    out.extend(sfx_models());
+    out
 }
 
 /// ElevenLabs' `voice_settings`, as documented for text-to-speech.
@@ -152,14 +193,27 @@ fn bad(kind: ErrorKind, msg: impl Into<String>, field: &str) -> Error {
 }
 
 fn check(req: &Request) -> Result<()> {
-    if req.op != Op::AudioTts {
+    let models = match req.op {
+        Op::AudioTts => MODELS,
+        Op::AudioSfx => SFX_MODELS,
+        _ => {
+            return Err(bad(
+                ErrorKind::Unsupported,
+                format!("only audio.tts and audio.sfx, not {}", req.op),
+                "op",
+            ));
+        }
+    };
+    if let Some(d) = req.duration.filter(|_| req.op == Op::AudioSfx)
+        && !(0.5..=30.0).contains(&d)
+    {
         return Err(bad(
-            ErrorKind::Unsupported,
-            format!("only audio.tts, not {}", req.op),
-            "op",
+            ErrorKind::Validation,
+            format!("a sound effect is 0.5 to 30 seconds, not {d}"),
+            "duration",
         ));
     }
-    if !MODELS.contains(&req.model.as_str()) {
+    if !models.contains(&req.model.as_str()) {
         return Err(bad(
             ErrorKind::Validation,
             format!("no model {}", req.model),
@@ -195,6 +249,20 @@ pub fn body(req: &Request) -> Result<Map<String, Value>> {
         m.insert(k.clone(), v.clone());
     }
     Ok(m)
+}
+
+/// What `/sound-generation` is sent.
+pub fn sfx_body(req: &Request) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("text".into(), json!(req.prompt.clone().unwrap_or_default()));
+    m.insert("model_id".into(), json!(req.model));
+    if let Some(d) = req.duration {
+        m.insert("duration_seconds".into(), json!(d));
+    }
+    for (k, v) in &req.params {
+        m.insert(k.clone(), v.clone());
+    }
+    m
 }
 
 pub fn map_error(status: u16, body: &Value) -> PluginError {
@@ -330,6 +398,22 @@ impl Plugin for ElevenLabs {
 
     async fn quote(&self, req: &Request) -> Result<Quote> {
         check(req)?;
+        if req.op == Op::AudioSfx {
+            return Ok(match req.duration {
+                Some(d) => Quote {
+                    amount: (d * SFX_PER_SECOND).ceil(),
+                    unit: UNIT.into(),
+                    units: Some(d),
+                    unit_name: Some("seconds".into()),
+                },
+                None => Quote {
+                    amount: SFX_FLAT,
+                    unit: UNIT.into(),
+                    units: None,
+                    unit_name: None,
+                },
+            });
+        }
         let chars = req.prompt.as_deref().unwrap_or("").chars().count() as f64;
         Ok(Quote {
             amount: chars,
@@ -341,16 +425,27 @@ impl Plugin for ElevenLabs {
 
     async fn run(&self, req: &Request, _output_dir: &Path) -> Result<String> {
         check(req)?;
-        let voice = voice_id(req)?;
         let key = self.key()?;
+        let (url, body) = if req.op == Op::AudioSfx {
+            (
+                format!("{}/sound-generation?output_format=mp3_44100_128", self.base),
+                sfx_body(req),
+            )
+        } else {
+            let voice = voice_id(req)?;
+            (
+                format!(
+                    "{}/text-to-speech/{voice}?output_format=mp3_44100_128",
+                    self.base
+                ),
+                body(req)?,
+            )
+        };
         let r = self
             .http
-            .post(format!(
-                "{}/text-to-speech/{voice}?output_format=mp3_44100_128",
-                self.base
-            ))
+            .post(url)
             .header("xi-api-key", key)
-            .json(&Value::Object(body(req)?))
+            .json(&Value::Object(body))
             .send()
             .await
             .map_err(|e| {

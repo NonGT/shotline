@@ -1155,6 +1155,52 @@ mod tests {
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         assert_eq!(seq().video[0].clips.len(), 2);
         assert_eq!(seq().audio[0].clips.len(), 2);
+
+        // A sound a second into the blue take, on a track of its own, lifted and put back.
+        let door = film.join("jobs/e/out.wav");
+        std::fs::create_dir_all(door.parent().unwrap()).unwrap();
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=880:d=1.5"])
+            .arg(&door)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let laid = async || {
+            let done = FilmCraft
+                .edit(&ask(
+                    &at(3.0).0.id,
+                    Change::Sound {
+                        file: door.clone(),
+                        at: 1.0,
+                    },
+                ))
+                .await
+                .unwrap();
+            let s = seq();
+            assert_eq!(
+                s.audio.len(),
+                2,
+                "the takes' own track has no room: {:?}",
+                s.audio
+            );
+            let put = s.audio[1].clips[0].clone();
+            assert_eq!((put.file.as_ref(), put.start), (Some(&door), 4.0));
+            assert_eq!(s.video[0].clips.len(), 2, "nothing else moved");
+            (done, put)
+        };
+        let (done, put) = laid().await;
+        let off = FilmCraft.edit(&ask(&put.id, Change::Lift)).await.unwrap();
+        assert!(seq().audio[1].clips.is_empty());
+        FilmCraft.edit(&ask("", undo(&off))).await.unwrap();
+        let back = seq().audio[1].clips[0].clone();
+        assert_eq!(
+            (back.file.as_ref(), back.start, back.length),
+            (Some(&door), 4.0, 1.5)
+        );
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert!(seq().audio[1].clips.is_empty());
+        assert_eq!(seq().audio[0].clips.len(), 2);
+
         // Undo can give the clips new ids.
         let v = at(3.0).0;
 
@@ -1196,6 +1242,7 @@ mod tests {
             sequence: "fan".into(),
             out: film.join("renders").join(name),
             saved: false,
+            scale: None,
         };
         let length = |f: &Path| {
             let out = std::process::Command::new("ffprobe")
@@ -1222,13 +1269,27 @@ mod tests {
             length(&got.file)
         );
         if editor::cli_program().is_some() {
-            // The saved file, rendered beside the open app.
+            // The saved file, rendered beside the open app, at half size.
             let ask = ExportParams {
                 saved: true,
+                scale: Some(0.5),
                 ..render("saved.mp4")
             };
-            let got = FilmCraft.export(&ask).await.unwrap();
-            assert!((length(&got.file) - 6.0).abs() < 0.2);
+            let half = FilmCraft.export(&ask).await.unwrap();
+            assert!((length(&half.file) - 6.0).abs() < 0.2);
+            let width = |f: &Path| {
+                let out = std::process::Command::new("ffprobe")
+                    .args(["-v", "error", "-select_streams", "v:0"])
+                    .args(["-show_entries", "stream=width", "-of", "csv=p=0"])
+                    .arg(f)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap()
+            };
+            assert_eq!(width(&half.file) * 2, width(&got.file));
         }
 
         let _ = s.call("app.quit", json!({}));
@@ -1286,6 +1347,10 @@ mod tests {
         let done = inserted().await;
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+        // The empty track left from before has room now.
+        let (done, _) = laid().await;
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert!(seq().audio[1].clips.is_empty());
 
         // Taken off and put back, through the CLI.
         let fades = || seq().video[0].transitions.clone();

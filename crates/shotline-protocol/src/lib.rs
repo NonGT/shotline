@@ -537,6 +537,11 @@ pub enum Change {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         sound: bool,
     },
+    /// Lays all of `file` on an audio track with room for it, starting `at` seconds into the
+    /// clip's own file. Nothing moves.
+    Sound { file: PathBuf, at: f64 },
+    /// Takes the clip out, on a video or an audio track, and leaves its place empty.
+    Lift,
     /// The clip's input LUT, a `.cube` file; none takes it off.
     Lut {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -562,6 +567,9 @@ pub struct ExportParams {
     /// Render the project as saved, leaving an open editor alone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub saved: bool,
+    /// A fraction of the sequence's frame size, for a quicker render; full size without.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
 }
 
 /// What `export` made.

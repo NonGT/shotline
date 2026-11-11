@@ -802,6 +802,110 @@ fn say_request(p: &Project, r: ShotRef, i: usize) -> Result<(String, Request)> {
     shotline_engine::line_request(p, step, line)
 }
 
+fn effect_request(model: &str, text: &str, length: Option<f64>) -> Result<Request> {
+    if text.trim().is_empty() {
+        bail!("say what it sounds like first");
+    }
+    Ok(Request {
+        op: Op::AudioSfx,
+        model: model.to_string(),
+        prompt: Some(text.to_string()),
+        duration: length,
+        ..Request::default()
+    })
+}
+
+pub fn effect_quote(
+    p: &Project,
+    plugin: &str,
+    model: &str,
+    text: &str,
+    length: Option<f64>,
+) -> Result<String> {
+    quote_once(p, plugin, &effect_request(model, text, length)?)
+}
+
+/// Makes a sound effect for a sound over one of `r`'s takes, or a bridge's. None if it wasn't
+/// agreed to.
+pub fn effect(
+    p: &Project,
+    r: Option<ShotRef>,
+    (plugin, model): (&str, &str),
+    text: &str,
+    length: Option<f64>,
+    go: Go,
+) -> Result<Option<Job>> {
+    let req = effect_request(model, text, length)?;
+    let what = format!("sound for {}", over(r));
+    let Some(job) = spend(p, plugin, &req, (r, None), &what, None, None, go)? else {
+        return Ok(None);
+    };
+    if job.status != JobStatus::Done {
+        bail!(
+            "{what} wasn't made: {}",
+            job.error.as_deref().unwrap_or("no reason given")
+        );
+    }
+    Ok(Some(job))
+}
+
+fn over(r: Option<ShotRef>) -> String {
+    r.map_or("a bridge".into(), |r| r.to_string())
+}
+
+/// What `who` saying `text` asks for, as a line of `r` would, for a sound over one of its takes.
+/// Over a bridge, as `who`'s voice says it.
+fn speech_request(
+    p: &Project,
+    r: Option<ShotRef>,
+    who: &str,
+    text: &str,
+) -> Result<(String, Request)> {
+    if text.trim().is_empty() {
+        bail!("type what they say first");
+    }
+    let steps = match r {
+        Some(r) => p.steps(&p.shot(r)?)?,
+        None => vec![],
+    };
+    let step = steps.iter().find(|s| s.op == Op::AudioTts);
+    let line = shotline_core::Line {
+        who: who.trim_start_matches('@').to_string(),
+        text: text.to_string(),
+        at: None,
+        audio: None,
+    };
+    shotline_engine::line_request(p, step, &line)
+}
+
+pub fn speech_quote(p: &Project, r: Option<ShotRef>, who: &str, text: &str) -> Result<String> {
+    let (plugin, req) = speech_request(p, r, who, text)?;
+    quote_once(p, &plugin, &req)
+}
+
+/// Records `who` saying `text`, not as one of the shot's lines. None if it wasn't agreed to.
+pub fn speech(
+    p: &Project,
+    r: Option<ShotRef>,
+    who: &str,
+    text: &str,
+    go: Go,
+) -> Result<Option<Job>> {
+    let (plugin, req) = speech_request(p, r, who, text)?;
+    let what = format!("speech for {}", over(r));
+    let who = who.trim_start_matches('@');
+    let Some(job) = spend(p, &plugin, &req, (r, None), &what, None, Some(who), go)? else {
+        return Ok(None);
+    };
+    if job.status != JobStatus::Done {
+        bail!(
+            "{what} wasn't recorded: {}",
+            job.error.as_deref().unwrap_or("no reason given")
+        );
+    }
+    Ok(Some(job))
+}
+
 pub fn say_quote(p: &Project, r: ShotRef, i: usize) -> Result<String> {
     let (plugin, req) = say_request(p, r, i)?;
     quote_once(p, &plugin, &req)

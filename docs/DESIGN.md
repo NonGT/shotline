@@ -93,6 +93,11 @@ text = "@paka walks into the forest"
 file = "chapters/01-forest/shots/010/01.png"
 note = "the rest stop by the stream"
 
+[[sound]]   # optional, laid over a take in the cut; the model never hears it
+take = "01JBX9Q3T7K2M8V5N4R6P1W0YZ"
+job = "01JBXA2..."   # the file, copied into the job's folder
+at = 1.5             # seconds into the take
+
 [model]   # optional, overrides project defaults
 plugin = "fal"
 id = "minimax/h3-max/reference-to-video"
@@ -278,10 +283,13 @@ audio, video), start/end frame, seed, and `params` passed through from the shot.
 
 What a plugin says about its models can be overridden in the project's `models.toml`.
 
-First plugins: fal (built in, video), and in `plugins/` Venice (video), ElevenLabs (TTS) and
+First plugins: fal (built in, video), and in `plugins/` Venice (video), ElevenLabs (TTS, sound effects) and
 WaveSpeed (`sync/lipsync-3` for lip sync), installed with `cargo install --path plugins/<name>`.
 ElevenLabs quotes in `elevenlabs-credit` (one per character) and works out what a credit costs
 from the subscription (next invoice over the month's credits; the key needs `user_read`).
+Its sound effects (`eleven_text_to_sound_v2` and `_v3`, 0.5-30 s) are quoted at 40 credits a
+second with a length set and 200 without, as ElevenLabs' docs give it; the balance read after the
+run books what it really took.
 WaveSpeed quotes in USD from the `base_price` its model list gives per second of video.
 fal and Venice also make images (nano-banana, seedream and others). `plugins/local` is free and
 runs on the machine: `ffmpeg/minterpolate` and `ffmpeg/lanczos` for interpolation and upscaling,
@@ -467,10 +475,9 @@ job folder is named by its take. The Cut page's player shows a preview ffmpeg ma
 with its LUT files and dissolves, the audio tracks mixed. Other effects, Lumetri's sliders and
 built-in LUTs are left out. Once the sequence has stayed the same for 4 seconds while shotline's
 window is in front (so not while it's being cut in the editor), the editor plugin's `export`
-renders the saved file into the same folder (`<key>-full.mp4`), through `filmcraft-cli` so an open
-FilmCraft is left alone, and the player swaps to that, keeping its place.
-The folder keeps the 16 newest quick previews and the 3 newest full ones (about 100 MB each
-for 37 s at 1024 × 768). Render makes one into `renders/` to keep, through the open FilmCraft
+renders the saved file at half size into the same folder (`<key>-full.mp4`), through
+`filmcraft-cli` so an open FilmCraft is left alone, and the player swaps to that, keeping its place.
+The folder keeps the 16 newest quick previews and the 3 newest full ones. Render makes one into `renders/` to keep, through the open FilmCraft
 when there is one, so what isn't saved yet is in it. The page
 watches `shared/` and reads it again when the editor saves.
 
@@ -506,6 +513,20 @@ or else the newest) gets selected too. The other way round, "Use in the cut" on 
 puts that take in the sequence as well: in place of the shot's clip (as Swap take does), or where
 a missing shot would go. A shot cut from several clips is left for the Cut page. Render on the
 sequence asks the editor to render it into `renders/`.
+
+A take can have sounds over it, effects or a voice off: Sounds on the Cut page's clip tools, or
+on the shot page for the take in the cut. A bridge's take can too, from its clip; those are listed
+in the bridge's file, and its speech goes by the voice alone, with no shot's recipe to follow. A file is copied into a job of its own. Speech is one of
+the cast with a voice saying what's typed, priced first and made like a line's recording (the same
+voice and model), but not one of the shot's lines, so no take sends it. A sound effect is made from
+a description by any installed `audio.sfx` model, as long as asked or as long as the model makes
+it. Remake on a made one fills in its words (and for an effect its model and the length it came
+out), prices it, and puts the new one in its place, in the editor too. Each is listed in the
+shot's `[[sound]]` with where in the take it starts. With an editor project, it goes
+in the sequence too, on the first audio track with room at that point (a new one if none has),
+and Remove lifts it out of there as well. It stays where it was put: swapping the take later
+leaves it in the editor, and on the old take in the shot file. Without an editor, the film's own
+cut shows the sounds on a lane of their own and a render mixes them in.
 
 Two clips that don't quite meet can be joined by a bridge: a short clip from a model that takes
 a start and an end frame (`end_frame` in its model info; h3 on fal does, and

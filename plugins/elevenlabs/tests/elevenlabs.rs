@@ -117,7 +117,9 @@ async fn lists_voices() {
     );
     assert_eq!(v[1].description.as_deref(), Some("warm Thai narrator"));
     let d = el.describe().await.unwrap();
-    assert!(d.models.iter().all(|m| m.voice_schema.is_some()));
+    let speech = d.models.iter().filter(|m| m.op == Op::AudioTts);
+    assert!(speech.clone().count() > 0 && speech.clone().all(|m| m.voice_schema.is_some()));
+    assert!(d.models.iter().any(|m| m.op == Op::AudioSfx));
 }
 
 #[tokio::test]
@@ -163,6 +165,62 @@ async fn speaks() {
         Err(Error::Plugin(e)) => assert_eq!(e.field.as_deref(), Some("voice")),
         other => panic!("{other:?}"),
     }
+}
+
+fn effect(text: &str, length: Option<f64>) -> Request {
+    Request {
+        op: Op::AudioSfx,
+        model: "eleven_text_to_sound_v2".into(),
+        prompt: Some(text.into()),
+        duration: length,
+        ..Request::default()
+    }
+}
+
+#[tokio::test]
+async fn quotes_sound_effects_by_length() {
+    let el = ElevenLabs::new(None, "http://unused");
+    let q = el.quote(&effect("a door slams", Some(2.5))).await.unwrap();
+    assert_eq!((q.amount, q.units), (100.0, Some(2.5)));
+    let q = el.quote(&effect("a door slams", None)).await.unwrap();
+    assert_eq!(q.amount, 200.0);
+    match el.quote(&effect("a door slams", Some(40.0))).await {
+        Err(Error::Plugin(e)) => assert_eq!(e.field.as_deref(), Some("duration")),
+        other => panic!("{other:?}"),
+    }
+    let mut speech_model = effect("a door slams", None);
+    speech_model.model = "eleven_v4".into();
+    assert!(el.quote(&speech_model).await.is_err());
+}
+
+#[tokio::test]
+async fn makes_a_sound_effect() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/sound-generation"))
+        .and(query_param("output_format", "mp3_44100_128"))
+        .and(header("xi-api-key", "k"))
+        .and(body_partial_json(json!({
+            "text": "a door slams", "model_id": "eleven_text_to_sound_v2",
+            "duration_seconds": 2.0, "prompt_influence": 0.6
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "audio/mpeg")
+                .set_body_bytes(b"bang".to_vec()),
+        )
+        .mount(&s)
+        .await;
+    let el = ElevenLabs::new(Some("k".into()), &format!("{}/v1", s.uri()));
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = effect("a door slams", Some(2.0));
+    req.params.insert("prompt_influence".into(), json!(0.6));
+    let job = el.run(&req, dir.path()).await.unwrap();
+    let out = el.fetch(&job, dir.path()).await.unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join(&out.outputs[0].file)).unwrap(),
+        b"bang"
+    );
 }
 
 #[tokio::test]

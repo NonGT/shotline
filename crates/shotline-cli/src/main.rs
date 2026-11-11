@@ -752,6 +752,60 @@ impl shotline_ui::Host for Plugins {
         }
     }
 
+    fn effect_quote(
+        &self,
+        film: &Path,
+        plugin: &str,
+        model: &str,
+        text: &str,
+        length: Option<f64>,
+    ) -> Result<String> {
+        shoot::effect_quote(&Project::open(film)?, plugin, model, text, length)
+    }
+
+    fn effect(
+        &self,
+        film: &Path,
+        shot: Option<ShotRef>,
+        plugin: &str,
+        model: &str,
+        text: &str,
+        length: Option<f64>,
+        at: &str,
+    ) -> Result<String> {
+        let p = Project::open(film)?;
+        let go = shoot::Go::At(at);
+        match shoot::effect(&p, shot, (plugin, model), text, length, go)? {
+            Some(j) => Ok(j.id.to_string()),
+            None => bail!("nothing was made"),
+        }
+    }
+
+    fn speech_quote(
+        &self,
+        film: &Path,
+        shot: Option<ShotRef>,
+        who: &str,
+        text: &str,
+    ) -> Result<String> {
+        shoot::speech_quote(&Project::open(film)?, shot, who, text)
+    }
+
+    fn speech(
+        &self,
+        film: &Path,
+        shot: Option<ShotRef>,
+        who: &str,
+        text: &str,
+        at: &str,
+    ) -> Result<String> {
+        let p = Project::open(film)?;
+        match shoot::speech(&p, shot, who, text, shoot::Go::At(at))? {
+            Some(j) => Ok(j.id.to_string()),
+            None => bail!("nothing was recorded"),
+        }
+    }
+
     fn take_quote(&self, film: &Path, shot: ShotRef, translate: bool) -> Result<String> {
         shoot::take_quote(&Project::open(film)?, shot, translate)
     }

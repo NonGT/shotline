@@ -15,13 +15,15 @@ const TICKS_PER_SECOND: f64 = 254_016_000_000.0;
 /// Undo steps of ours, for the transition into `clip` as it is when the undo runs.
 const INTO_OFF: &str = "shotline.removeTransitionInto";
 const INTO_SET: &str = "shotline.setTransitionInto";
+/// Takes off the sound of `item` that starts at `start`, whatever id it has by then.
+const SOUND_OFF: &str = "shotline.removeSound";
 
 /// Our steps as FilmCraft commands, against the project as it is now. One whose transition is
 /// gone already is left out.
 fn resolve(e: &Editor, film: &Path, project: &Path, steps: &[Value]) -> Result<Vec<Value>, String> {
     if !steps
         .iter()
-        .any(|s| s["id"] == INTO_OFF || s["id"] == INTO_SET)
+        .any(|s| s["id"] == INTO_OFF || s["id"] == INTO_SET || s["id"] == SOUND_OFF)
     {
         return Ok(steps.to_vec());
     }
@@ -39,10 +41,32 @@ fn resolve(e: &Editor, film: &Path, project: &Path, steps: &[Value]) -> Result<V
             })
         })
     };
+    let sound = |p: &Value| -> Vec<Value> {
+        let Some(items) = snap["project"]["items"].as_object() else {
+            return vec![];
+        };
+        items
+            .values()
+            .filter_map(|i| i["kind"]["Sequence"]["audio_tracks"].as_array())
+            .flatten()
+            .filter_map(|t| t["items"].as_array())
+            .flatten()
+            .filter(|c| c["item"] == p["item"] && c["start"] == p["start"])
+            .map(|c| c["id"].clone())
+            .collect()
+    };
     let mut out = vec![];
     for s in steps {
         let p = &s["params"];
-        if s["id"] == INTO_OFF {
+        if s["id"] == SOUND_OFF {
+            let clips = sound(p);
+            if !clips.is_empty() {
+                out.push(step(
+                    "timeline.delete",
+                    json!({"clips": clips, "ripple": false}),
+                ));
+            }
+        } else if s["id"] == INTO_OFF {
             if let Some(id) = into(&p["clip"]) {
                 out.push(step(
                     "sequence.removeTransition",
@@ -239,12 +263,13 @@ pub fn export(ask: &ExportParams) -> Result<Exported, String> {
     if let Some(dir) = ask.out.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
+    let mut render = json!({"path": ask.out, "sequence": id, "range": "entire", "wait": true});
+    if let Some(s) = ask.scale {
+        render["scale"] = json!(s);
+    }
     e.batch_unsaved(&[
         step("sequence.open", json!({"item": id})),
-        step(
-            "file.exportMedia",
-            json!({"path": ask.out, "sequence": id, "range": "entire", "wait": true}),
-        ),
+        step("file.exportMedia", render),
     ])?;
     if !ask.out.is_file() {
         return Err(format!(
@@ -283,6 +308,9 @@ pub fn edit(ask: &EditParams) -> Result<Edited, String> {
 /// Makes the change and gives back the steps that take it back.
 fn apply(e: &Editor, ask: &EditParams, change: &Change) -> Result<Vec<Value>, String> {
     let before = snapshot(e, &ask.film, &ask.file)?;
+    if let Change::Lift = change {
+        return lift(e, &before, ask);
+    }
     let f = find(&before, &ask.sequence, &ask.clip)?;
     let clip = f.clip["id"].as_u64().ok_or("a clip without an id")?;
     let open = step("sequence.open", json!({"item": f.sequence}));
@@ -353,8 +381,92 @@ fn apply(e: &Editor, ask: &EditParams, change: &Change) -> Result<Vec<Value>, St
             colour_undo(e, ask, &f, clip, open)
         }
         Change::Crossfade { frames } => crossfade(e, &f, clip, *frames, open),
+        Change::Sound { file, at } => {
+            let item = import(e, file)?;
+            let speed = f.clip["speed"].as_f64().filter(|s| *s > 0.0).unwrap_or(1.0);
+            let into = ticks(*at) - f.clip["source_in"].as_i64().unwrap_or(0);
+            let time =
+                (f.clip["start"].as_i64().unwrap_or(0) + (into as f64 / speed) as i64).max(0);
+            let now = snapshot(e, &ask.film, &ask.file)?;
+            let length =
+                now["project"]["items"][item.to_string()]["kind"]["Media"]["info"]["duration"]
+                    .as_i64()
+                    .unwrap_or(0);
+            let (_, seq) = sequence(&now, &ask.sequence)?;
+            let mine = f.sound.as_ref().map(|(_, t)| *t);
+            let track = room(seq, mine, time, time + length).map_or(json!("new"), |t| json!(t));
+            let p = json!({
+                "item": item,
+                "audioTrack": track,
+                "time": time,
+                "insert": false,
+                "video": false,
+                "audio": true,
+            });
+            e.batch(&[open.clone(), step("timeline.place", p)])?;
+            Ok(vec![
+                open,
+                step(SOUND_OFF, json!({"item": item, "start": time})),
+            ])
+        }
+        Change::Lift => unreachable!("lifted above"),
         Change::Undo { .. } => unreachable!("undo has no snapshot"),
     }
+}
+
+/// The first unlocked audio track other than `not` with nothing on it from `from` to `to`.
+fn room(seq: &Value, not: Option<u64>, from: i64, to: i64) -> Option<u64> {
+    seq["audio_tracks"].as_array()?.iter().find_map(|t| {
+        let id = t["id"].as_u64()?;
+        if Some(id) == not || t["locked"] == true {
+            return None;
+        }
+        let busy = t["items"].as_array().into_iter().flatten().any(|c| {
+            let start = c["start"].as_i64().unwrap_or(0);
+            start < to && from < start + c["duration"].as_i64().unwrap_or(0)
+        });
+        (!busy).then_some(id)
+    })
+}
+
+/// Takes a clip out without moving anything; undo puts the same part of the same item back.
+fn lift(e: &Editor, snap: &Value, ask: &EditParams) -> Result<Vec<Value>, String> {
+    let (id, seq) = sequence(snap, &ask.sequence)?;
+    let want: u64 = ask
+        .clip
+        .parse()
+        .map_err(|_| format!("{:?} isn't a FilmCraft clip id", ask.clip))?;
+    let found = ["video_tracks", "audio_tracks"].iter().find_map(|kind| {
+        seq[*kind].as_array()?.iter().find_map(|t| {
+            let c = t["items"]
+                .as_array()?
+                .iter()
+                .find(|c| c["id"].as_u64() == Some(want))?;
+            Some((*kind == "audio_tracks", t["id"].clone(), c.clone()))
+        })
+    });
+    let (sound, track, c) =
+        found.ok_or_else(|| format!("clip {want} isn't in {:?} any more", ask.sequence))?;
+    let open = step("sequence.open", json!({"item": id}));
+    e.batch(&[
+        open.clone(),
+        step("timeline.delete", json!({"clips": [want], "ripple": false})),
+    ])?;
+    let mut back = json!({
+        "item": c["item"],
+        "time": c["start"],
+        "insert": false,
+        "sourceIn": c["source_in"],
+        "duration": c["duration"],
+    });
+    if sound {
+        back["audioTrack"] = track;
+        back["video"] = json!(false);
+    } else {
+        back["track"] = track;
+        back["audio"] = json!(false);
+    }
+    Ok(vec![open, step("timeline.place", back)])
 }
 
 fn import(e: &Editor, file: &Path) -> Result<Value, String> {

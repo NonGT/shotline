@@ -18,6 +18,7 @@ mod pieces;
 mod player;
 mod prefs;
 mod shoot;
+mod sounds;
 mod start;
 mod theme;
 mod voice;
@@ -192,6 +193,53 @@ pub trait Host: Send + Sync {
     fn say_quote(&self, film: &Path, shot: ShotRef, line: usize) -> anyhow::Result<String>;
     /// Records the line, if the price is still `at`, and picks it for the shot's takes.
     fn say(&self, film: &Path, shot: ShotRef, line: usize, at: &str) -> anyhow::Result<PathBuf>;
+    /// What `who` saying `text` would cost, with the voice a line of `shot` gets. Free.
+    fn speech_quote(
+        &self,
+        _film: &Path,
+        _shot: Option<ShotRef>,
+        _who: &str,
+        _text: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("can't make speech here")
+    }
+    /// Records `who` saying `text`, if the price is still `at`. Returns the job's id.
+    fn speech(
+        &self,
+        _film: &Path,
+        _shot: Option<ShotRef>,
+        _who: &str,
+        _text: &str,
+        _at: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("can't make speech here")
+    }
+    /// What a sound effect made from `text` would cost; without `length` the model picks it.
+    /// Free.
+    fn effect_quote(
+        &self,
+        _film: &Path,
+        plugin: &str,
+        _model: &str,
+        _text: &str,
+        _length: Option<f64>,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("{plugin} can't make sound effects here")
+    }
+    /// Makes the sound effect for `shot`, if the price is still `at`. Returns the job's id.
+    #[allow(clippy::too_many_arguments)]
+    fn effect(
+        &self,
+        _film: &Path,
+        _shot: Option<ShotRef>,
+        plugin: &str,
+        _model: &str,
+        _text: &str,
+        _length: Option<f64>,
+        _at: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("{plugin} can't make sound effects here")
+    }
     /// What a take of the shot would cost, e.g. "0.40 USD". Free.
     /// `translate` puts the prompt into English first, if it isn't and that isn't done yet.
     fn take_quote(&self, film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String>;
@@ -338,6 +386,8 @@ pub struct App {
     confirm_select: Option<Take>,
     /// Picked on the shot page, to go in the editor's sequence too once it's been read again.
     cut_follow: Option<Take>,
+    sounds_win: Option<sounds::SoundsWin>,
+    picks: std::collections::VecDeque<PathBuf>,
     status: Option<(String, bool)>,
     /// The job that made the zoomed picture, once Details is asked for.
     zoom_details: Option<(PathBuf, Option<shotline_core::Job>)>,
@@ -696,6 +746,8 @@ impl App {
             continued: None,
             confirm_select: None,
             cut_follow: None,
+            sounds_win: None,
+            picks: Default::default(),
             status: None,
             zoom_details: None,
             zoom_view: FIT,
@@ -1055,6 +1107,20 @@ impl App {
         let _ = std::fs::write(file, text);
     }
 
+    /// Answers file dialogs with these files, one each, for tests.
+    pub fn picking(mut self, files: Vec<PathBuf>) -> App {
+        self.picks = files.into();
+        self
+    }
+
+    /// A file from the dialog, or the next one `picking` was given.
+    pub(crate) fn pick_file(&mut self, dialog: rfd::FileDialog) -> Option<PathBuf> {
+        if !self.picks.is_empty() {
+            return self.picks.pop_front();
+        }
+        dialog.pick_file()
+    }
+
     /// Plays without sound and never touches the sound device, for tests.
     pub fn silent(mut self) -> App {
         self.audio_tried = true;
@@ -1263,6 +1329,7 @@ impl App {
         self.shoot_finished();
         self.said();
         self.follow_cut(ui.ctx());
+        self.sounds_window(ui.ctx());
         let tab = self.tab;
         egui::Panel::top("bar")
             .frame(
@@ -2505,6 +2572,7 @@ impl App {
     fn take_list(&mut self, ui: &mut egui::Ui, s: &Shot, acts: &mut Vec<Action>) {
         section(ui, "Takes");
         ui.add_space(6.0);
+        let mut sounds_for = None;
         let mut splice: Option<Vec<shotline_core::Piece>> = None;
         ui.horizontal(|ui| {
             let any = self.takes.iter().any(|t| t.output().is_some());
@@ -2663,6 +2731,19 @@ impl App {
                             {
                                 splice = Some(pieces);
                             }
+                            if video.is_some() && selected {
+                                let k = self.project.take_sounds(t).map_or(0, |s| s.len());
+                                let label = match k {
+                                    0 => "Sounds…".to_string(),
+                                    k => format!("Sounds ({k})…"),
+                                };
+                                if act(ui, &label, n)
+                                    .on_hover_text("effects or a voice off over it in the cut")
+                                    .clicked()
+                                {
+                                    sounds_for = Some(t.clone());
+                                }
+                            }
                             if video.is_some()
                                 && !selected
                                 && act(ui, "Use in the cut", n)
@@ -2692,6 +2773,9 @@ impl App {
         }
         if let Some(t) = watch {
             self.watch(ui, t);
+        }
+        if let Some(t) = sounds_for {
+            self.open_sounds((&t).into(), t.to_string(), 0.0);
         }
         self.confirm_select(ui, acts);
         if let Some(pieces) = splice

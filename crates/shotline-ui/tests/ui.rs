@@ -419,6 +419,83 @@ impl Host for TestHost {
         Ok(out)
     }
 
+    fn speech_quote(
+        &self,
+        _film: &Path,
+        _shot: Option<ShotRef>,
+        who: &str,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        assert_eq!((who, text), ("paka", "Over here!"));
+        Ok("0.02 USD".into())
+    }
+
+    fn effect_quote(
+        &self,
+        _film: &Path,
+        plugin: &str,
+        model: &str,
+        text: &str,
+        length: Option<f64>,
+    ) -> anyhow::Result<String> {
+        assert_eq!(
+            (plugin, model, text, length),
+            (
+                "elevenlabs",
+                "eleven_text_to_sound_v2",
+                "a door slams",
+                None
+            )
+        );
+        Ok("0.01 USD".into())
+    }
+
+    fn effect(
+        &self,
+        film: &Path,
+        shot: Option<ShotRef>,
+        _plugin: &str,
+        model: &str,
+        text: &str,
+        _length: Option<f64>,
+        at: &str,
+    ) -> anyhow::Result<String> {
+        assert_eq!(at, "0.01 USD");
+        let p = Project::open(film)?;
+        let mut j = Job::new(Op::AudioSfx, "elevenlabs", model);
+        j.shot = shot;
+        j.prompt = Some(text.into());
+        let mut j = p.create_job(j)?;
+        std::fs::write(p.job_dir(j.id).join("out.mp3"), "mp3")?;
+        j.status = JobStatus::Done;
+        j.outputs = vec!["out.mp3".into()];
+        p.save_job(&j)?;
+        Ok(j.id.to_string())
+    }
+
+    /// Speech as the CLI leaves it: a done tts job of the words.
+    fn speech(
+        &self,
+        film: &Path,
+        shot: Option<ShotRef>,
+        who: &str,
+        text: &str,
+        at: &str,
+    ) -> anyhow::Result<String> {
+        assert_eq!(at, "0.02 USD");
+        let p = Project::open(film)?;
+        let mut j = Job::new(Op::AudioTts, "fake", "fake/tts");
+        j.shot = shot;
+        j.who = Some(who.into());
+        j.prompt = Some(text.into());
+        let mut j = p.create_job(j)?;
+        std::fs::write(p.job_dir(j.id).join("out.wav"), "wav")?;
+        j.status = JobStatus::Done;
+        j.outputs = vec!["out.wav".into()];
+        p.save_job(&j)?;
+        Ok(j.id.to_string())
+    }
+
     fn take_quote(&self, _film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String> {
         assert_eq!(shot, R);
         Ok(if translate {
@@ -493,6 +570,14 @@ impl Host for TestHost {
             ask.saved != to_keep,
             "saved = {} for {:?}",
             ask.saved,
+            ask.out
+        );
+        // The preview at half size; a render to keep at full.
+        let scale = if to_keep { None } else { Some(0.5) };
+        anyhow::ensure!(
+            ask.scale == scale,
+            "scale {:?} for {:?}",
+            ask.scale,
             ask.out
         );
         std::fs::create_dir_all(ask.out.parent().unwrap())?;
@@ -2008,6 +2093,26 @@ fn editor_clip(id: &str, file: &Path, start: f64) -> ClipInfo {
 
 /// What the editor plugin reads: one project with "Main edit", these clips on V1.
 fn write_edits(p: &Project, clips: Vec<ClipInfo>, transitions: Vec<TransitionInfo>) {
+    write_edits_with(p, clips, transitions, vec![]);
+}
+
+/// The same, with these clips on A1.
+fn write_edits_with(
+    p: &Project,
+    clips: Vec<ClipInfo>,
+    transitions: Vec<TransitionInfo>,
+    sounds: Vec<ClipInfo>,
+) {
+    let audio = if sounds.is_empty() {
+        vec![]
+    } else {
+        vec![TrackInfo {
+            name: "1".into(),
+            enabled: true,
+            clips: sounds,
+            transitions: vec![],
+        }]
+    };
     let edits = vec![EditInfo {
         file: p.root.join("shared/edit.fcproj"),
         name: "Rain edit".into(),
@@ -2025,7 +2130,7 @@ fn write_edits(p: &Project, clips: Vec<ClipInfo>, transitions: Vec<TransitionInf
                 clips,
                 transitions,
             }],
-            audio: vec![],
+            audio,
         }],
     }];
     std::fs::create_dir_all(p.root.join("shared")).unwrap();
@@ -2047,8 +2152,19 @@ fn on_main_edit_with(
     p: &Project,
     take: &str,
 ) -> (Harness<'static, App>, impl Fn() -> Vec<EditParams>) {
+    on_main_edit_picking(tmp, p, take, vec![])
+}
+
+/// The same, with file dialogs answered by `picks`.
+fn on_main_edit_picking(
+    tmp: &Path,
+    p: &Project,
+    take: &str,
+    picks: Vec<PathBuf>,
+) -> (Harness<'static, App>, impl Fn() -> Vec<EditParams>) {
     let mut app = App::new(p.clone(), tmp.join("home"))
         .with_viewer(None)
+        .picking(picks)
         .silent();
     let local = Description {
         name: "local".into(),
@@ -2081,7 +2197,23 @@ fn on_main_edit_with(
         editor: false,
         app: String::new(),
     };
-    app.set_plugins(vec![editor_plugin(), local, fal], Some(Arc::new(TestHost)));
+    let sfx = Description {
+        name: "elevenlabs".into(),
+        version: "0.1.0".into(),
+        protocol: 1,
+        env: vec![],
+        models: vec![ModelInfo {
+            id: "eleven_text_to_sound_v2".into(),
+            op: Op::AudioSfx,
+            ..ModelInfo::default()
+        }],
+        editor: false,
+        app: String::new(),
+    };
+    app.set_plugins(
+        vec![editor_plugin(), local, fal, sfx],
+        Some(Arc::new(TestHost)),
+    );
     let mut h = Harness::builder()
         .with_max_steps(16)
         .with_size(egui::vec2(1000.0, 1200.0))
@@ -2301,6 +2433,260 @@ fn a_take_used_on_the_shot_page_goes_in_the_editors_sequence() {
             sound: true,
         }
     );
+}
+
+#[test]
+fn lays_a_sound_over_a_take_in_the_editors_sequence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let door = tmp.path().join("Door.wav");
+    std::fs::write(&door, "wav").unwrap();
+    let (mut h, lines) = on_main_edit_picking(tmp.path(), &p, "01-010#1", vec![door]);
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds…").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds over 01-010#1");
+    // Nobody has a voice, so there's no one to say anything.
+    h.get_by_label_contains("Give one of the cast a voice");
+    h.get_by_label("From a file…").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let got = p.take_sounds(&first).unwrap();
+    assert_eq!(got.len(), 1);
+    let (sound, _, copied) = &got[0];
+    // From where the clip starts using the take.
+    assert_eq!(sound.at, 0.25);
+    assert_eq!(lines()[0].clip, "7");
+    assert_eq!(
+        lines()[0].change,
+        Change::Sound {
+            file: std::path::absolute(copied).unwrap(),
+            at: 0.25,
+        }
+    );
+
+    // Once the editor has it, taking it off lifts it out of the sequence too.
+    let mut laid = editor_clip("9", copied, 0.0);
+    laid.from = 0.0;
+    write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![laid]);
+    wait(&mut h, 1.5);
+    // A file brought in can't be made again.
+    assert!(h.query_by_label("Remake Door.wav").is_none());
+    h.get_by_label("Remove Door.wav").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    assert_eq!(
+        (lines()[1].clip.as_str(), &lines()[1].change),
+        ("9", &Change::Lift)
+    );
+    assert!(p.take_sounds(&first).unwrap().is_empty());
+}
+
+#[test]
+fn one_of_the_cast_says_something_over_a_take() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: None,
+            voice_id: Some("v1".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds…").click();
+    wait(&mut h, 0.1);
+    assert!(
+        h.get_by_label("Price the speech")
+            .accesskit_node()
+            .is_disabled()
+    );
+    h.get_by_label("What they say").focus();
+    h.get_by_label("What they say").type_text("Over here!");
+    h.run();
+    h.get_by_label("Price the speech").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Go · 0.02 USD")
+        .is_some()));
+    h.get_by_label("Go · 0.02 USD").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let got = p.take_sounds(&first).unwrap();
+    assert_eq!(got.len(), 1);
+    let (sound, job, made) = &got[0];
+    assert_eq!(
+        (sound.at, job.prompt.as_deref()),
+        (0.25, Some("Over here!"))
+    );
+    assert_eq!(
+        lines()[0].change,
+        Change::Sound {
+            file: std::path::absolute(made).unwrap(),
+            at: 0.25,
+        }
+    );
+    h.get_by_label("Play @paka: Over here!");
+
+    // A sound effect, as long as the model makes it, once the editor has the speech.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Price the sound effect")
+        .is_some_and(|b| b.accesskit_node().is_disabled())));
+    h.get_by_label("What it sounds like").focus();
+    h.get_by_label("What it sounds like")
+        .type_text("a door slams");
+    h.run();
+    assert!(wait_for(&mut h, |h| !h
+        .get_by_label("Price the sound effect")
+        .accesskit_node()
+        .is_disabled()));
+    h.get_by_label("Price the sound effect").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Go · 0.01 USD")
+        .is_some()));
+    h.get_by_label("Go · 0.01 USD").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    let got = p.take_sounds(&first).unwrap();
+    assert_eq!(got.len(), 2);
+    let (_, job, made) = &got[1];
+    assert_eq!(job.op, Op::AudioSfx);
+    assert_eq!(
+        lines()[1].change,
+        Change::Sound {
+            file: std::path::absolute(made).unwrap(),
+            at: 0.25,
+        }
+    );
+    h.get_by_label("Play a door slams");
+    // Made again: priced straight away, then in the old one's place, there and in the editor.
+    let (_, old, said) = &got[0];
+    let mut laid = editor_clip("9", said, 0.0);
+    laid.from = 0.0;
+    write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![laid]);
+    wait(&mut h, 1.5);
+    h.get_by_label("Remake @paka: Over here!").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Go · 0.02 USD")
+        .is_some()));
+    h.get_by_label_contains("in place of @paka: Over here!");
+    h.get_by_label("Go · 0.02 USD").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 4));
+    let got = p.take_sounds(&first).unwrap();
+    assert_eq!(got.len(), 2);
+    assert!(got.iter().all(|(_, j, _)| j.id != old.id));
+    let (sound, job, made) = got.iter().find(|(_, j, _)| j.who.is_some()).unwrap();
+    assert_eq!(
+        (sound.at, job.prompt.as_deref()),
+        (0.25, Some("Over here!"))
+    );
+    let changes: Vec<_> = lines()[2..]
+        .iter()
+        .map(|l| (l.clip.clone(), l.change.clone()))
+        .collect();
+    assert!(changes.contains(&(
+        "7".into(),
+        Change::Sound {
+            file: std::path::absolute(made).unwrap(),
+            at: 0.25,
+        }
+    )));
+    assert!(changes.contains(&("9".into(), Change::Lift)));
+
+    // An effect is asked for again with its model.
+    h.get_by_label("Remake a door slams").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Go · 0.01 USD")
+        .is_some()));
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(h.query_by_label_contains("in place of").is_none());
+}
+
+#[test]
+fn a_bridge_in_the_cut_has_sounds_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    let id = p
+        .new_bridge(&shotline_core::Bridge {
+            sequence: "Main edit".into(),
+            length: 2.0,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut j = Job::new(Op::VideoGenerate, "fal", "fake/r2v");
+    j.bridge = Some(id);
+    let mut j = p.create_job(j).unwrap();
+    let made = p.job_dir(j.id).join("out.mp4");
+    std::fs::write(&made, "mp4").unwrap();
+    j.status = JobStatus::Done;
+    j.outputs = vec!["out.mp4".into()];
+    p.save_job(&j).unwrap();
+    let mut bridge = editor_clip("9", &made, 1.0);
+    bridge.from = 0.0;
+    write_edits(&p, vec![editor_clip("7", &video, 0.0), bridge], vec![]);
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: None,
+            voice_id: Some("v1".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    let door = tmp.path().join("Door.wav");
+    std::fs::write(&door, "wav").unwrap();
+    let (mut h, lines) = on_main_edit_picking(tmp.path(), &p, "01-010#1", vec![door]);
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::Button, "bridge #1")
+        .is_some()));
+    h.get_by_role_and_label(Role::Button, "bridge #1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds…").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds over bridge #1");
+    h.get_by_label("From a file…").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let over = shotline_core::Under::Bridge(id, j.id);
+    let got = p.sounds(over).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(p.bridge(id).unwrap().sounds.len(), 1);
+    assert_eq!(lines()[0].clip, "9");
+    assert_eq!(
+        lines()[0].change,
+        Change::Sound {
+            file: std::path::absolute(&got[0].2).unwrap(),
+            at: 0.0,
+        }
+    );
+
+    // Speech too, made without a shot.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Price the speech")
+        .is_some()));
+    h.get_by_label("What they say").focus();
+    h.get_by_label("What they say").type_text("Over here!");
+    h.run();
+    h.get_by_label("Price the speech").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Go · 0.02 USD")
+        .is_some()));
+    h.get_by_label("Go · 0.02 USD").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    let got = p.sounds(over).unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[1].1.shot, None);
+    assert_eq!(lines()[1].clip, "9");
 }
 
 #[test]

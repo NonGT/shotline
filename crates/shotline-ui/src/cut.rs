@@ -172,6 +172,7 @@ impl App {
             .map(|(r, s)| (*r, s.duration.unwrap_or(5.0)))
             .collect();
         let mut blocks = vec![];
+        let mut sounds = vec![];
         let mut end = 0.0;
         let cut = self.film.cut.clone();
         for (i, c) in cut.iter().enumerate() {
@@ -211,6 +212,20 @@ impl App {
                 id: None,
                 picked: false,
             });
+            for (ts, job, path) in self.project.take_sounds(take).unwrap_or_default() {
+                let long = self.clip_length(&ctx, &path).unwrap_or(1.0);
+                sounds.push(Block {
+                    name: job.brief.unwrap_or_default(),
+                    start: end + ts.at,
+                    length: long,
+                    still: None,
+                    hover: format!("over {take}, {:.2} s in", ts.at),
+                    enabled: true,
+                    shot: Some(c.shot),
+                    id: None,
+                    picked: false,
+                });
+            }
             end += length;
         }
         let video = vec![Lane {
@@ -241,6 +256,19 @@ impl App {
                     id: None,
                     picked: false,
                 }],
+                sound: true,
+                enabled: true,
+                joins: vec![],
+            });
+        }
+        if !sounds.is_empty() {
+            end = sounds
+                .iter()
+                .map(|b| b.start + b.length)
+                .fold(end, f64::max);
+            audio.push(Lane {
+                name: "Sounds".into(),
+                blocks: sounds,
                 sound: true,
                 enabled: true,
                 joins: vec![],
@@ -798,7 +826,7 @@ impl App {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Up when previews are made differently, so old ones aren't shown.
-        2u32.hash(&mut h);
+        3u32.hash(&mut h);
         serde_json::to_string(seq).unwrap_or_default().hash(&mut h);
         for c in seq.video.iter().chain(&seq.audio).flat_map(|t| &t.clips) {
             for f in c.file.iter().chain(&c.luts) {
@@ -889,6 +917,8 @@ impl App {
             sequence: seq.name.clone(),
             out: part.clone(),
             saved: true,
+            // Half size is plenty for the player and renders much sooner.
+            scale: Some(0.5),
         };
         let slot: FullSlot = Arc::default();
         let (s, host, p, ctx, to) = (
@@ -1375,7 +1405,7 @@ fn blank_monitor(ui: &mut egui::Ui, height: f32, note: &str) {
     ui.add_space(36.0);
 }
 
-fn seq_title(file: &Path, seq: &SequenceInfo) -> String {
+pub(crate) fn seq_title(file: &Path, seq: &SequenceInfo) -> String {
     let file = file.file_name().unwrap_or_default().to_string_lossy();
     format!("{file} · {}", seq.name)
 }

@@ -132,6 +132,27 @@ impl Ffmpeg {
         })
     }
 
+    /// How long any media file runs, sound only included, in seconds.
+    pub fn length(&self, path: &Path) -> Result<f64> {
+        let out = run(
+            Command::new(&self.ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(path),
+            &format!("ffprobe {}", path.display()),
+        )?;
+        String::from_utf8_lossy(&out)
+            .trim()
+            .parse()
+            .map_err(|_| Error::Invalid(format!("{} has no length", path.display())))
+    }
+
     /// Writes the last frame of `video` as a PNG.
     /// shotline's colour match for a join as a .cube LUT for the clip after it: its first
     /// `frames` from `next_start` onto the last ones of `prev` before `prev_end` (seconds into

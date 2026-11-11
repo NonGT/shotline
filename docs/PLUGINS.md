@@ -288,6 +288,9 @@ itself (never by writing its project file). Params:
 - `{"kind": "match", "to"}`: the clip's colour matched to the sequence's frame at `to` seconds
 - `{"kind": "crossfade", "frames"}`: a dissolve that many frames long into the clip from the one
   before, centred on the cut; 0 takes the one there off
+- `{"kind": "sound", "file", "at"}`: all of the file on an audio track with room for it, starting
+  `at` seconds into the clip's own file; nothing moves
+- `{"kind": "lift"}`: the clip taken out, on a video or an audio track, leaving its place empty
 - `{"kind": "undo", "steps"}`: takes an earlier change back
 
 Returns `{"undo": ..., "saved": true}`. `undo` is whatever the plugin needs to take the change
@@ -299,10 +302,10 @@ answers with an error saying why.
 ### export (optional)
 
 For an editor plugin: renders a sequence with the editor's own renderer and waits for the file.
-Params: `{"film", "file", "sequence", "out", "saved"}`, with `out` the video to write (its
-extension says the format). With `"saved": true` it renders the file as saved, without going
-through an open editor, so changes not saved yet are left out; shotline asks for that for the cut
-page preview. Returns `{"file": "/path/to/film/renders/Main_edit-20261107-221500.mp4"}`.
+Params: `{"film", "file", "sequence", "out", "saved", "scale"}`, with `out` the video to write
+(its extension says the format). With `"saved": true` it renders the file as saved, without going
+through an open editor, so changes not saved yet are left out. `scale` (optional) is a fraction of
+the sequence's frame size. shotline asks for both for the cut page preview, at 0.5. Returns `{"file": "/path/to/film/renders/Main_edit-20261107-221500.mp4"}`.
 
 ### import (optional)
 

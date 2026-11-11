@@ -45,6 +45,9 @@ pub struct Bridge {
     /// The take put in the cut last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<Ulid>,
+    /// Sounds laid over its takes.
+    #[serde(default, rename = "sound", skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<crate::TakeSound>,
 }
 
 impl Bridge {

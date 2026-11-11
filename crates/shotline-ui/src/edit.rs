@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use shotline_core::{
     CONFIG_FILE, Element, Format, Kind, ModelRef, Project, Shot, ShotRef, TIMELINE_FILE, Take,
-    Task, Timeline, Track, Transition, Voice,
+    Task, Timeline, Track, Transition, Under, Voice,
 };
 
 use crate::App;
@@ -200,6 +200,12 @@ pub(crate) enum Action {
     AddLine(ShotRef, LineForm),
     /// A line added with a recording made somewhere else, copied in as what it sends.
     ImportLine(ShotRef, LineForm, PathBuf),
+    /// A sound from a file over a take in the cut, starting that many seconds into it.
+    AddSound(Under, PathBuf, f64),
+    /// A sound already made, like a recording, over a take; by job id.
+    AddSoundJob(Under, String, f64),
+    /// A take's sound taken off, by its job id.
+    RemoveSound(Under, String),
     SetLine(ShotRef, usize, LineForm),
     RemoveLine(ShotRef, usize),
     /// The recording a line sends, by job id, or None to make it with each take.
@@ -272,6 +278,9 @@ impl Action {
             | Action::LeaveOut(r, ..)
             | Action::SendAnchor(r, ..) => r.to_string(),
             Action::Select(t) | Action::RemoveTake(t) => t.shot.to_string(),
+            Action::AddSound(u, ..) | Action::AddSoundJob(u, ..) | Action::RemoveSound(u, _) => {
+                under_name(*u)
+            }
             Action::Story(_) => "the story".into(),
             Action::Style(_) => "the style".into(),
             Action::Format(_) => "the format".into(),
@@ -324,6 +333,11 @@ impl Action {
                 }
                 out
             }
+            Action::AddSound(u, ..) | Action::AddSoundJob(u, ..) => sounds_file(p, *u),
+            Action::RemoveSound(u, id) => sounds_file(p, *u)
+                .into_iter()
+                .chain(p.job(id).map(|j| p.job_dir(j.id).join("job.toml")))
+                .collect(),
             Action::DeleteRecording(r, id) => {
                 let mut out: Vec<PathBuf> = p.shot_path(*r).into_iter().collect();
                 if let Ok(j) = p.job(id) {
@@ -783,6 +797,25 @@ impl App {
                     made: vec![p.job_dir(job.id)],
                 }
             }
+            Action::AddSound(u, file, at) => {
+                let job = p.add_sound(u, &file, at)?;
+                Done {
+                    msg: format!(
+                        "{} over {}",
+                        file.file_name().unwrap_or_default().to_string_lossy(),
+                        under_name(u)
+                    ),
+                    made: vec![p.job_dir(job.id)],
+                }
+            }
+            Action::AddSoundJob(u, job, at) => {
+                p.add_sound_job(u, &job, at)?;
+                format!("a sound over {}", under_name(u)).into()
+            }
+            Action::RemoveSound(u, id) => {
+                p.remove_sound(u, &id)?;
+                format!("a sound off {}", under_name(u)).into()
+            }
             Action::SetLine(r, i, l) => {
                 p.set_line(r, i, &l.who, &l.text, l.at()?)?;
                 format!("{r} saved").into()
@@ -1106,6 +1139,18 @@ pub(crate) fn task_name(t: Task) -> &'static str {
         Task::Video => "video",
         Task::LipSync => "lip sync",
         Task::Assistant => "assistant",
+    }
+}
+
+fn under_name(u: Under) -> String {
+    u.shot().map_or("a bridge".into(), |r| r.to_string())
+}
+
+/// The shot or bridge file that lists a take's sounds.
+fn sounds_file(p: &Project, u: Under) -> Vec<PathBuf> {
+    match u {
+        Under::Take(r, _) => p.shot_path(r).into_iter().collect(),
+        Under::Bridge(b, _) => vec![p.bridge_file(b)],
     }
 }
 

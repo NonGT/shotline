@@ -353,7 +353,7 @@ impl App {
     }
 
     /// True while `what` is playing.
-    fn hearing(&mut self, ctx: &egui::Context, what: &str) -> bool {
+    pub(crate) fn hearing(&mut self, ctx: &egui::Context, what: &str) -> bool {
         if self
             .hearing
             .as_ref()

@@ -118,11 +118,13 @@ fn colour_match_brings_clips_closer() {
                 path: a.clone(),
                 label: "a".into(),
                 colormatch: false,
+                sounds: vec![],
             },
             Clip {
                 path: b.clone(),
                 label: "b".into(),
                 colormatch: matched,
+                sounds: vec![],
             },
         ];
         let out = dir.path().join(name);
@@ -151,6 +153,31 @@ fn colour_match_brings_clips_closer() {
     );
 }
 
+/// Mean volume in dB of `len` seconds from `from`.
+fn loudness(file: &Path, from: f64, len: f64) -> f64 {
+    let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    let out = Command::new(ffmpeg)
+        .args([
+            "-v",
+            "info",
+            "-nostdin",
+            "-ss",
+            &from.to_string(),
+            "-t",
+            &len.to_string(),
+            "-i",
+        ])
+        .arg(file)
+        .args(["-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stderr);
+    text.lines()
+        .find_map(|l| l.split("mean_volume:").nth(1))
+        .and_then(|v| v.trim().trim_end_matches("dB").trim().parse().ok())
+        .unwrap_or(-91.0)
+}
+
 fn close(a: f64, b: f64) -> bool {
     (a - b).abs() < 0.15
 }
@@ -169,6 +196,7 @@ fn renders_clips_and_tracks() {
         path: clip(dir.path(), n, mix, *t),
         label: n.to_string(),
         colormatch: false,
+        sounds: vec![],
     })
     .collect();
     let music = Track {
@@ -235,6 +263,33 @@ fn renders_clips_and_tracks() {
     )
     .unwrap();
     assert!(!ff.probe(&quiet).unwrap().audio);
+
+    // A sound over the last clip is heard from where that clip starts.
+    let mut over = silent.clone();
+    over[1].sounds = vec![Track {
+        path: music.path.clone(),
+        at: 0.25,
+        volume: 1.0,
+    }];
+    let heard = dir.path().join("heard.mp4");
+    let r = render(
+        &ff,
+        &over,
+        &[],
+        &Options::default(),
+        &dir.path().join("w4"),
+        &heard,
+        |_| {},
+    )
+    .unwrap();
+    assert!(close(r.duration, 2.0), "{}", r.duration);
+    assert!(ff.probe(&heard).unwrap().audio);
+    let quiet_until = loudness(&heard, 0.0, 1.2);
+    let loud_after = loudness(&heard, 1.3, 0.6);
+    assert!(
+        quiet_until < -60.0 && loud_after > -40.0,
+        "{quiet_until} {loud_after}"
+    );
 }
 
 /// Drains a pipe as if playback were instantly far ahead.
@@ -588,4 +643,13 @@ fn the_frame_showing_at_a_time() {
     assert_eq!(number(23.0 / 24.0), 23);
     // Past the end: the last frame.
     assert_eq!(number(3.0), 23);
+}
+
+#[test]
+fn a_sound_has_a_length() {
+    let Some(ff) = ff() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let got = ff.length(&line(dir.path(), "door.mp3", 2.5)).unwrap();
+    assert!((got - 2.5).abs() < 0.1, "{got}");
+    assert!(ff.length(&dir.path().join("none.mp3")).is_err());
 }

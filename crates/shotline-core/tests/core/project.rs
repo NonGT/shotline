@@ -265,6 +265,54 @@ fn a_recording_made_elsewhere_is_one_of_the_speakers() {
 }
 
 #[test]
+fn a_sound_goes_over_one_take() {
+    let (dir, p) = new_project();
+    p.add_chapter("Into the forest").unwrap();
+    let r = p.add_shot("1", None, Shot::default()).unwrap();
+    let video = dir.path().join("brought.mp4");
+    fs::write(&video, "mp4").unwrap();
+    let one = p.import_take(r, &video).unwrap();
+    let two = p.import_take(r, &video).unwrap();
+    let file = dir.path().join("Door.WAV");
+    fs::write(&file, "wav").unwrap();
+    assert!(
+        p.add_sound((&one).into(), &dir.path().join("none.wav"), 0.0)
+            .is_err()
+    );
+    assert!(p.add_sound((&one).into(), &file, -1.0).is_err());
+
+    let j = p.add_sound((&one).into(), &file, 1.5).unwrap();
+    assert_eq!(j.outputs, vec!["out.wav".to_string()]);
+    assert_eq!(j.brief.as_deref(), Some("Door.WAV"));
+    let got = p.take_sounds(&one).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!((got[0].0.at, got[0].1.id), (1.5, j.id));
+    assert_eq!(fs::read(&got[0].2).unwrap(), b"wav");
+    assert!(p.take_sounds(&two).unwrap().is_empty());
+
+    p.remove_sound((&one).into(), &j.id.to_string()).unwrap();
+    assert!(p.take_sounds(&one).unwrap().is_empty());
+    assert!(p.job(&j.id.to_string()).unwrap().discarded);
+    assert!(p.remove_sound((&one).into(), &j.id.to_string()).is_err());
+
+    // A bridge's take keeps its sounds in the bridge.
+    let b = p.new_bridge(&shotline_core::Bridge::default()).unwrap();
+    let take = p.clock.ulid();
+    let over = shotline_core::Under::Bridge(b, take);
+    let k = p.add_sound(over, &file, 0.5).unwrap();
+    assert_eq!(k.shot, None);
+    assert_eq!(p.bridge(b).unwrap().sounds[0].take, take.to_string());
+    assert_eq!(p.sounds(over).unwrap()[0].1.id, k.id);
+    assert!(
+        p.sounds(shotline_core::Under::Bridge(b, p.clock.ulid()))
+            .unwrap()
+            .is_empty()
+    );
+    p.remove_sound(over, &k.id.to_string()).unwrap();
+    assert!(p.bridge(b).unwrap().sounds.is_empty());
+}
+
+#[test]
 fn format_is_set_without_touching_the_rest() {
     let (dir, mut p) = new_project();
     let path = dir.path().join("shotline.toml");

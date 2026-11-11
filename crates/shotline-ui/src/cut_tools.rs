@@ -352,6 +352,35 @@ impl App {
         }
     }
 
+    /// Sounds… for a clip's take, a shot's or a bridge's.
+    fn sounds_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        (under, name): (shotline_core::Under, String),
+        (file, seq, c): (&Path, &SequenceInfo, &ClipInfo),
+        free: bool,
+    ) {
+        let n = self.project.sounds(under).map_or(0, |s| s.len());
+        let label = match n {
+            0 => "Sounds…".to_string(),
+            n => format!("Sounds ({n})…"),
+        };
+        if ui
+            .add_enabled(free, egui::Button::new(label))
+            .on_hover_text("effects or a voice off over this take")
+            .clicked()
+        {
+            // From the playhead when it's over the clip, else from where the clip starts.
+            let title = crate::cut::seq_title(file, seq);
+            let at = self
+                .shown_deck(&title)
+                .map(|d| d.position())
+                .filter(|p| *p >= c.start && *p < c.start + c.length)
+                .map_or(c.from, |p| c.from + (p - c.start) * c.speed);
+            self.open_sounds(under, name, at);
+        }
+    }
+
     fn picked_tools(
         &mut self,
         ui: &mut egui::Ui,
@@ -385,6 +414,10 @@ impl App {
         {
             self.open_bridge_of(id);
         }
+        if let Some((id, take, _)) = bridge {
+            let under = shotline_core::Under::Bridge(id, take);
+            self.sounds_button(ui, (under, name.clone()), (file, seq, c), free);
+        }
         let film = self.project.root.clone();
         let ask = |change| EditParams {
             film: film.clone(),
@@ -399,6 +432,7 @@ impl App {
                 self.tab = crate::Tab::Shots;
                 self.open_shot(t.shot);
             }
+            self.sounds_button(ui, (t.into(), t.to_string()), (file, seq, c), free);
             let others: Vec<(String, PathBuf)> = self
                 .project
                 .takes(t.shot)
@@ -986,6 +1020,7 @@ impl App {
                 sequence: seq.name.clone(),
                 out: out.clone(),
                 saved: false,
+                scale: None,
             };
             let slot: Arc<Mutex<Option<_>>> = Arc::default();
             let (s, host, p, ctx) = (

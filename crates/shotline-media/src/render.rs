@@ -15,6 +15,8 @@ pub struct Clip {
     pub label: String,
     /// Match its colours to the end of the clip before.
     pub colormatch: bool,
+    /// Laid over it, `at` seconds from its start.
+    pub sounds: Vec<Track>,
 }
 
 /// Music or effects laid over the film.
@@ -149,6 +151,19 @@ pub fn render(
             "a crossfade of {x}s is longer than a clip"
         )));
     }
+    // A clip's own sounds are tracks from where it starts in the film.
+    let mut tracks = tracks.to_vec();
+    let mut start = 0.0;
+    for (c, d) in clips.iter().zip(&durations) {
+        for t in &c.sounds {
+            tracks.push(Track {
+                at: start + t.at,
+                ..t.clone()
+            });
+        }
+        start += d - x;
+    }
+    let tracks = &tracks[..];
     let audio = infos.iter().any(|i| i.audio) || !tracks.is_empty();
 
     let mut cmd = ff.command();
