@@ -61,6 +61,7 @@ pub fn models() -> Vec<ModelInfo> {
             .to_vec(),
         start_frame: true,
         start_frame_with_refs: true,
+        end_frame: true,
         audio_input: true,
         params_schema: Some(h3_options()),
         price: Some("$0.05 a second at 480P, x1.6 at 768P, x3.2 at 1080P".into()),

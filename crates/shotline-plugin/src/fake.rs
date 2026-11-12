@@ -70,6 +70,7 @@ fn models() -> Vec<ModelInfo> {
             aspects: vec!["16:9".into(), "9:16".into()],
             start_frame: true,
             start_frame_with_refs: true,
+            end_frame: true,
             audio_input: true,
             ..ModelInfo::default()
         },

@@ -132,6 +132,27 @@ impl Ffmpeg {
         })
     }
 
+    /// How long any media file runs, sound only included, in seconds.
+    pub fn length(&self, path: &Path) -> Result<f64> {
+        let out = run(
+            Command::new(&self.ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(path),
+            &format!("ffprobe {}", path.display()),
+        )?;
+        String::from_utf8_lossy(&out)
+            .trim()
+            .parse()
+            .map_err(|_| Error::Invalid(format!("{} has no length", path.display())))
+    }
+
     /// Writes the last frame of `video` as a PNG.
     /// shotline's colour match for a join as a .cube LUT for the clip after it: its first
     /// `frames` from `next_start` onto the last ones of `prev` before `prev_end` (seconds into
@@ -208,6 +229,35 @@ impl Ffmpeg {
         )?;
         if !png.is_file() {
             return Err(Error::Invalid(format!("no frames in {}", video.display())));
+        }
+        Ok(())
+    }
+
+    /// The frame of `video` showing at `at` seconds, as a PNG at full size.
+    pub fn frame_at(&self, video: &Path, at: f64, png: &Path) -> Result<()> {
+        if let Some(dir) = png.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let info = self.probe(video)?;
+        let fps = info.fps_value().max(1.0);
+        let last = ((info.video_duration * fps).ceil() - 1.0).max(0.0);
+        let n = (at * fps + 1e-6).floor().clamp(0.0, last);
+        // Input seeking drops what comes before, so half a frame early lands on frame n.
+        let from = ((n - 0.5) / fps).max(0.0);
+        let _ = std::fs::remove_file(png);
+        run(
+            self.ffmpeg()
+                .args(["-ss", &format!("{from:.6}"), "-i"])
+                .arg(video)
+                .args(["-frames:v", "1", "-update", "1", "-an"])
+                .arg(png),
+            &format!("taking a frame of {}", video.display()),
+        )?;
+        if !png.is_file() {
+            return Err(Error::Invalid(format!(
+                "no frame at {at:.3}s in {}",
+                video.display()
+            )));
         }
         Ok(())
     }

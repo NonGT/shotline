@@ -177,6 +177,10 @@ pub struct Player {
     view: (f32, egui::Pos2),
     /// Decoding at the file's own size, for a picture pinched in.
     full: bool,
+    /// A click on the picture opens it bigger somewhere else.
+    pub opens: bool,
+    /// Clicked this frame, while `opens`.
+    pub clicked: bool,
 }
 
 impl Player {
@@ -228,6 +232,8 @@ impl Player {
             waiting: false,
             view: crate::FIT,
             full: false,
+            opens: false,
+            clicked: false,
         })
     }
 
@@ -390,6 +396,7 @@ impl Player {
         true
     }
 
+    #[cfg(test)]
     pub fn show(&mut self, ui: &mut egui::Ui, height: f32) {
         let size = egui::vec2(height * self.aspect(), height);
         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
@@ -399,6 +406,7 @@ impl Player {
 
     /// The frame in `rect`, to pinch in on.
     fn picture(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        self.clicked = false;
         let Some(t) = &self.tex else { return };
         let r = ui.interact(
             rect,
@@ -409,16 +417,28 @@ impl Player {
         ui.painter().image(t.id(), rect, uv, egui::Color32::WHITE);
         let zoomed = self.view.0 > 1.0;
         r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Image, true, &self.label));
+        self.clicked = self.opens && !zoomed && r.clicked();
         let r = if zoomed {
             r.on_hover_cursor(egui::CursorIcon::Grab)
+        } else if self.opens {
+            r.on_hover_cursor(egui::CursorIcon::PointingHand)
         } else {
             r
         };
         r.on_hover_text(if zoomed {
             "drag to look around; double-click to see it whole"
+        } else if self.opens {
+            "click to open it bigger; pinch to zoom in"
         } else {
             "pinch to zoom in"
         });
+    }
+
+    /// The frame showing now, at the file's own size, as a PNG.
+    pub fn save_frame(&self, png: &std::path::Path) -> anyhow::Result<()> {
+        let c = &self.clips[self.index];
+        self.ff.frame_at(&c.path, self.position() - c.at, png)?;
+        Ok(())
     }
 }
 
@@ -438,6 +458,8 @@ pub struct Deck {
     sounding: Option<bool>,
     /// Has a close button; one that's always there doesn't.
     closable: bool,
+    /// Where the last frame saved went, or why it didn't.
+    saved: Option<Result<PathBuf, String>>,
 }
 
 /// `HH:MM:SS:FF`, as editors write it.
@@ -465,6 +487,7 @@ impl Deck {
             keys: true,
             sounding: None,
             closable: true,
+            saved: None,
         }
     }
 
@@ -513,6 +536,29 @@ impl Deck {
 
     pub fn is_playing(&self) -> bool {
         self.playing
+    }
+
+    /// A click on the picture asks for it to be opened bigger; see `clicked`.
+    pub fn opens(mut self) -> Deck {
+        for p in &mut self.players {
+            p.opens = true;
+        }
+        self
+    }
+
+    pub fn clicked(&self) -> bool {
+        self.players.iter().any(|p| p.clicked)
+    }
+
+    /// Stops on the frame showing and saves it as a PNG at the file's own size.
+    pub fn save_frame(&mut self, png: &std::path::Path, audio: Option<&Audio>) {
+        self.pause(audio);
+        self.saved = Some(
+            self.players[0]
+                .save_frame(png)
+                .map(|()| png.to_path_buf())
+                .map_err(|e| format!("{e:#}")),
+        );
     }
 
     pub fn title(&self) -> &str {
@@ -670,28 +716,55 @@ impl Deck {
                 }
             });
         }
-        let height = (ui.available_width() / self.players.len() as f32 / self.players[0].aspect())
-            .min(self.max_height);
-        ui.horizontal(|ui| {
-            let many = self.players.len() > 1;
-            for p in &mut self.players {
-                ui.vertical(|ui| {
-                    p.show(ui, height);
-                    if many {
-                        ui.weak(&p.label);
-                    }
-                    if let Some(e) = &p.error {
-                        ui.colored_label(ui.visuals().error_fg_color, e);
-                    }
-                });
+        // On black as wide as there's room for, the pictures in the middle.
+        let width = ui.available_width();
+        let height =
+            (width / self.players.len() as f32 / self.players[0].aspect()).min(self.max_height);
+        let (screen, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        ui.painter().rect_filled(screen, 4.0, egui::Color32::BLACK);
+        let all: f32 = self.players.iter().map(|p| height * p.aspect()).sum();
+        let mut x = screen.center().x - all / 2.0;
+        for p in &mut self.players {
+            let w = height * p.aspect();
+            p.picture(
+                ui,
+                egui::Rect::from_min_size(egui::pos2(x, screen.top()), egui::vec2(w, height)),
+            );
+            x += w;
+        }
+        let many = self.players.len() > 1;
+        for p in &self.players {
+            if many {
+                ui.weak(&p.label);
             }
-        });
+            if let Some(e) = &p.error {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+            }
+        }
         let first = &self.players[0];
         let (mut t, total) = (first.position(), first.duration());
         ui.horizontal(|ui| {
             self.play_button(ui, audio);
             let text = format!("{} / {}", clock(t), clock(total));
-            ui.spacing_mut().slider_width = (ui.available_width() - 120.0).max(100.0);
+            let save = self.players[0].tex.is_some()
+                && crate::icon_button(ui, "Save frame", crate::camera_icon)
+                    .on_hover_text("this frame as a picture, at the video's own size")
+                    .clicked();
+            if save {
+                let name = format!(
+                    "{}-{}.png",
+                    self.players[0].label.replace(['#', ' ', '/'], "-"),
+                    timecode(t, self.players[0].fps()).replace(':', "")
+                );
+                if let Some(png) = rfd::FileDialog::new()
+                    .add_filter("PNG", &["png"])
+                    .set_file_name(name)
+                    .save_file()
+                {
+                    self.save_frame(&png, audio);
+                }
+            }
+            ui.spacing_mut().slider_width = (ui.available_width() - 150.0).max(100.0);
             let slider = ui.add(
                 egui::Slider::new(&mut t, 0.0..=total.max(0.01))
                     .show_value(false)
@@ -706,6 +779,15 @@ impl Deck {
                 self.seek(t, audio);
             }
         });
+        match &self.saved {
+            Some(Ok(f)) => {
+                ui.weak(format!("Saved {}", f.display()));
+            }
+            Some(Err(e)) => {
+                ui.colored_label(ui.visuals().error_fg_color, e);
+            }
+            None => {}
+        }
         open
     }
 }
@@ -809,6 +891,27 @@ mod tests {
         h.event(press(false, at + egui::vec2(60.0, 0.0)));
         h.step();
         assert!(h.state().view.1.x < 0.5, "{:?}", h.state().view);
+    }
+
+    #[test]
+    fn saves_the_frame_showing() {
+        let Ok(ff) = Ffmpeg::find() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("a.mp4");
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg("testsrc=size=640x360:rate=24:duration=2")
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let mut d = Deck::new("a", Player::new(&ff, "a", &[clip]).unwrap(), true);
+        d.seek(1.0, None);
+        let png = dir.path().join("out/frame.png");
+        d.save_frame(&png, None);
+        assert!(!d.is_playing());
+        assert_eq!(d.saved, Some(Ok(png.clone())));
+        assert_eq!(ff.probe(&png).unwrap().width, 640);
     }
 
     /// Needs a sound device, so it only runs by hand: `cargo test -p shotline-ui -- --ignored`.

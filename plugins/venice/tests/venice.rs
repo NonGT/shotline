@@ -82,12 +82,45 @@ fn body_shape() {
     assert_eq!(b["reference_image_urls"].as_array().unwrap().len(), 1);
     assert_eq!(refs, [1]);
 
+    // Beside references, a start and end frame go as more pictures, named in the prompt.
     let mut r = req(dir.path());
     r.start_frame = Some(dir.path().join("a.png"));
-    match venice::body(&r) {
-        Err(Error::Plugin(e)) => assert_eq!(e.field.as_deref(), Some("start_frame")),
-        other => panic!("{other:?}"),
-    }
+    r.end_frame = Some(dir.path().join("a.png"));
+    let (b, refs) = venice::body(&r).unwrap();
+    assert_eq!(b["reference_image_urls"].as_array().unwrap().len(), 3);
+    assert_eq!(refs, [1]);
+    assert!(b.get("image_url").is_none() && b.get("end_image_url").is_none());
+    assert_eq!(
+        b["prompt"],
+        "<Picture 1> speaks\n\
+         <Picture 2> is the first frame: the video opens on this picture and carries on from it.\n\
+         <Picture 3> is the last frame: the video ends on this picture."
+    );
+}
+
+#[test]
+fn image_to_video_starts_and_ends_on_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let m = venice::models()
+        .into_iter()
+        .find(|m| m.id == "minimax-h3-max-image-to-video")
+        .unwrap();
+    assert!(m.start_frame && m.end_frame);
+    let mut r = req(dir.path());
+    r.model = m.id;
+    r.references.clear();
+    r.aspect = None;
+    r.start_frame = Some(dir.path().join("a.png"));
+    r.end_frame = Some(dir.path().join("a.png"));
+    let (b, _) = venice::body(&r).unwrap();
+    assert!(b["image_url"].as_str().unwrap().starts_with("data:image/"));
+    assert!(
+        b["end_image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/")
+    );
+    assert!(b.get("aspect_ratio").is_none());
 }
 
 #[test]

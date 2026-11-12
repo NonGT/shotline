@@ -338,7 +338,10 @@ pub fn voices(installed: &Installed, name: &str) -> Result<Vec<VoiceInfo>> {
 
 /// What the editor plugins say about the film: their projects, sequences and clips. One that
 /// fails is skipped with a line in the returned problems.
-pub fn sequences(installed: &Installed, film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+pub fn sequences(
+    installed: &Installed,
+    film: &Path,
+) -> (Vec<EditInfo>, Vec<shotline_ui::EditWarning>) {
     let rt = runtime();
     let (mut edits, mut problems) = (vec![], vec![]);
     for p in &installed.plugins {
@@ -351,16 +354,47 @@ pub fn sequences(installed: &Installed, film: &Path) -> (Vec<EditInfo>, Vec<Stri
         });
         match got {
             Ok(s) => {
-                problems.extend(s.warnings.iter().map(|w| format!("{}: {w}", p.name)));
+                problems.extend(s.warnings.iter().enumerate().map(|(i, w)| {
+                    let fix =
+                        s.fixes
+                            .iter()
+                            .find(|f| f.warning == i)
+                            .map(|f| shotline_ui::EditFix {
+                                plugin: p.name.clone(),
+                                id: f.id.clone(),
+                                label: f.label.clone(),
+                            });
+                    shotline_ui::EditWarning {
+                        text: format!("{}: {w}", p.name),
+                        fix,
+                    }
+                }));
                 edits.extend(s.edits.into_iter().map(|mut e| {
                     e.plugin = p.name.clone();
                     e
                 }));
             }
-            Err(e) => problems.push(e.to_string()),
+            Err(e) => problems.push(shotline_ui::EditWarning {
+                text: e.to_string(),
+                fix: None,
+            }),
         }
     }
     (edits, problems)
+}
+
+/// Has an editor plugin make a fix it offered.
+pub fn fix_edit(installed: &Installed, name: &str, film: &Path, id: &str) -> Result<String> {
+    let plugin = open(installed, name)?;
+    let ask = shotline_core::protocol::FixParams {
+        film: film.to_path_buf(),
+        id: id.into(),
+    };
+    match runtime().block_on(plugin.fix(&ask)) {
+        Ok(f) => Ok(f.said),
+        Err(shotline_plugin::Error::Unsupported(_)) => bail!("{name} can't fix that"),
+        Err(e) => bail!("{name}: {e}"),
+    }
 }
 
 /// Hands a finished take to every editor plugin; a line for each that took it or failed.

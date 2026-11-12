@@ -172,6 +172,7 @@ impl App {
             .map(|(r, s)| (*r, s.duration.unwrap_or(5.0)))
             .collect();
         let mut blocks = vec![];
+        let mut sounds = vec![];
         let mut end = 0.0;
         let cut = self.film.cut.clone();
         for (i, c) in cut.iter().enumerate() {
@@ -211,6 +212,20 @@ impl App {
                 id: None,
                 picked: false,
             });
+            for (ts, job, path) in self.project.take_sounds(take).unwrap_or_default() {
+                let long = self.clip_length(&ctx, &path).unwrap_or(1.0);
+                sounds.push(Block {
+                    name: job.brief.unwrap_or_default(),
+                    start: end + ts.at,
+                    length: long,
+                    still: None,
+                    hover: format!("over {take}, {:.2} s in", ts.at),
+                    enabled: true,
+                    shot: Some(c.shot),
+                    id: None,
+                    picked: false,
+                });
+            }
             end += length;
         }
         let video = vec![Lane {
@@ -246,6 +261,19 @@ impl App {
                 joins: vec![],
             });
         }
+        if !sounds.is_empty() {
+            end = sounds
+                .iter()
+                .map(|b| b.start + b.length)
+                .fold(end, f64::max);
+            audio.push(Lane {
+                name: "Sounds".into(),
+                blocks: sounds,
+                sound: true,
+                enabled: true,
+                joins: vec![],
+            });
+        }
         let playhead = self.shown_deck(CUT).map(|d| d.position());
         match lanes::show(ui, "cut", &video, &audio, end, playhead, &mut self.thumbs) {
             Some(Hit::Seek(t)) => self.cut_seek(ui.ctx(), CUT, t, false),
@@ -259,7 +287,7 @@ impl App {
     }
 
     /// Picks up what the editor plugins said, and asks them again once the film was read again.
-    fn refresh_edits(&mut self, ctx: &egui::Context) {
+    pub(crate) fn refresh_edits(&mut self, ctx: &egui::Context) {
         if let Some(slot) = &self.edits_asked {
             let Some(got) = slot.lock().unwrap().take() else {
                 return;
@@ -281,8 +309,35 @@ impl App {
                     }
                 }
             }
+            let mut bridges = crate::bridge::BridgeTakes::new();
+            for f in got
+                .0
+                .iter()
+                .flat_map(|e| &e.sequences)
+                .flat_map(|s| &s.video)
+                .flat_map(|t| &t.clips)
+                .filter_map(|c| c.file.as_ref())
+            {
+                if bridges.contains_key(f) || takes.contains_key(f) {
+                    continue;
+                }
+                if let Some(job) = self.project.bridge_of_file(f)
+                    && let Some(id) = job.bridge
+                {
+                    let n = self
+                        .project
+                        .bridge_takes(id)
+                        .unwrap_or_default()
+                        .iter()
+                        .find(|(_, j)| j.id == job.id)
+                        .map_or(0, |(n, _)| *n);
+                    bridges.insert(f.clone(), (id, job.id, n));
+                }
+            }
             self.edits = got;
             self.edit_takes = takes;
+            self.edit_bridges = bridges;
+            self.bridges_seen = None;
         }
         self.watch_edits(ctx);
         if !self.edits_stale {
@@ -301,14 +356,73 @@ impl App {
         });
     }
 
+    /// What the editor plugins said needs fixing, whole so a fix's link and steps can be read and
+    /// copied, with a button for what a plugin can fix itself.
+    fn edit_warnings(&mut self, ui: &mut egui::Ui) {
+        let done = self
+            .edit_fixing
+            .as_ref()
+            .and_then(|(_, slot)| slot.lock().unwrap().take());
+        if let Some(r) = done {
+            self.edit_fixing = None;
+            // Asked again, so a warning that's put right goes.
+            self.edits_stale = r.is_ok();
+            self.edit_fixed = Some(r);
+        }
+        let mut ask = None;
+        for w in &self.edits.1 {
+            ui.label(RichText::new(&w.text).color(theme::FLAG));
+            let Some(fix) = &w.fix else { continue };
+            ui.horizontal(|ui| {
+                let busy = self.edit_fixing.is_some() || self.host.is_none();
+                if ui
+                    .add_enabled(!busy, egui::Button::new(&fix.label))
+                    .clicked()
+                {
+                    ask = Some(fix.clone());
+                }
+                if let Some((label, _)) = &self.edit_fixing
+                    && *label == fix.label
+                {
+                    ui.spinner();
+                    ui.weak("working on it…");
+                }
+            });
+        }
+        match &self.edit_fixed {
+            Some(Ok(said)) => {
+                ui.weak(said);
+            }
+            Some(Err(e)) => {
+                ui.label(RichText::new(e).color(theme::FLAG));
+            }
+            None => {}
+        }
+        if let Some(fix) = ask
+            && let Some(host) = self.host.clone()
+        {
+            let slot: crate::Said = Arc::default();
+            let (s, film, ctx) = (slot.clone(), self.project.root.clone(), ui.ctx().clone());
+            self.edit_fixed = None;
+            self.edit_fixing = Some((fix.label.clone(), slot));
+            std::thread::spawn(move || {
+                let r = host
+                    .fix_edit(&fix.plugin, &film, &fix.id)
+                    .map_err(|e| format!("{e:#}"));
+                *s.lock().unwrap() = Some(r);
+                ctx.request_repaint();
+            });
+        }
+    }
+
     /// Asks the editors again once something in shared/, or one of their files, was saved.
     fn watch_edits(&mut self, ctx: &egui::Context) {
-        const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
-        ctx.request_repaint_after(EVERY);
+        let every = self.edits_every;
+        ctx.request_repaint_after(every);
         let now = std::time::Instant::now();
         if self
             .edits_seen
-            .is_some_and(|(_, at)| now.duration_since(at) < EVERY)
+            .is_some_and(|(_, at)| now.duration_since(at) < every)
         {
             return;
         }
@@ -356,10 +470,7 @@ impl App {
     fn cut_switch(&mut self, ui: &mut egui::Ui) {
         self.refresh_edits(ui.ctx());
         self.editor_opened();
-        // Whole, so a fix's link and steps can be read and copied.
-        for p in &self.edits.1 {
-            ui.label(RichText::new(p).color(theme::FLAG));
-        }
+        self.edit_warnings(ui);
         let editors: Vec<(String, String)> = self
             .plugins
             .iter()
@@ -548,37 +659,10 @@ impl App {
                 .color(theme::DUST),
         );
         self.take_sync(ui, &app, seq);
+        if !plugin.is_empty() {
+            self.missing_shots(ui, &plugin, &app, file, seq);
+        }
         let out = self.preview_of(seq);
-        let full = full_of(&out);
-        let making = self.full_making.as_ref().is_some_and(|(f, _)| *f == full);
-        let failed = self.full_failed.as_ref().filter(|(f, _)| *f == full);
-        ui.horizontal(|ui| {
-            // Always there, so the page doesn't move when it says something.
-            // A spinner is as tall as a button.
-            ui.set_min_height(ui.spacing().interact_size.y);
-            if full.is_file() {
-                ui.weak(format!("Preview rendered by {app}"));
-            } else if out.is_file() {
-                ui.weak("Quick preview: LUTs and dissolves, no other effects")
-                    .on_hover_text(format!(
-                        "{app} renders the whole thing once the sequence stays the same for a \
-                         few seconds while shotline is in front"
-                    ));
-            }
-            if making {
-                ui.spinner();
-                ui.weak(format!("{app} is rendering the full preview…"));
-            } else if let Some((_, e)) = failed {
-                ui.label(
-                    RichText::new(format!(
-                        "{app} couldn't render a preview: {}",
-                        short(e, 160)
-                    ))
-                    .color(theme::FLAG),
-                )
-                .on_hover_text(e.as_str());
-            }
-        });
         if let Some((_, skipped)) = self.seq_playing.as_ref().filter(|(p, _)| *p == out)
             && !skipped.is_empty()
         {
@@ -607,7 +691,7 @@ impl App {
                         .iter()
                         .map(|c| {
                             let mut b = self.edit_block(&ctx, c, sound);
-                            if !sound && !c.id.is_empty() {
+                            if !c.id.is_empty() && (!sound || c.file.is_some()) {
                                 b.picked = self.clip_pick.as_ref() == Some(&c.id);
                                 b.id = Some(c.id.clone());
                             }
@@ -632,7 +716,7 @@ impl App {
         // The player shows a preview: made once for what the sequence is now, and in the
         // meantime the one before, if any.
         let full = full_of(&out);
-        self.full_preview(&ctx, &plugin_of(&self.edits.0, file), file, seq, &out);
+        self.full_done(&out);
         let mut note = None;
         if full.is_file() {
             self.cut_deck_on(&title, std::slice::from_ref(&full));
@@ -654,6 +738,7 @@ impl App {
             .frame(egui::Frame::new().fill(theme::RACK).inner_margin(edge))
             .show(ui, |ui| {
                 // Above the tracks, so picking a clip doesn't move them.
+                self.preview_state(ui, file, seq);
                 ui.vertical(|ui| {
                     ui.set_min_height(28.0);
                     self.clip_tools(ui, file, seq);
@@ -768,7 +853,7 @@ impl App {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         // Up when previews are made differently, so old ones aren't shown.
-        2u32.hash(&mut h);
+        3u32.hash(&mut h);
         serde_json::to_string(seq).unwrap_or_default().hash(&mut h);
         for c in seq.video.iter().chain(&seq.audio).flat_map(|t| &t.clips) {
             for f in c.file.iter().chain(&c.luts) {
@@ -805,18 +890,69 @@ impl App {
         });
     }
 
-    /// Has the editor render the sequence as the player's preview, once it has stayed the same
-    /// for a few seconds while shotline is in front (so not while it's being worked on in the
-    /// editor), and nothing else is asking the editor for something.
-    fn full_preview(
-        &mut self,
-        ctx: &egui::Context,
-        plugin: &str,
-        file: &Path,
-        seq: &SequenceInfo,
-        out: &Path,
-    ) {
-        let full = full_of(out);
+    /// What a sound clip in the sequence is over: a take's own sound, a bridge's, or a sound
+    /// laid over one of them.
+    pub(crate) fn sound_under(&self, c: &ClipInfo) -> SoundPick {
+        let name = |f: &Path| {
+            f.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let mut m = SoundPick {
+            clip: c
+                .file
+                .as_deref()
+                .map(name)
+                .unwrap_or_else(|| c.name.clone()),
+            ..SoundPick::default()
+        };
+        let Some(f) = &c.file else { return m };
+        if let Some(t) = self.edit_takes.get(f) {
+            m.under = Some((t.into(), t.to_string(), c.from));
+            m.shot = Some(t.shot);
+            m.clip = format!("{t}'s own sound");
+            return m;
+        }
+        if let Some((b, t, n)) = self.edit_bridges.get(f) {
+            m.under = Some((
+                shotline_core::Under::Bridge(*b, *t),
+                format!("bridge #{n}"),
+                c.from,
+            ));
+            m.clip = format!("bridge #{n}'s own sound");
+            return m;
+        }
+        let takes = self
+            .edit_takes
+            .values()
+            .map(|t| (shotline_core::Under::from(t), t.to_string(), Some(t.shot)));
+        let bridges = self.edit_bridges.values().map(|(b, t, n)| {
+            (
+                shotline_core::Under::Bridge(*b, *t),
+                format!("bridge #{n}"),
+                None,
+            )
+        });
+        for (u, n, shot) in takes.chain(bridges) {
+            let laid = self
+                .project
+                .sounds(u)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|(_, _, p)| crate::sounds::same(p, f));
+            if let Some((ts, j, _)) = laid {
+                m.clip = crate::sounds::sound_name(&j);
+                m.under = Some((u, n, ts.at));
+                m.laid = true;
+                m.shot = shot;
+                return m;
+            }
+        }
+        m
+    }
+
+    /// Picks up the editor's render of the preview once it's done.
+    fn full_done(&mut self, out: &Path) {
         let done = self
             .full_making
             .as_ref()
@@ -828,30 +964,23 @@ impl App {
                 Err(e) => self.full_failed = Some((f, e)),
             }
         }
-        let now = std::time::Instant::now();
-        if self.seq_seen.as_ref().is_none_or(|(f, _)| *f != full) {
-            self.seq_seen = Some((full.clone(), now));
-        }
-        let quiet = self
-            .seq_seen
-            .as_ref()
-            .map(|(_, t)| now - *t)
-            .unwrap_or_default();
-        let wanted = !full.is_file()
-            && !plugin.is_empty()
-            && seq.length() > 0.0
-            && self.full_failed.as_ref().is_none_or(|(f, _)| *f != full);
-        let free = self.host.is_some()
+    }
+
+    /// Whether the editor can be asked to render a preview now.
+    fn full_free(&self) -> bool {
+        self.host.is_some()
             && self.full_making.is_none()
             && self.edit_rendering.is_none()
-            && self.changing.is_none();
-        if !wanted || !free || !ctx.input(|i| i.focused) {
+            && self.changing.is_none()
+    }
+
+    /// Has the editor render the sequence as the player's preview, off the UI thread.
+    fn start_full(&mut self, ctx: &egui::Context, plugin: &str, file: &Path, seq: &SequenceInfo) {
+        let full = full_of(&self.preview_of(seq));
+        if !self.full_free() {
             return;
         }
-        if quiet < FULL_AFTER {
-            ctx.request_repaint_after(FULL_AFTER - quiet);
-            return;
-        }
+        self.full_failed = None;
         let part = full.with_extension("part.mp4");
         let ask = ExportParams {
             film: self.project.root.clone(),
@@ -859,6 +988,8 @@ impl App {
             sequence: seq.name.clone(),
             out: part.clone(),
             saved: true,
+            // Half size is plenty for the player and renders much sooner.
+            scale: Some(0.5),
         };
         let slot: FullSlot = Arc::default();
         let (s, host, p, ctx, to) = (
@@ -877,6 +1008,67 @@ impl App {
             ctx.request_repaint();
         });
         self.full_making = Some((full, slot));
+    }
+
+    /// Above the tracks: which preview plays, and a button to have the editor render it when
+    /// the sequence has changed since.
+    fn preview_state(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
+        let plugin = plugin_of(&self.edits.0, file);
+        let app = self
+            .edits
+            .0
+            .iter()
+            .find(|e| e.file == file)
+            .map(|e| e.app.clone())
+            .unwrap_or_default();
+        let out = self.preview_of(seq);
+        let full = full_of(&out);
+        let making = self.full_making.as_ref().is_some_and(|(f, _)| *f == full);
+        let failed = self
+            .full_failed
+            .as_ref()
+            .filter(|(f, _)| *f == full)
+            .map(|(_, e)| e.clone());
+        ui.horizontal(|ui| {
+            // Always there, so the tracks don't move when it says something.
+            ui.set_min_height(ui.spacing().interact_size.y);
+            if full.is_file() {
+                ui.weak(format!("Preview rendered by {app}"));
+                return;
+            }
+            if plugin.is_empty() || seq.length() <= 0.0 {
+                if out.is_file() {
+                    ui.weak("Quick preview: LUTs and dissolves, no other effects");
+                }
+                return;
+            }
+            if making {
+                ui.spinner();
+                ui.weak(format!("{app} is rendering the preview…"));
+                return;
+            }
+            ui.label(
+                RichText::new(format!(
+                    "Preview not updated: {app} hasn't rendered it since the last change"
+                ))
+                .color(theme::TUNGSTEN),
+            )
+            .on_hover_text(
+                "until then the player shows a quick preview: LUTs and dissolves, no other effects",
+            );
+            if ui
+                .add_enabled(self.full_free(), egui::Button::new("Update preview"))
+                .on_hover_text(format!("{app} renders the sequence at half size"))
+                .on_disabled_hover_text(format!("{app} is busy"))
+                .clicked()
+            {
+                self.start_full(ui.ctx(), &plugin, file, seq);
+            }
+            if let Some(e) = failed {
+                ui.label(RichText::new(format!("couldn't: {}", short(&e, 120))).color(theme::FLAG))
+                    .on_hover_text(e);
+            }
+        });
     }
 
     /// Notes what a preview that's just been made left out; the player picks it up.
@@ -984,7 +1176,9 @@ impl App {
         if !c.enabled {
             hover.push("turned off".into());
         }
-        if take.is_some() {
+        if sound && c.file.is_some() {
+            hover.push("click for what to do with it".into());
+        } else if take.is_some() {
             hover.push("click to open the shot".into());
         }
         let still = match (&c.file, take.and_then(|t| t.output())) {
@@ -1015,8 +1209,13 @@ impl App {
         {
             crate::make_poster(ctx, (self.ff.as_ref(), &self.posters), video, png);
         }
+        let bridge = c.file.as_ref().and_then(|f| self.edit_bridges.get(f));
         Block {
-            name: take.map_or_else(|| c.name.clone(), |t| t.to_string()),
+            name: match (take, bridge) {
+                (Some(t), _) => t.to_string(),
+                (None, Some((_, _, n))) => format!("bridge #{n}"),
+                (None, None) => c.name.clone(),
+            },
             start: c.start,
             length: c.length,
             still: still.map(|(_, png)| png),
@@ -1267,7 +1466,7 @@ pub(crate) struct Making {
 
 /// The sequence to show first: one in a project shotline made (under `shared/<plugin>/`), else
 /// the first one there is.
-fn main_sequence(
+pub(crate) fn main_sequence(
     film: &Path,
     edits: &[shotline_core::protocol::EditInfo],
 ) -> Option<(PathBuf, String)> {
@@ -1282,10 +1481,19 @@ fn main_sequence(
     Some((e.file.clone(), e.sequences[0].name.clone()))
 }
 
-pub(crate) type FullSlot = Arc<Mutex<Option<Result<(), String>>>>;
+/// What a picked sound clip is.
+#[derive(Clone, Default)]
+pub(crate) struct SoundPick {
+    /// A file's name, what was said, or whose own sound it is.
+    pub clip: String,
+    /// What it's over, by name, and where in it the sound starts.
+    pub under: Option<(shotline_core::Under, String, f64)>,
+    pub shot: Option<ShotRef>,
+    /// A sound laid over it, rather than its own.
+    pub laid: bool,
+}
 
-/// How long a sequence stays the same before the editor renders it.
-const FULL_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
+pub(crate) type FullSlot = Arc<Mutex<Option<Result<(), String>>>>;
 
 /// The editor's own render of what `quick` previews.
 fn full_of(quick: &Path) -> PathBuf {
@@ -1293,7 +1501,7 @@ fn full_of(quick: &Path) -> PathBuf {
     quick.with_file_name(format!("{stem}-full.mp4"))
 }
 
-fn plugin_of(edits: &[shotline_core::protocol::EditInfo], file: &Path) -> String {
+pub(crate) fn plugin_of(edits: &[shotline_core::protocol::EditInfo], file: &Path) -> String {
     edits
         .iter()
         .find(|e| e.file == file)
@@ -1340,7 +1548,7 @@ fn blank_monitor(ui: &mut egui::Ui, height: f32, note: &str) {
     ui.add_space(36.0);
 }
 
-fn seq_title(file: &Path, seq: &SequenceInfo) -> String {
+pub(crate) fn seq_title(file: &Path, seq: &SequenceInfo) -> String {
     let file = file.file_name().unwrap_or_default().to_string_lossy();
     format!("{file} · {}", seq.name)
 }

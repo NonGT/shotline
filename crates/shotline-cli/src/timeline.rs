@@ -104,15 +104,26 @@ pub fn render_with(
     } else {
         MatchAt::None
     };
-    let clips: Vec<Clip> = cut
-        .iter()
-        .enumerate()
-        .map(|(i, c)| Clip {
+    let mut clips = vec![];
+    for (i, c) in cut.iter().enumerate() {
+        let sounds = match &c.take {
+            Some(t) => p.take_sounds(t)?,
+            None => vec![],
+        };
+        clips.push(Clip {
             path: c.video.clone().expect("checked above"),
             label: c.take.as_ref().map(|t| t.to_string()).unwrap_or_default(),
             colormatch: c.colormatch(at, i == 0),
-        })
-        .collect();
+            sounds: sounds
+                .into_iter()
+                .map(|(s, _, path)| Track {
+                    path,
+                    at: s.at,
+                    volume: 1.0,
+                })
+                .collect(),
+        });
+    }
     let mut tracks = vec![];
     for t in &tl.tracks {
         let path = p.root.join(&t.file);

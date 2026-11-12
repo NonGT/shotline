@@ -5,7 +5,8 @@ use eframe::egui::{self, RichText};
 use shotline_core::{Built, Catalog, Shot, ShotRef};
 
 use crate::edit::Action;
-use crate::{App, anchor, browse, hint, remove_button, short, spend_button, theme};
+use crate::price::{Pressed, Price, PriceRow};
+use crate::{App, anchor, browse, hint, remove_button, theme};
 
 #[derive(Clone, Default)]
 pub(crate) enum Shoot {
@@ -394,10 +395,8 @@ impl App {
             let Shoot::Done(r, out) = s.clone() else {
                 return;
             };
-            *s = match &out {
-                Ok(_) => Shoot::Idle,
-                Err(e) => Shoot::Failed(r, e.clone()),
-            };
+            // A failed take says why on its own row and in the status bar.
+            *s = Shoot::Idle;
             (r, out)
         };
         self.reload();
@@ -410,62 +409,65 @@ impl App {
         }
     }
 
-    /// Get price, then the spend button, then progress.
+    /// Shoot a take…, then the spend button, then progress. A take's own failure shows on its
+    /// row, not here.
     pub(crate) fn shoot_row(&mut self, ui: &mut egui::Ui, r: ShotRef) {
+        self.forget_stale_price(r);
         let state = self.shoot.lock().unwrap().clone();
         let elsewhere = state
             .shot()
             .filter(|x| *x != r && matches!(state, Shoot::Pricing(_) | Shoot::Running(..)));
-        ui.horizontal(|ui| match &state {
-            Shoot::Pricing(x) if *x == r => {
-                ui.spinner();
-                ui.weak("asking the price…");
-            }
+        let working;
+        let shown = match &state {
+            Shoot::Pricing(x) if *x == r => Price::Asking,
             Shoot::Running(x, step) if *x == r => {
-                ui.spinner();
-                ui.weak(format!("shooting; this takes a few minutes · {step}"));
+                working = format!("shooting; this takes a few minutes · {step}");
+                Price::Working(&working)
             }
-            Shoot::Priced(x, cost) if *x == r => {
-                if spend_button(ui, &format!("Shoot it for {cost}"))
-                    .on_hover_text("spends this and writes it to the ledger")
-                    .clicked()
-                {
-                    self.start_shoot(ui.ctx(), r, Some(cost.clone()));
-                }
-                if ui.button("Cancel").clicked() {
-                    *self.shoot.lock().unwrap() = Shoot::Idle;
-                }
-            }
-            _ => {
-                let host = self.host.is_some();
-                if ui
-                    .add_enabled(
-                        host && elsewhere.is_none(),
-                        egui::Button::new(
-                            RichText::new("Shoot a take…")
-                                .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
-                                .color(theme::TUNGSTEN_LIT),
-                        )
-                        .stroke(egui::Stroke::new(1.5, theme::TUNGSTEN))
-                        .min_size(egui::vec2(200.0, 38.0)),
-                    )
-                    .on_hover_text("asks the price first; nothing is spent yet")
-                    .on_disabled_hover_text(match elsewhere {
-                        Some(x) => format!("still busy with {x}"),
-                        None => "no plugins".into(),
-                    })
-                    .clicked()
-                {
-                    self.start_shoot(ui.ctx(), r, None);
-                }
-                if let Shoot::Failed(x, e) = &state
-                    && *x == r
-                {
-                    ui.label(RichText::new(short(e, 80)).color(theme::FLAG))
-                        .on_hover_text(e);
+            Shoot::Priced(x, cost) if *x == r => Price::Priced(cost),
+            Shoot::Failed(x, e) if *x == r => Price::Failed(e),
+            _ => Price::Idle,
+        };
+        let blocked = match (&self.host, elsewhere) {
+            (None, _) => Some("no plugins".to_string()),
+            (_, Some(x)) => Some(format!("busy shooting {x}")),
+            _ => None,
+        };
+        let plugin = self.built(r).map(|b| b.plugin).unwrap_or_default();
+        let pressed = PriceRow::new("Shoot a take")
+            .big()
+            .keys(self.needs_keys(&plugin))
+            .blocked(blocked)
+            .show(ui, shown);
+        match pressed {
+            Some(Pressed::Ask) => self.start_shoot(ui.ctx(), r, None),
+            Some(Pressed::Go) => {
+                if let Shoot::Priced(_, cost) = state {
+                    self.start_shoot(ui.ctx(), r, Some(cost));
                 }
             }
+            Some(Pressed::Cancel) => *self.shoot.lock().unwrap() = Shoot::Idle,
+            Some(Pressed::Keys) => self.wants_keys = Some(plugin),
+            None => {}
+        }
+    }
+
+    /// A price asked before the shot changed is no longer the price.
+    fn forget_stale_price(&mut self, r: ShotRef) {
+        let priced = matches!(&*self.shoot.lock().unwrap(), Shoot::Priced(x, _) if *x == r);
+        if !priced {
+            return;
+        }
+        let edited = self.open().is_some_and(|(_, s)| {
+            !self
+                .form
+                .changes(r, &s, self.project.config.duration)
+                .is_empty()
         });
+        let now = self.built(r);
+        if edited || self.shoot_for.as_ref() != Some(&now) {
+            *self.shoot.lock().unwrap() = Shoot::Idle;
+        }
     }
 
     /// Prices a take, or with `at` shoots one at that price.
@@ -479,6 +481,9 @@ impl App {
             Some(_) => Shoot::Running(r, "starting".into()),
             None => Shoot::Pricing(r),
         };
+        if at.is_none() {
+            self.shoot_for = Some(self.built(r));
+        }
         let (state, ctx, film) = (self.shoot.clone(), ctx.clone(), self.project.root.clone());
         let translate = self.translate_prompt;
         std::thread::spawn(move || {

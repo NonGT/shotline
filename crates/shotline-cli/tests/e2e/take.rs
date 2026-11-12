@@ -306,3 +306,48 @@ fn a_continue_shot_stays_on_its_take() {
         .success();
     assert!(!shot().unwrap().contains("continue_from"));
 }
+
+#[test]
+fn a_bridge_take_starts_and_ends_on_its_frames() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    tmp.child("film/bridges/b/start.png")
+        .write_binary(b"png")
+        .unwrap();
+    tmp.child("film/bridges/b/end.png")
+        .write_binary(b"png")
+        .unwrap();
+    let id = "01JBX9Q3T7K2M8V5N4R6P1W0YZ";
+    tmp.child(format!("film/bridges/{id}.toml"))
+        .write_str(
+            "sequence = \"Main\"\nstart = \"bridges/b/start.png\"\nend = \"bridges/b/end.png\"\n\
+             prompt = \"she turns\"\nlength = 2.0\nplugin = \"fake\"\nmodel = \"fake/video\"\n\
+             [from]\nfile = \"a.mp4\"\nat = 2.98\n[to]\nfile = \"b.mp4\"\nat = 0.02\n",
+        )
+        .unwrap();
+    shotline(&tmp)
+        .args(["bridge", "take", "01jbx", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("done"));
+    shotline(&tmp)
+        .args(["bridge", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 take(s)"));
+    let jobs = std::fs::read_dir(tmp.path().join("film/jobs")).unwrap();
+    let job = jobs
+        .map(|d| std::fs::read_to_string(d.unwrap().path().join("job.toml")).unwrap())
+        .find(|t| t.contains("bridge = "))
+        .unwrap();
+    assert!(job.contains(&format!("bridge = \"{id}\"")), "{job}");
+    assert!(
+        job.contains("bridges/b/start.png") && job.contains("bridges/b/end.png"),
+        "{job}"
+    );
+    assert!(job.contains("she turns"), "{job}");
+    assert!(
+        job.contains("no slow start"),
+        "the motion note goes along: {job}"
+    );
+}

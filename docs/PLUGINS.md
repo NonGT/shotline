@@ -94,6 +94,8 @@ Model fields other than `id` and `op` are optional; leave out what doesn't apply
 - `min_duration`, `max_duration` in seconds; `whole_seconds` if fractions aren't allowed.
 - `resolutions`, `aspects`: allowed values, as the API spells them.
 - `start_frame`, `start_frame_with_refs`, `audio_input`: what the model accepts.
+- `end_frame`: it takes a frame to end on too (`end_frame` in the request), so it can make a
+  bridge between two clips.
 - `audio_mix`: the model plays the audio as the soundtrack and takes one clip, so shotline mixes
   the shot's lines into one track at their times first. Without it each line goes as its own
   clip, and a shot can't have more lines than `max_audio`.
@@ -245,6 +247,19 @@ A clip's `luts` lists the LUTs the editor puts on it, in order: .cube files, or 
 name for a built-in one (the preview leaves those out). A
 `warnings` list next to `edits` (strings) shows on the Cut page as is, for problems on the
 editor's side the user has to fix, like a filmcraft-cli that doesn't match the app's version.
+When the plugin can put one right itself, `fixes` offers it as a button under the warning:
+
+```json
+"fixes": [{"warning": 0, "id": "update-cli", "label": "Update filmcraft-cli to 0.19.0"}]
+```
+
+`warning` is the warning's place in the list.
+
+### fix (optional)
+
+For an editor plugin: makes a fix `sequences` offered. Params `{"film": "...", "id": "update-cli"}`.
+Returns `{"said": "filmcraft-cli is now 0.19.0"}`, shown under the warning; shotline then asks
+`sequences` again. It may download things but never spends.
 
 ### open (optional)
 
@@ -276,12 +291,19 @@ itself (never by writing its project file). Params:
 
 `change` is one of:
 
-- `{"kind": "replace", "file", "from"}`: the file over the clip, from `from` seconds into it, at the
-  same place and length; the clip's sound stays when the file has none
+- `{"kind": "replace", "file", "from", "length"}`: the file over the clip, from `from` seconds into
+  it, at the same place and length; the clip's sound stays when the file has none. With
+  `length`, that much of the file instead, and what follows moves by the difference
+- `{"kind": "insert", "file", "after", "sound"}`: all of the file put in just before the clip (or
+  just after it with `after`), moving what follows later on every track; only its picture unless
+  `sound`
 - `{"kind": "lut", "file"}`: the clip's input LUT (`.cube`); without `file` it comes off
 - `{"kind": "match", "to"}`: the clip's colour matched to the sequence's frame at `to` seconds
 - `{"kind": "crossfade", "frames"}`: a dissolve that many frames long into the clip from the one
   before, centred on the cut; 0 takes the one there off
+- `{"kind": "sound", "file", "at"}`: all of the file on an audio track with room for it, starting
+  `at` seconds into the clip's own file; nothing moves
+- `{"kind": "lift"}`: the clip taken out, on a video or an audio track, leaving its place empty
 - `{"kind": "undo", "steps"}`: takes an earlier change back
 
 Returns `{"undo": ..., "saved": true}`. `undo` is whatever the plugin needs to take the change
@@ -293,10 +315,10 @@ answers with an error saying why.
 ### export (optional)
 
 For an editor plugin: renders a sequence with the editor's own renderer and waits for the file.
-Params: `{"film", "file", "sequence", "out", "saved"}`, with `out` the video to write (its
-extension says the format). With `"saved": true` it renders the file as saved, without going
-through an open editor, so changes not saved yet are left out; shotline asks for that for the cut
-page preview. Returns `{"file": "/path/to/film/renders/Main_edit-20261107-221500.mp4"}`.
+Params: `{"film", "file", "sequence", "out", "saved", "scale"}`, with `out` the video to write
+(its extension says the format). With `"saved": true` it renders the file as saved, without going
+through an open editor, so changes not saved yet are left out. `scale` (optional) is a fraction of
+the sequence's frame size. shotline asks for both for the cut page preview, at 0.5. Returns `{"file": "/path/to/film/renders/Main_edit-20261107-221500.mp4"}`.
 
 ### import (optional)
 

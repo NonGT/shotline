@@ -1,6 +1,7 @@
 //! A cut drawn the way editors draw one: a time ruler, video tracks stacked above the audio
 //! tracks (the highest V on top, A1 right under V1), each clip a block as long as it lasts, and a
-//! playhead. Clicking or dragging along the ruler moves the playhead; clicking a clip opens its
+//! playhead. Pinching zooms in on it, scrolling or the bar under it moves along. Clicking or
+//! dragging along the ruler moves the playhead; clicking a clip opens its
 //! shot, or picks it when it can be changed.
 
 use std::path::PathBuf;
@@ -28,6 +29,8 @@ pub(crate) struct Join {
     /// "01-010#1 to 01-020#1".
     pub name: String,
     pub picked: bool,
+    /// Has a bridge made for it, not put in yet.
+    pub bridged: bool,
     /// A transition across it: where it starts and how long it lasts.
     pub fade: Option<(f64, f64)>,
 }
@@ -62,6 +65,18 @@ const RULER: f32 = 22.0;
 const VIDEO: f32 = 54.0;
 const AUDIO: f32 = 30.0;
 const GAP: f32 = 2.0;
+const BAR: f32 = 8.0;
+/// As far in as a pinch goes.
+const MOST_PPS: f64 = 400.0;
+
+/// How far a timeline is pinched in, and the second at its left edge.
+#[derive(Clone, Copy, Default)]
+struct View {
+    zoom: f64,
+    start: f64,
+    /// Where the playhead was last frame, to keep it in sight while it plays.
+    last: Option<f64>,
+}
 
 /// `video` V1 first, `audio` A1 first. `length` is the seconds the ruler spans.
 pub(crate) fn show(
@@ -75,6 +90,7 @@ pub(crate) fn show(
 ) -> Option<Hit> {
     let lanes: Vec<&Lane> = video.iter().rev().chain(audio).collect();
     let height = RULER
+        + BAR
         + lanes
             .iter()
             .map(|l| if l.sound { AUDIO } else { VIDEO } + GAP)
@@ -84,11 +100,81 @@ pub(crate) fn show(
     let id = ui.scope_id().with(("lanes", id));
     let span = Rect::from_min_max(pos2(rect.left() + HEAD, rect.top()), rect.right_bottom());
     let length = length.max(1.0);
-    let pps = span.width() as f64 / length;
-    let x_of = |t: f64| span.left() + (t * pps) as f32;
-    let t_of = |x: f32| (((x - span.left()) as f64) / pps).clamp(0.0, length);
+    let view_id = id.with("view");
+    let mut view: View = ui.data(|d| d.get_temp(view_id)).unwrap_or_default();
+    let width = span.width().max(1.0) as f64;
+    let most = (length * MOST_PPS / width).max(1.0);
+    view.zoom = view.zoom.clamp(1.0, most);
+    // Pinch in on the second under the fingers; scroll along, sideways or not.
+    if ui.rect_contains_pointer(rect) {
+        let (pinch, scroll, at) = ui.input(|i| {
+            (
+                i.zoom_delta() as f64,
+                i.smooth_scroll_delta,
+                i.pointer.hover_pos(),
+            )
+        });
+        let pps = width * view.zoom / length;
+        if pinch != 1.0 {
+            let x = at.map_or(span.center().x, |a| a.x.clamp(span.left(), span.right()));
+            let off = (x - span.left()) as f64;
+            let under = view.start + off / pps;
+            view.zoom = (view.zoom * pinch).clamp(1.0, most);
+            view.start = under - off / (width * view.zoom / length);
+        } else if view.zoom > 1.0 {
+            let d = if scroll.x != 0.0 { scroll.x } else { scroll.y };
+            view.start -= d as f64 / pps;
+        }
+    }
+    let shown = length / view.zoom;
+    let pps = width / shown;
+    // The bar under the tracks: what's in sight of the whole, dragged to move along.
+    let bar = Rect::from_min_size(
+        pos2(span.left(), rect.bottom() - BAR + 2.0),
+        vec2(span.width(), BAR - 3.0),
+    );
+    // Only there when pinched in.
+    let drag = (view.zoom > 1.0).then(|| {
+        let drag = ui.interact(bar, id.with("bar"), Sense::click_and_drag());
+        drag.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::ScrollBar, true, "Scroll the timeline")
+        });
+        if drag.dragged() {
+            view.start += drag.drag_delta().x as f64 * length / width;
+        } else if drag.clicked()
+            && let Some(at) = drag.interact_pointer_pos()
+        {
+            view.start = (at.x - span.left()) as f64 * length / width - shown / 2.0;
+        }
+        drag
+    });
+    if let Some(t) = playhead {
+        let was_in = view
+            .last
+            .is_some_and(|l| l >= view.start && l <= view.start + shown);
+        // Played past the right edge: a page on, as editors do.
+        if was_in && t > view.start + shown && view.last.is_some_and(|l| t > l) {
+            view.start = t;
+        }
+        view.last = Some(t);
+    }
+    view.start = view.start.clamp(0.0, length - shown);
+    ui.data_mut(|d| d.insert_temp(view_id, view));
+    let start = view.start;
+    let x_of = |t: f64| span.left() + ((t - start) * pps) as f32;
+    let t_of = |x: f32| (start + ((x - span.left()) as f64) / pps).clamp(0.0, length);
     let p = ui.painter_at(rect);
     let mut hit = None;
+    if let Some(drag) = &drag {
+        let whole = |t: f64| bar.left() + (t / length * width) as f32;
+        p.rect_filled(bar, 3.0, theme::RACK);
+        let thumb = Rect::from_min_max(
+            pos2(whole(start), bar.top()),
+            pos2(whole(start + shown).max(whole(start) + 6.0), bar.bottom()),
+        );
+        let lit = drag.hovered() || drag.dragged();
+        p.rect_filled(thumb, 3.0, if lit { theme::DUST } else { theme::GRAPHITE });
+    }
 
     // Clicked or dragged, the ruler moves the playhead.
     let ruler = Rect::from_min_size(span.min, vec2(span.width(), RULER));
@@ -108,9 +194,13 @@ pub(crate) fn show(
     p.rect_filled(ruler, 0.0, theme::RACK);
     let step = tick_step(pps);
     let small = egui::FontId::proportional(11.0);
-    let mut t = 0.0;
-    while t <= length + 1e-9 {
+    let mut t = (start / step).floor() * step;
+    while t <= (start + shown).min(length) + 1e-9 {
         let x = x_of(t);
+        if x < span.left() - 0.5 {
+            t += step;
+            continue;
+        }
         p.line_segment(
             [pos2(x, ruler.bottom() - 6.0), pos2(x, ruler.bottom())],
             Stroke::new(1.0, theme::DUST),
@@ -154,6 +244,9 @@ pub(crate) fn show(
                 ),
             )
             .intersect(span);
+            if !r.is_positive() {
+                continue;
+            }
             let resp = ui.interact(
                 r,
                 id.with((&lane.name, i)),
@@ -219,9 +312,14 @@ pub(crate) fn show(
                     pos2(x_of(start + length), row.bottom() - 4.0),
                 )
                 .intersect(span);
-                p.rect_filled(band, 2.0, theme::TUNGSTEN.gamma_multiply(0.35));
+                if band.is_positive() {
+                    p.rect_filled(band, 2.0, theme::TUNGSTEN.gamma_multiply(0.35));
+                }
             }
             let x = x_of(j.at);
+            if x < span.left() || x > span.right() {
+                continue;
+            }
             let mark = Rect::from_center_size(pos2(x, row.bottom() - 8.0), vec2(14.0, 16.0));
             let resp = ui.interact(mark, id.with((&lane.name, "join", i)), Sense::click());
             resp.widget_info(|| {
@@ -229,6 +327,8 @@ pub(crate) fn show(
             });
             let colour = if j.picked || resp.hovered() {
                 theme::TUNGSTEN
+            } else if j.bridged {
+                theme::TUNGSTEN_DEEP
             } else {
                 theme::PAPER
             };
@@ -243,9 +343,10 @@ pub(crate) fn show(
                 colour,
                 Stroke::new(1.0, theme::LINE),
             ));
+            let bridged = if j.bridged { "; has a bridge" } else { "" };
             let resp = resp.on_hover_text(match j.fade {
-                Some((_, l)) => format!("{}: dissolve, {l:.2} s", j.name),
-                None => format!("{}: a straight cut", j.name),
+                Some((_, l)) => format!("{}: dissolve, {l:.2} s{bridged}", j.name),
+                None => format!("{}: a straight cut{bridged}", j.name),
             });
             if resp.clicked() {
                 hit = Some(Hit::PickJoin(j.id.clone()));
@@ -254,7 +355,7 @@ pub(crate) fn show(
         y += h + GAP;
     }
 
-    if let Some(t) = playhead {
+    if let Some(t) = playhead.filter(|t| *t >= start && *t <= start + shown) {
         let x = x_of(t.clamp(0.0, length));
         // A handle to grab in the ruler.
         p.rect_filled(

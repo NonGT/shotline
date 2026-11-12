@@ -305,6 +305,99 @@ pub fn mismatch(cli: &Path) -> Option<String> {
     (app != got).then(|| upgrade(&app, &got, cli))
 }
 
+/// The app's version, when `cli` is older and shotline can put the app's own in its place: on a
+/// Mac, where the CLI comes as a zip of its own.
+pub fn can_update(cli: &Path) -> Option<String> {
+    let app = version_of(&control::program())?;
+    let got = version_of(cli)?;
+    (cfg!(target_os = "macos") && numbers(&got) < numbers(&app)).then_some(app)
+}
+
+/// Puts `new` in place of `cli`, once it says it's version `app`.
+fn replace(new: &Path, cli: &Path, app: &str) -> Result<String, String> {
+    if version_of(new).as_deref() != Some(app) {
+        return Err(format!("the one downloaded isn't filmcraft-cli {app}"));
+    }
+    // Next to the old one first, so the swap is a rename and never leaves half a file.
+    let next = cli.with_extension("new");
+    std::fs::copy(new, &next)
+        .and_then(|_| executable(&next))
+        .and_then(|_| std::fs::rename(&next, cli))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&next);
+            format!("couldn't put it in place of {}: {e}", cli.display())
+        })?;
+    Ok(format!("filmcraft-cli is now {app}"))
+}
+
+/// Downloads filmcraft-cli for the app's version from its release and puts it in place of `cli`.
+pub fn update_cli(cli: &Path) -> Result<String, String> {
+    let app = can_update(cli).ok_or("filmcraft-cli can't be updated from here")?;
+    let url = format!(
+        "https://github.com/storytold/filmcraft/releases/download/v{app}/\
+         filmcraft-cli-{app}-macos-universal.zip"
+    );
+    let dir = std::env::temp_dir().join(format!("shotline-filmcraft-cli-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let got = (|| {
+        let zip = dir.join("cli.zip");
+        let out = Command::new("curl")
+            .args(["-fsSL", "-o"])
+            .arg(&zip)
+            .arg(&url)
+            .output()
+            .map_err(|e| format!("couldn't run curl: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "couldn't download {url}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let out = Command::new("ditto")
+            .args(["-x", "-k"])
+            .arg(&zip)
+            .arg(dir.join("cli"))
+            .output()
+            .map_err(|e| format!("couldn't run ditto: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "couldn't unzip it: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let new = find(&dir.join("cli"), cli_name()).ok_or("the zip has no filmcraft-cli")?;
+        replace(&new, cli, &app)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    got
+}
+
+#[cfg(unix)]
+fn executable(f: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(not(unix))]
+fn executable(_: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn find(dir: &Path, name: &str) -> Option<PathBuf> {
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Some(f) = find(&p, name) {
+                return Some(f);
+            }
+        } else if p.file_name().is_some_and(|n| n == name) {
+            return Some(p);
+        }
+    }
+    None
+}
+
 fn upgrade(app: &str, cli_version: &str, cli: &Path) -> String {
     let releases = "https://github.com/storytold/filmcraft/releases";
     let head = format!(
@@ -462,6 +555,30 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&ignore).unwrap(),
             "renders/\nshared/**/.*.fcproj.lock\n"
+        );
+    }
+
+    #[test]
+    fn puts_the_new_cli_in_place_of_the_old() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("bin");
+        let new = tmp.path().join("zip");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let cli = fake(&old, "echo 'filmcraft-cli 0.18.0'");
+        let wrong = fake(&new, "echo 'filmcraft-cli 0.18.5'");
+        assert!(replace(&wrong, &cli, "0.19.0").is_err());
+        assert_eq!(version_of(&cli).as_deref(), Some("0.18.0"));
+        let right = fake(&new, "echo 'filmcraft-cli 0.19.0'");
+        assert_eq!(
+            replace(&right, &cli, "0.19.0").unwrap(),
+            "filmcraft-cli is now 0.19.0"
+        );
+        assert_eq!(version_of(&cli).as_deref(), Some("0.19.0"));
+        assert_eq!(
+            std::fs::read_dir(&old).unwrap().count(),
+            1,
+            "nothing left over"
         );
     }
 

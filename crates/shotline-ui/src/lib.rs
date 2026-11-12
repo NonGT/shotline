@@ -3,6 +3,7 @@
 //! both always agree.
 
 mod anchor;
+mod bridge;
 mod browse;
 mod cost;
 mod cut;
@@ -16,7 +17,9 @@ mod menu;
 mod pieces;
 mod player;
 mod prefs;
+mod price;
 mod shoot;
+mod sounds;
 mod start;
 mod theme;
 mod voice;
@@ -92,7 +95,24 @@ struct Film {
 }
 
 /// Editor projects, and problems asking the plugins for them.
-type Edits = (Vec<EditInfo>, Vec<String>);
+type Edits = (Vec<EditInfo>, Vec<EditWarning>);
+
+/// A problem on an editor's side, shown on the Cut page, and a fix its plugin offers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditWarning {
+    pub text: String,
+    pub fix: Option<EditFix>,
+}
+
+/// A fix an editor plugin can make itself: by `fix` with its id, on a button saying `label`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EditFix {
+    pub plugin: String,
+    pub id: String,
+    pub label: String,
+}
+/// Filled with what a plugin said once it's done.
+type Said = Arc<Mutex<Option<Result<String, String>>>>;
 /// Filled once an editor was asked to open a project.
 type Opened = Arc<Mutex<Option<Result<(), String>>>>;
 
@@ -109,8 +129,12 @@ pub trait Host: Send + Sync {
     fn balance(&self, plugin: &str) -> anyhow::Result<String>;
     /// The film's projects in video editors, from the editor plugins, and problems asking them.
     /// Free.
-    fn sequences(&self, _film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+    fn sequences(&self, _film: &Path) -> Edits {
         (vec![], vec![])
+    }
+    /// Has an editor plugin make a fix it offered with a warning. Returns what it said.
+    fn fix_edit(&self, plugin: &str, _film: &Path, _id: &str) -> anyhow::Result<String> {
+        anyhow::bail!("{plugin} can't fix that")
     }
     /// What one operation outside any shot would cost, e.g. "0.00 USD". Free.
     fn op_quote(
@@ -130,6 +154,26 @@ pub trait Host: Send + Sync {
         _at: &str,
     ) -> anyhow::Result<PathBuf> {
         anyhow::bail!("{plugin} can't be run from here")
+    }
+    /// What another take of a bridge would cost, with putting its prompt into English first
+    /// when `translate` and that's needed. Free.
+    fn bridge_quote(
+        &self,
+        _film: &Path,
+        _bridge: shotline_core::Ulid,
+        _translate: bool,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("bridges can't be made from here")
+    }
+    /// Makes a take of the bridge, if the price is still `at`. Returns its video.
+    fn bridge_take(
+        &self,
+        _film: &Path,
+        _bridge: shotline_core::Ulid,
+        _at: &str,
+        _translate: bool,
+    ) -> anyhow::Result<PathBuf> {
+        anyhow::bail!("bridges can't be made from here")
     }
     /// Renders a sequence of an editor's project through its plugin into `out`.
     fn export_edit(
@@ -171,6 +215,53 @@ pub trait Host: Send + Sync {
     fn say_quote(&self, film: &Path, shot: ShotRef, line: usize) -> anyhow::Result<String>;
     /// Records the line, if the price is still `at`, and picks it for the shot's takes.
     fn say(&self, film: &Path, shot: ShotRef, line: usize, at: &str) -> anyhow::Result<PathBuf>;
+    /// What `who` saying `text` would cost, with the voice a line of `shot` gets. Free.
+    fn speech_quote(
+        &self,
+        _film: &Path,
+        _shot: Option<ShotRef>,
+        _who: &str,
+        _text: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("can't make speech here")
+    }
+    /// Records `who` saying `text`, if the price is still `at`. Returns the job's id.
+    fn speech(
+        &self,
+        _film: &Path,
+        _shot: Option<ShotRef>,
+        _who: &str,
+        _text: &str,
+        _at: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("can't make speech here")
+    }
+    /// What a sound effect made from `text` would cost; without `length` the model picks it.
+    /// Free.
+    fn effect_quote(
+        &self,
+        _film: &Path,
+        plugin: &str,
+        _model: &str,
+        _text: &str,
+        _length: Option<f64>,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("{plugin} can't make sound effects here")
+    }
+    /// Makes the sound effect for `shot`, if the price is still `at`. Returns the job's id.
+    #[allow(clippy::too_many_arguments)]
+    fn effect(
+        &self,
+        _film: &Path,
+        _shot: Option<ShotRef>,
+        plugin: &str,
+        _model: &str,
+        _text: &str,
+        _length: Option<f64>,
+        _at: &str,
+    ) -> anyhow::Result<String> {
+        anyhow::bail!("{plugin} can't make sound effects here")
+    }
     /// What a take of the shot would cost, e.g. "0.40 USD". Free.
     /// `translate` puts the prompt into English first, if it isn't and that isn't done yet.
     fn take_quote(&self, film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String>;
@@ -240,6 +331,10 @@ enum VoiceList {
     Failed(String),
 }
 
+/// The thread that asks which keys plugins are missing; tests tell it apart by name.
+#[doc(hidden)]
+pub const KEYS_THREAD: &str = "plugin keys";
+
 pub struct App {
     project: Project,
     user_dir: PathBuf,
@@ -266,12 +361,25 @@ pub struct App {
     edits: Edits,
     /// The takes the clips in them play, by file.
     edit_takes: HashMap<PathBuf, Take>,
+    edit_bridges: bridge::BridgeTakes,
+    bridge_win: Option<bridge::BridgeWin>,
+    /// Joins of the sequence shown that have a bridge, by the clip after them.
+    bridged: Vec<String>,
+    /// The film's bridges, read again after the sequences are.
+    bridges_seen: Option<Vec<(shotline_core::Ulid, shotline_core::Bridge)>>,
+    /// Each shot of the cut with the take it would go in the editor's sequence with.
+    cut_takes: Option<Vec<(Take, PathBuf)>>,
     /// Being asked again in the background; the answer lands here.
     edits_asked: Option<Arc<Mutex<Option<Edits>>>>,
     /// The film was read again, so the editors are asked again.
     edits_stale: bool,
     /// What shared/ and the editors' files looked like when last checked, and when that was.
     edits_seen: Option<(u64, std::time::Instant)>,
+    /// An editor plugin making a fix, by its button's words, and then what came of it.
+    edit_fixing: Option<(String, Said)>,
+    edit_fixed: Option<Result<String, String>>,
+    /// How often shared/ and the editors' files are looked at for a save.
+    edits_every: std::time::Duration,
     /// A sequence's preview being made, and where to start playing it once it's there.
     seq_making: Option<crate::cut::Making>,
     /// The preview the deck plays, and the clips left out of it.
@@ -285,10 +393,10 @@ pub struct App {
     /// The editor rendering a preview, into this file.
     full_making: Option<(PathBuf, cut::FullSlot)>,
     full_failed: Option<(PathBuf, String)>,
-    /// The editor preview wanted now, and since when.
-    seq_seen: Option<(PathBuf, std::time::Instant)>,
     /// The editor clip picked on the Cut page, by the editor's id.
     clip_pick: Option<String>,
+    /// The sound clip picked on the Cut page, by the editor's id and file, and what it is.
+    sound_pick: Option<(String, Option<PathBuf>, cut::SoundPick)>,
     /// The join picked instead, by the editor's id for the clip after it.
     join_pick: Option<String>,
     /// How long a dissolve put on a join is, in frames.
@@ -307,6 +415,10 @@ pub struct App {
     continued: Option<(ShotRef, String)>,
     /// A take to use in the cut once it's agreed the shot after keeps its start.
     confirm_select: Option<Take>,
+    /// Picked on the shot page, to go in the editor's sequence too once it's been read again.
+    cut_follow: Option<Take>,
+    sounds_win: Option<sounds::SoundsWin>,
+    picks: std::collections::VecDeque<PathBuf>,
     status: Option<(String, bool)>,
     /// The job that made the zoomed picture, once Details is asked for.
     zoom_details: Option<(PathBuf, Option<shotline_core::Job>)>,
@@ -334,9 +446,13 @@ pub struct App {
     host: Option<Arc<dyn Host>>,
     /// A plugin's keys asked for, e.g. one that said it has none; the shell opens Preferences.
     pub(crate) wants_keys: Option<String>,
+    /// Keys each plugin needs that aren't set, by plugin, worked out off the UI thread.
+    missing_keys: Arc<Mutex<HashMap<String, Vec<String>>>>,
     maker: Option<anchor::Maker>,
     /// The open shot as it would be sent; None once anything is read again.
     built: Option<(ShotRef, Result<shotline_core::Built, String>)>,
+    /// What the shot was when its take was priced.
+    shoot_for: Option<Result<shotline_core::Built, String>>,
     /// Ticked: a shot's prompt goes into English before its next take.
     translate_prompt: bool,
     shoot: Arc<Mutex<shoot::Shoot>>,
@@ -358,8 +474,9 @@ pub struct App {
     paused: Option<(String, f64)>,
     /// A line being recorded again, and the recording the new one replaces.
     remaking: Option<(ShotRef, usize, String)>,
-    /// Recordings' lengths, as ffprobe gave them.
-    lengths: HashMap<PathBuf, f64>,
+    /// Recordings' lengths, as ffprobe gave them; None when it couldn't, so it isn't asked
+    /// again every frame.
+    lengths: HashMap<PathBuf, Option<f64>>,
     /// Clips' lengths for the Cut page, probed in the background; None while it's probing or
     /// when it can't tell.
     clip_lengths: Arc<Mutex<HashMap<PathBuf, Option<f64>>>>,
@@ -636,9 +753,17 @@ impl App {
             cut_view: None,
             edits: (vec![], vec![]),
             edit_takes: HashMap::new(),
+            edit_bridges: HashMap::new(),
+            bridge_win: None,
+            bridged: vec![],
+            bridges_seen: None,
+            cut_takes: None,
             edits_asked: None,
             edits_stale: true,
             edits_seen: None,
+            edit_fixing: None,
+            edit_fixed: None,
+            edits_every: std::time::Duration::from_secs(1),
             seq_making: None,
             seq_playing: None,
             edit_opening: None,
@@ -646,8 +771,8 @@ impl App {
             seq_failed: None,
             full_making: None,
             full_failed: None,
-            seq_seen: None,
             clip_pick: None,
+            sound_pick: None,
             join_pick: None,
             fade_frames: 12,
             changing: None,
@@ -659,6 +784,9 @@ impl App {
             prev_takes: vec![],
             continued: None,
             confirm_select: None,
+            cut_follow: None,
+            sounds_win: None,
+            picks: Default::default(),
             status: None,
             zoom_details: None,
             zoom_view: FIT,
@@ -677,8 +805,10 @@ impl App {
             plugins: vec![],
             host: None,
             wants_keys: None,
+            missing_keys: Arc::default(),
             maker: None,
             built: None,
+            shoot_for: None,
             translate_prompt: false,
             shoot: Arc::default(),
             say: Arc::default(),
@@ -723,6 +853,56 @@ impl App {
     pub fn set_plugins(&mut self, plugins: Vec<Description>, host: Option<Arc<dyn Host>>) {
         self.plugins = plugins;
         self.host = host;
+        self.check_keys();
+    }
+
+    /// Works out again which plugins are missing a key, after keys were changed.
+    pub fn check_keys(&self) {
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        let into = self.missing_keys.clone();
+        let spawned = std::thread::Builder::new()
+            .name(KEYS_THREAD.into())
+            .spawn(move || {
+                let got = host
+                    .plugins()
+                    .0
+                    .into_iter()
+                    .filter(|p| !p.missing.is_empty())
+                    .map(|p| (p.name, p.missing))
+                    .collect();
+                *into.lock().unwrap() = got;
+            });
+        if let Err(e) = spawned {
+            eprintln!("can't check plugin keys: {e}");
+        }
+    }
+
+    /// The plugin `who` speaks through, or why they can't speak.
+    pub(crate) fn voice_plugin(&self, who: &str) -> Result<String, String> {
+        let who = who.trim_start_matches('@');
+        if who.is_empty() {
+            return Err("pick who says it first".into());
+        }
+        let el = self
+            .film
+            .elements
+            .iter()
+            .find(|(e, _)| e.handle == who)
+            .map(|(e, _)| e)
+            .ok_or_else(|| format!("there's no @{who} in the cast"))?;
+        el.voice
+            .as_ref()
+            .map(|v| v.plugin.clone())
+            .ok_or_else(|| format!("@{who} has no voice yet; give them one on the Elements page"))
+    }
+
+    /// Why `plugin` can't be asked yet: a key it needs isn't set.
+    pub(crate) fn needs_keys(&self, plugin: &str) -> Option<String> {
+        let missing = self.missing_keys.lock().unwrap();
+        let keys = missing.get(plugin)?;
+        Some(format!("{plugin} needs {}", keys.join(", ")))
     }
 
     /// A paid-for image is kept whichever element is showing now.
@@ -776,6 +956,8 @@ impl App {
     fn show_maker(&mut self, ui: &mut egui::Ui, models: &[anchor::ImageModel]) {
         let pool = self.anchor_pool();
         let translator = self.translator();
+        let missing = self.missing_keys.lock().unwrap().clone();
+        self.maker.as_mut().unwrap().missing = missing;
         let wants = self.maker.as_mut().unwrap().show(
             ui,
             models,
@@ -806,6 +988,7 @@ impl App {
             }
             (anchor::Wants::Zoom(p), _) => self.zoom = Some(p),
             (anchor::Wants::Close, _) => self.maker = None,
+            (anchor::Wants::Keys(plugin), _) => self.wants_keys = Some(plugin),
             _ => {}
         }
     }
@@ -1018,7 +1201,27 @@ impl App {
         let _ = std::fs::write(file, text);
     }
 
+    /// Answers file dialogs with these files, one each, for tests.
+    pub fn picking(mut self, files: Vec<PathBuf>) -> App {
+        self.picks = files.into();
+        self
+    }
+
+    /// A file from the dialog, or the next one `picking` was given.
+    pub(crate) fn pick_file(&mut self, dialog: rfd::FileDialog) -> Option<PathBuf> {
+        if !self.picks.is_empty() {
+            return self.picks.pop_front();
+        }
+        dialog.pick_file()
+    }
+
     /// Plays without sound and never touches the sound device, for tests.
+    /// Looks for the editors' saves this often, instead of once a second.
+    pub fn checking_edits_every(mut self, every: std::time::Duration) -> App {
+        self.edits_every = every;
+        self
+    }
+
     pub fn silent(mut self) -> App {
         self.audio_tried = true;
         self
@@ -1119,6 +1322,7 @@ impl App {
         };
         self.film.in_use = in_use(&self.film, &self.project.root);
         self.edits_stale = true;
+        self.cut_takes = None;
         self.load_takes()
     }
 
@@ -1224,6 +1428,8 @@ impl App {
         self.add_made_anchor();
         self.shoot_finished();
         self.said();
+        self.follow_cut(ui.ctx());
+        self.sounds_window(ui.ctx());
         let tab = self.tab;
         egui::Panel::top("bar")
             .frame(
@@ -2466,6 +2672,7 @@ impl App {
     fn take_list(&mut self, ui: &mut egui::Ui, s: &Shot, acts: &mut Vec<Action>) {
         section(ui, "Takes");
         ui.add_space(6.0);
+        let mut sounds_for = None;
         let mut splice: Option<Vec<shotline_core::Piece>> = None;
         ui.horizontal(|ui| {
             let any = self.takes.iter().any(|t| t.output().is_some());
@@ -2624,6 +2831,19 @@ impl App {
                             {
                                 splice = Some(pieces);
                             }
+                            if video.is_some() && selected {
+                                let k = self.project.take_sounds(t).map_or(0, |s| s.len());
+                                let label = match k {
+                                    0 => "Sounds…".to_string(),
+                                    k => format!("Sounds ({k})…"),
+                                };
+                                if act(ui, &label, n)
+                                    .on_hover_text("effects or a voice off over it in the cut")
+                                    .clicked()
+                                {
+                                    sounds_for = Some(t.clone());
+                                }
+                            }
                             if video.is_some()
                                 && !selected
                                 && act(ui, "Use in the cut", n)
@@ -2638,6 +2858,7 @@ impl App {
                                     self.confirm_select = Some(t.clone());
                                 } else {
                                     acts.push(Action::Select(t.clone()));
+                                    self.cut_follow = Some(t.clone());
                                 }
                             }
                         });
@@ -2652,6 +2873,9 @@ impl App {
         }
         if let Some(t) = watch {
             self.watch(ui, t);
+        }
+        if let Some(t) = sounds_for {
+            self.open_sounds((&t).into(), t.to_string(), 0.0);
         }
         self.confirm_select(ui, acts);
         if let Some(pieces) = splice
@@ -2689,6 +2913,7 @@ impl App {
         });
         if yes {
             acts.push(Action::Select(t.clone()));
+            self.cut_follow = Some(t.clone());
         }
         if yes || no || modal.should_close() {
             self.confirm_select = None;
@@ -2811,7 +3036,7 @@ impl App {
                 (Some(f), Some(ff)) => Player::new(ff, &label, &[f]).ok(),
                 _ => None,
             }
-            .map(|p| Deck::new(&label, p, true).in_popup(320.0));
+            .map(|p| Deck::new(&label, p, true).in_popup(320.0).opens());
             if deck.is_some() {
                 self.audio();
             }
@@ -2842,6 +3067,9 @@ impl App {
             ui.add_space(24.0);
             ui.vertical(|ui| in_cut_details(ui, &take, size, length, left.bottom()));
         });
+        if d.clicked() {
+            self.watch(ui, take);
+        }
         true
     }
 
@@ -3434,6 +3662,20 @@ pub(crate) fn play_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) 
     ));
 }
 
+pub(crate) fn camera_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let s = s.expand(1.0);
+    let body = egui::Rect::from_min_max(egui::pos2(s.left(), s.top() + 2.5), s.max);
+    p.rect_stroke(body, 1.5, stroke, egui::StrokeKind::Middle);
+    p.line_segment(
+        [
+            egui::pos2(s.center().x - 2.0, s.top() + 1.0),
+            egui::pos2(s.center().x + 2.0, s.top() + 1.0),
+        ],
+        stroke,
+    );
+    p.circle_stroke(body.center(), body.height() * 0.28, stroke);
+}
+
 pub(crate) fn stop_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
     p.rect_filled(s.shrink(1.0), 1.0, stroke.color);
 }
@@ -3465,13 +3707,27 @@ pub(crate) fn modal<R>(
     let modals = egui::Id::unique("modal layers");
     let r = egui::Modal::new(egui::Id::unique(name)).show(ctx, content);
     let me = r.response.layer_id;
+    let shown = ctx.memory(|m| m.areas().visible_last_frame(&me));
+    // In the order they were opened: one opened from another stays above it, even though a
+    // click on the one below raises that.
     let others = ctx.data_mut(|d| {
         let all = d.get_temp_mut_or_default::<Vec<egui::LayerId>>(modals);
-        if !all.contains(&me) {
+        if !shown || !all.contains(&me) {
+            all.retain(|l| *l != me);
             all.push(me);
         }
         all.clone()
     });
+    let newest = ctx.memory(|m| {
+        others
+            .iter()
+            .rev()
+            .find(|l| **l == me || m.areas().visible_last_frame(l))
+            .copied()
+    });
+    if newest == Some(me) {
+        ctx.move_to_top(me);
+    }
     if r.is_top_modal {
         let popups = ctx.memory(|m| m.areas().visible_layer_ids());
         for l in popups {

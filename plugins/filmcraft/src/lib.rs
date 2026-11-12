@@ -13,8 +13,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use shotline_plugin::protocol::{
     ClipInfo, Description, EditInfo, EditParams, Edited, ErrorKind, ExportParams, Exported,
-    ImportParams, Imported, OpenParams, Outputs, PROTOCOL_VERSION, PluginError, Quote, Request,
-    SequenceInfo, Sequences, Status, TakeFile, TrackInfo, TransitionInfo,
+    FixInfo, FixParams, Fixed, ImportParams, Imported, OpenParams, Outputs, PROTOCOL_VERSION,
+    PluginError, Quote, Request, SequenceInfo, Sequences, Status, TakeFile, TrackInfo,
+    TransitionInfo,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
@@ -70,14 +71,45 @@ impl Plugin for FilmCraft {
     }
 
     async fn sequences(&self, film: &Path) -> Result<Sequences> {
-        let warnings = editor::cli_program()
-            .and_then(|cli| editor::mismatch(&cli))
+        let cli = editor::cli_program();
+        let warnings: Vec<String> = cli
+            .as_deref()
+            .and_then(editor::mismatch)
+            .into_iter()
+            .collect();
+        let fixes = cli
+            .as_deref()
+            .filter(|_| !warnings.is_empty())
+            .and_then(editor::can_update)
+            .map(|v| FixInfo {
+                warning: 0,
+                id: UPDATE_CLI.into(),
+                label: format!("Update filmcraft-cli to {v}"),
+            })
             .into_iter()
             .collect();
         Ok(Sequences {
             edits: shared_edits(film),
             warnings,
+            fixes,
         })
+    }
+
+    async fn fix(&self, ask: &FixParams) -> Result<Fixed> {
+        if ask.id != UPDATE_CLI {
+            return Err(fail(
+                ErrorKind::NotFound,
+                format!("no fix called {}", ask.id),
+            ));
+        }
+        let cli = editor::cli_program()
+            .ok_or_else(|| fail(ErrorKind::Other, "filmcraft-cli isn't installed".into()))?;
+        // A big download: off the runtime's thread.
+        let said = tokio::task::spawn_blocking(move || editor::update_cli(&cli))
+            .await
+            .map_err(|e| fail(ErrorKind::Other, e.to_string()))?
+            .map_err(|e| fail(ErrorKind::Other, e))?;
+        Ok(Fixed { said })
     }
 
     async fn open(&self, ask: &OpenParams) -> Result<()> {
@@ -96,6 +128,9 @@ impl Plugin for FilmCraft {
         send_takes(ask).map_err(|e| fail(ErrorKind::Other, e))
     }
 }
+
+/// The fix `sequences` offers for an old filmcraft-cli.
+const UPDATE_CLI: &str = "update-cli";
 
 fn waiting_file(film: &Path) -> PathBuf {
     film.join(".shotline/cache/filmcraft-waiting.json")
@@ -975,14 +1010,16 @@ mod tests {
     async fn edits_with_filmcraft() {
         let tmp = tempfile::tempdir().unwrap();
         let film = tmp.path().join("fan");
-        let (a, b, c) = (
+        let (a, b, c, d) = (
             film.join("jobs/a/out.mp4"),
             film.join("jobs/b/out.mp4"),
             film.join("jobs/c/out.mp4"),
+            film.join("jobs/d/out.mp4"),
         );
         colour_clip(&a, "red", 3, true);
         colour_clip(&b, "blue", 3, true);
         colour_clip(&c, "green", 4, false);
+        colour_clip(&d, "yellow", 2, true);
         let piece = |name: &str, file: &Path, start: f64| ClipInfo {
             name: name.into(),
             file: Some(file.into()),
@@ -1079,6 +1116,7 @@ mod tests {
                 Change::Replace {
                     file: c.clone(),
                     from: 0.5,
+                    length: None,
                 },
             ))
             .await
@@ -1090,6 +1128,116 @@ mod tests {
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         let (v, _) = at(3.0);
         assert_eq!((v.file.as_ref(), v.from), (Some(&b), 0.0));
+        // All 4 s of green over the red 3 s, so blue and its sound move a second later.
+        let done = FilmCraft
+            .edit(&ask(
+                &at(0.0).0.id,
+                Change::Replace {
+                    file: c.clone(),
+                    from: 0.0,
+                    length: Some(4.0),
+                },
+            ))
+            .await
+            .unwrap();
+        let (v, _) = at(0.0);
+        assert_eq!((v.file.as_ref(), v.length), (Some(&c), 4.0));
+        let (v, snd) = at(4.0);
+        assert_eq!((v.file.as_ref(), snd.file.as_ref()), (Some(&b), Some(&b)));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        let (v, snd) = at(0.0);
+        assert_eq!((v.file.as_ref(), v.length), (Some(&a), 3.0));
+        assert_eq!(snd.file.as_ref(), Some(&a));
+        assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+        let inserted = async || {
+            // The green clip in at the join, the blue one and its sound moved on by its length.
+            let done = FilmCraft
+                .edit(&ask(
+                    &at(3.0).0.id,
+                    Change::Insert {
+                        file: c.clone(),
+                        after: false,
+                        sound: false,
+                    },
+                ))
+                .await
+                .unwrap();
+            let (green, (blue, snd)) = (seq().video[0].clips[1].clone(), at(7.0));
+            assert_eq!((green.file.as_ref(), green.start), (Some(&c), 3.0));
+            assert_eq!(blue.file.as_ref(), Some(&b));
+            assert_eq!(snd.file.as_ref(), Some(&b));
+            assert_eq!(seq().audio[0].clips.len(), 2, "the bridge is silent");
+            done
+        };
+        let done = inserted().await;
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+
+        // A new shot's take after the last clip, with its sound.
+        let done = FilmCraft
+            .edit(&ask(
+                &at(3.0).0.id,
+                Change::Insert {
+                    file: d.clone(),
+                    after: true,
+                    sound: true,
+                },
+            ))
+            .await
+            .unwrap();
+        let (v, snd) = at(6.0);
+        assert_eq!((v.file.as_ref(), snd.file.as_ref()), (Some(&d), Some(&d)));
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert_eq!(seq().video[0].clips.len(), 2);
+        assert_eq!(seq().audio[0].clips.len(), 2);
+
+        // A sound a second into the blue take, on a track of its own, lifted and put back.
+        let door = film.join("jobs/e/out.wav");
+        std::fs::create_dir_all(door.parent().unwrap()).unwrap();
+        let ok = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=880:d=1.5"])
+            .arg(&door)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let laid = async || {
+            let done = FilmCraft
+                .edit(&ask(
+                    &at(3.0).0.id,
+                    Change::Sound {
+                        file: door.clone(),
+                        at: 1.0,
+                    },
+                ))
+                .await
+                .unwrap();
+            let s = seq();
+            assert_eq!(
+                s.audio.len(),
+                2,
+                "the takes' own track has no room: {:?}",
+                s.audio
+            );
+            let put = s.audio[1].clips[0].clone();
+            assert_eq!((put.file.as_ref(), put.start), (Some(&door), 4.0));
+            assert_eq!(s.video[0].clips.len(), 2, "nothing else moved");
+            (done, put)
+        };
+        let (done, put) = laid().await;
+        let off = FilmCraft.edit(&ask(&put.id, Change::Lift)).await.unwrap();
+        assert!(seq().audio[1].clips.is_empty());
+        FilmCraft.edit(&ask("", undo(&off))).await.unwrap();
+        let back = seq().audio[1].clips[0].clone();
+        assert_eq!(
+            (back.file.as_ref(), back.start, back.length),
+            (Some(&door), 4.0, 1.5)
+        );
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert!(seq().audio[1].clips.is_empty());
+        assert_eq!(seq().audio[0].clips.len(), 2);
+
+        // Undo can give the clips new ids.
+        let v = at(3.0).0;
 
         // A colour match adds a Lumetri; undo takes it off again.
         let done = FilmCraft
@@ -1129,6 +1277,7 @@ mod tests {
             sequence: "fan".into(),
             out: film.join("renders").join(name),
             saved: false,
+            scale: None,
         };
         let length = |f: &Path| {
             let out = std::process::Command::new("ffprobe")
@@ -1155,13 +1304,27 @@ mod tests {
             length(&got.file)
         );
         if editor::cli_program().is_some() {
-            // The saved file, rendered beside the open app.
+            // The saved file, rendered beside the open app, at half size.
             let ask = ExportParams {
                 saved: true,
+                scale: Some(0.5),
                 ..render("saved.mp4")
             };
-            let got = FilmCraft.export(&ask).await.unwrap();
-            assert!((length(&got.file) - 6.0).abs() < 0.2);
+            let half = FilmCraft.export(&ask).await.unwrap();
+            assert!((length(&half.file) - 6.0).abs() < 0.2);
+            let width = |f: &Path| {
+                let out = std::process::Command::new("ffprobe")
+                    .args(["-v", "error", "-select_streams", "v:0"])
+                    .args(["-show_entries", "stream=width", "-of", "csv=p=0"])
+                    .arg(f)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&out.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap()
+            };
+            assert_eq!(width(&half.file) * 2, width(&got.file));
         }
 
         let _ = s.call("app.quit", json!({}));
@@ -1208,6 +1371,7 @@ mod tests {
                 Change::Replace {
                     file: c.clone(),
                     from: 0.0,
+                    length: None,
                 },
             ))
             .await
@@ -1215,6 +1379,13 @@ mod tests {
         assert_eq!(at(3.0).0.file.as_ref(), Some(&c));
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+        let done = inserted().await;
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert_eq!(at(3.0).0.file.as_ref(), Some(&b));
+        // The empty track left from before has room now.
+        let (done, _) = laid().await;
+        FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
+        assert!(seq().audio[1].clips.is_empty());
 
         // Taken off and put back, through the CLI.
         let fades = || seq().video[0].transitions.clone();

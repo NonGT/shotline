@@ -7,9 +7,8 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::{self, RichText};
 use shotline_core::ShotRef;
 
-use crate::{
-    AnchorAsk, Host, Thumbs, caption, hint, remove_button, shape, short, spend_button, theme,
-};
+use crate::price::{Pressed, Price, PriceRow};
+use crate::{AnchorAsk, Host, Thumbs, caption, hint, remove_button, shape, short, theme};
 
 #[derive(Clone)]
 enum Stage {
@@ -19,7 +18,10 @@ enum Stage {
     Priced(AnchorAsk, String),
     Making,
     Made(PathBuf),
+    /// Asking the price didn't work.
     Failed(String),
+    /// Making it didn't work; nothing was kept.
+    Unmade(String),
 }
 
 /// "Translate to English first", under anything typed for a model: only offered when the text
@@ -93,6 +95,8 @@ pub(crate) struct Maker {
     stage: Arc<Mutex<Stage>>,
     /// Browse existing shows other shots' pictures too.
     show_all: bool,
+    /// Keys each plugin needs that aren't set, as App::needs_keys has them.
+    pub missing: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// A picture that can go along: an element's anchor, or a shot's frame or own picture.
@@ -113,6 +117,8 @@ pub(crate) enum Wants {
     Make(AnchorAsk, String),
     Zoom(PathBuf),
     Close,
+    /// Preferences, at this plugin's keys.
+    Keys(String),
 }
 
 impl Maker {
@@ -141,6 +147,7 @@ impl Maker {
             fetch: Arc::new(Mutex::new(Fetch::Idle)),
             stage: Arc::new(Mutex::new(Stage::Idle)),
             show_all: false,
+            missing: Default::default(),
         }
     }
 
@@ -215,7 +222,7 @@ impl Maker {
             host,
             move |h| match h.make_anchor(&film, &ask, &cost) {
                 Ok(out) => Stage::Made(out),
-                Err(e) => Stage::Failed(format!("{e:#}")),
+                Err(e) => Stage::Unmade(format!("{e:#}")),
             },
             Stage::Making,
         );
@@ -394,40 +401,35 @@ impl Maker {
                     outfit: self.outfit,
                 };
                 ui.add_space(4.0);
-                ui.horizontal(|ui| match &stage {
-                    Stage::Pricing => {
-                        ui.spinner();
-                        ui.weak("asking the price…");
-                    }
-                    Stage::Making => {
-                        ui.spinner();
-                        ui.weak("making the image; this can take a minute");
-                    }
-                    Stage::Priced(priced, cost) if *priced == ask => {
-                        if spend_button(ui, &format!("Make it for {cost}"))
-                            .on_hover_text("spends this and writes it to the ledger")
-                            .clicked()
-                        {
+                let shown = match &stage {
+                    Stage::Pricing => Price::Asking,
+                    Stage::Making => Price::Working("making the image; this can take a minute"),
+                    Stage::Priced(priced, cost) if *priced == ask => Price::Priced(cost),
+                    Stage::Failed(e) => Price::Failed(e),
+                    _ => Price::Idle,
+                };
+                let keys = self
+                    .missing
+                    .get(&m.plugin)
+                    .map(|k| format!("{} needs {}", m.plugin, k.join(", ")));
+                match PriceRow::new("Make").keys(keys).show(ui, shown) {
+                    Some(Pressed::Keys) => wants = Wants::Keys(m.plugin.clone()),
+                    Some(Pressed::Ask) => wants = Wants::Price(ask.clone()),
+                    Some(Pressed::Go) => {
+                        if let Stage::Priced(_, cost) = &stage {
                             wants = Wants::Make(ask.clone(), cost.clone());
                         }
-                        if ui.button("Cancel").clicked() {
-                            *self.stage.lock().unwrap() = Stage::Idle;
-                        }
                     }
-                    _ => {
-                        if ui
-                            .button("Get price")
-                            .on_hover_text("free; nothing is spent yet")
-                            .clicked()
-                        {
-                            wants = Wants::Price(ask.clone());
-                        }
-                        if let Stage::Failed(e) = &stage {
-                            ui.label(RichText::new(short(e, 70)).color(theme::FLAG))
-                                .on_hover_text(e);
-                        }
-                    }
-                });
+                    Some(Pressed::Cancel) => *self.stage.lock().unwrap() = Stage::Idle,
+                    None => {}
+                }
+                if let Stage::Unmade(e) = &stage {
+                    ui.label(
+                        RichText::new(format!("Couldn't make it: {}", short(e, 200)))
+                            .color(theme::FLAG),
+                    )
+                    .on_hover_text(e);
+                }
             });
         let r = panel.response.rect;
         let at = egui::Rect::from_min_size(

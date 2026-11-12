@@ -781,7 +781,8 @@ fn check_start_frame(spec: &ModelInfo, references: &[Reference], warnings: &mut 
         warnings.push(format!("{} doesn't take a start frame", spec.id));
     } else if !references.is_empty() && !spec.start_frame_with_refs {
         warnings.push(format!(
-            "{} doesn't take a start frame together with reference images",
+            "{} doesn't take a start frame together with reference images, so it goes as one \
+             more picture: the shot opens close to it, not exactly on it",
             spec.id
         ));
     }

@@ -13,7 +13,9 @@ use shotline_core::protocol::{
     OpenParams, Quote, Request, SequenceInfo, TrackInfo, TransitionInfo, VoiceInfo,
 };
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
-use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
+use shotline_ui::{
+    AnchorAsk, App, EditFix, EditWarning, Host, MenuCommand, PluginInfo, Runs, Shell, Tab,
+};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
 fn film(dir: &Path) -> Project {
@@ -81,6 +83,7 @@ fn film(dir: &Path) -> Project {
 fn harness(dir: &Path) -> Harness<'static, App> {
     let app = App::new(film(dir), dir.join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     // Tall enough for a shot's takes, under its references.
     Harness::builder()
@@ -94,6 +97,9 @@ fn field(h: &Harness<'static, App>, role: Role, label: &str) -> String {
         .value()
         .unwrap_or_default()
 }
+
+/// How often the app looks for the editor's saves, so tests that save for it don't wait long.
+const EDITS_EVERY: Duration = Duration::from_millis(50);
 
 const R: ShotRef = ShotRef {
     chapter: 1,
@@ -142,12 +148,22 @@ fn edit_a_shot() {
     h.run();
     h.get_by_label("Add line").click();
     h.run();
-    // Nothing to record yet.
+    // Nothing to record yet, or to bring in a recording of.
     assert!(h.get_by_label("Record…").accesskit_node().is_disabled());
+    assert!(
+        h.get_by_label("From a file…")
+            .accesskit_node()
+            .is_disabled()
+    );
     let line = h.get_by_role_and_label(Role::TextInput, "Lines");
     line.focus();
     line.type_text("ไปกันเถอะ");
     h.run();
+    assert!(
+        !h.get_by_label("From a file…")
+            .accesskit_node()
+            .is_disabled()
+    );
     h.key_press(egui::Key::Enter);
     h.run();
     h.run();
@@ -337,7 +353,12 @@ impl Host for TestHost {
                     runs: Runs::Builtin,
                     skipped: vec![],
                     description: Ok(d("fal", vec![h3])),
-                    missing: vec!["FAL_API_KEY".into()],
+                    // Missing for Preferences only, so tests can still shoot with fal.
+                    missing: if std::thread::current().name() != Some(shotline_ui::KEYS_THREAD) {
+                        vec!["FAL_API_KEY".into()]
+                    } else {
+                        vec![]
+                    },
                 },
                 PluginInfo {
                     name: "venice".into(),
@@ -409,6 +430,83 @@ impl Host for TestHost {
         Ok(out)
     }
 
+    fn speech_quote(
+        &self,
+        _film: &Path,
+        _shot: Option<ShotRef>,
+        who: &str,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        assert_eq!((who, text), ("paka", "Over here!"));
+        Ok("0.02 USD".into())
+    }
+
+    fn effect_quote(
+        &self,
+        _film: &Path,
+        plugin: &str,
+        model: &str,
+        text: &str,
+        length: Option<f64>,
+    ) -> anyhow::Result<String> {
+        assert_eq!(
+            (plugin, model, text, length),
+            (
+                "elevenlabs",
+                "eleven_text_to_sound_v2",
+                "a door slams",
+                None
+            )
+        );
+        Ok("0.01 USD".into())
+    }
+
+    fn effect(
+        &self,
+        film: &Path,
+        shot: Option<ShotRef>,
+        _plugin: &str,
+        model: &str,
+        text: &str,
+        _length: Option<f64>,
+        at: &str,
+    ) -> anyhow::Result<String> {
+        assert_eq!(at, "0.01 USD");
+        let p = Project::open(film)?;
+        let mut j = Job::new(Op::AudioSfx, "elevenlabs", model);
+        j.shot = shot;
+        j.prompt = Some(text.into());
+        let mut j = p.create_job(j)?;
+        std::fs::write(p.job_dir(j.id).join("out.mp3"), "mp3")?;
+        j.status = JobStatus::Done;
+        j.outputs = vec!["out.mp3".into()];
+        p.save_job(&j)?;
+        Ok(j.id.to_string())
+    }
+
+    /// Speech as the CLI leaves it: a done tts job of the words.
+    fn speech(
+        &self,
+        film: &Path,
+        shot: Option<ShotRef>,
+        who: &str,
+        text: &str,
+        at: &str,
+    ) -> anyhow::Result<String> {
+        assert_eq!(at, "0.02 USD");
+        let p = Project::open(film)?;
+        let mut j = Job::new(Op::AudioTts, "fake", "fake/tts");
+        j.shot = shot;
+        j.who = Some(who.into());
+        j.prompt = Some(text.into());
+        let mut j = p.create_job(j)?;
+        std::fs::write(p.job_dir(j.id).join("out.wav"), "wav")?;
+        j.status = JobStatus::Done;
+        j.outputs = vec!["out.wav".into()];
+        p.save_job(&j)?;
+        Ok(j.id.to_string())
+    }
+
     fn take_quote(&self, _film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String> {
         assert_eq!(shot, R);
         Ok(if translate {
@@ -465,14 +563,37 @@ impl Host for TestHost {
     }
 
     /// An editor plugin's answer, from shared/edits.json when a test writes one.
-    fn sequences(&self, film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+    /// With a fix for the first warning when editor-fix.txt says what its button says.
+    fn sequences(&self, film: &Path) -> (Vec<EditInfo>, Vec<EditWarning>) {
         let edits = std::fs::read_to_string(film.join("shared/edits.json"))
             .map(|t| serde_json::from_str(&t).unwrap())
             .unwrap_or_default();
+        let fix = std::fs::read_to_string(film.join("editor-fix.txt"))
+            .ok()
+            .map(|label| EditFix {
+                plugin: "filmcraft".into(),
+                id: "update-cli".into(),
+                label,
+            });
         let warnings = std::fs::read_to_string(film.join("editor-warnings.txt"))
-            .map(|t| t.lines().map(String::from).collect())
+            .map(|t| {
+                t.lines()
+                    .enumerate()
+                    .map(|(i, l)| EditWarning {
+                        text: l.into(),
+                        fix: fix.clone().filter(|_| i == 0),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         (edits, warnings)
+    }
+
+    /// Puts it right: the warnings go.
+    fn fix_edit(&self, plugin: &str, film: &Path, id: &str) -> anyhow::Result<String> {
+        assert_eq!((plugin, id), ("filmcraft", "update-cli"));
+        std::fs::remove_file(film.join("editor-warnings.txt"))?;
+        Ok("filmcraft-cli is now 0.18.0".into())
     }
 
     /// Writes a stand-in video where it was asked to. Previews are of the saved file; Render
@@ -483,6 +604,14 @@ impl Host for TestHost {
             ask.saved != to_keep,
             "saved = {} for {:?}",
             ask.saved,
+            ask.out
+        );
+        // The preview at half size; a render to keep at full.
+        let scale = if to_keep { None } else { Some(0.5) };
+        anyhow::ensure!(
+            ask.scale == scale,
+            "scale {:?} for {:?}",
+            ask.scale,
             ask.out
         );
         std::fs::create_dir_all(ask.out.parent().unwrap())?;
@@ -510,6 +639,37 @@ impl Host for TestHost {
         let input = &req.inputs["video"];
         let out = input.with_extension("done.mp4");
         std::fs::copy(input, &out)?;
+        Ok(out)
+    }
+
+    fn bridge_quote(
+        &self,
+        _film: &Path,
+        _bridge: shotline_core::Ulid,
+        _translate: bool,
+    ) -> anyhow::Result<String> {
+        Ok("0.40 USD".into())
+    }
+
+    /// A take of the bridge: its start frame as the video.
+    fn bridge_take(
+        &self,
+        film: &Path,
+        bridge: shotline_core::Ulid,
+        at: &str,
+        _translate: bool,
+    ) -> anyhow::Result<PathBuf> {
+        assert_eq!(at, "0.40 USD");
+        let p = Project::open(film)?;
+        let b = p.bridge(bridge)?;
+        let mut j = Job::new(Op::VideoGenerate, "fal", &b.model);
+        j.bridge = Some(bridge);
+        let mut j = p.create_job(j)?;
+        let out = p.job_dir(j.id).join("out.mp4");
+        std::fs::copy(p.root.join(&b.start), &out)?;
+        j.outputs = vec!["out.mp4".into()];
+        j.status = JobStatus::Done;
+        p.save_job(&j)?;
         Ok(out)
     }
 
@@ -632,6 +792,7 @@ fn edit_the_cut_and_render() {
     let r: ShotRef = "01-010".parse().unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -681,6 +842,7 @@ fn make_an_anchor_image() {
     let p = film(tmp.path());
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let model = |id: &str| ModelInfo {
         id: id.into(),
@@ -748,24 +910,24 @@ fn make_an_anchor_image() {
     h.get_by_label("Outfit exactly as in their reference images")
         .click();
     h.run();
-    h.get_by_label("Get price").click();
+    h.get_by_label("Make…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Make it for $0.04")
+        .query_by_label("Make for $0.04")
         .is_some()));
     assert!(anchors(&p).is_empty());
-    h.get_by_label("Make it for $0.04").click();
+    h.get_by_label("Make for $0.04").click();
     assert!(wait_for(&mut h, |_| !anchors(&p).is_empty()));
     h.run();
     assert_eq!(anchors(&p).len(), 1);
     // Done with, so it closes.
-    assert!(h.query_by_label("Get price").is_none());
+    assert!(h.query_by_label("Make…").is_none());
     // The anchor it made doesn't go along with the next one.
     h.get_by_label("Make image…").click();
     h.run();
     h.get_by_label("None: the image comes from the words alone.");
     h.get_by_label("Close").click();
     h.run();
-    assert!(h.query_by_label("Get price").is_none());
+    assert!(h.query_by_label("Make…").is_none());
     // Undone like an image added from a file.
     h.get_by_label("Undo").click();
     h.run();
@@ -785,6 +947,7 @@ fn a_shot_s_pictures_and_a_take() {
     p.add_anchor("jeep", &png).unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(
         vec![Description {
@@ -829,18 +992,16 @@ fn a_shot_s_pictures_and_a_take() {
     h.get_by_label("Make image…").click();
     h.run();
     // The panel pushes what follows down rather than lying over it.
-    assert!(
-        h.get_by_label("Shoot a take…").rect().top() > h.get_by_label("Get price").rect().bottom()
-    );
+    assert!(h.get_by_label("Shoot a take…").rect().top() > h.get_by_label("Make…").rect().bottom());
     let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
     prompt.focus();
     prompt.type_text("the café");
     h.run();
-    h.get_by_label("Get price").click();
+    h.get_by_label("Make…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Make it for $0.04")
+        .query_by_label("Make for $0.04")
         .is_some()));
-    h.get_by_label("Make it for $0.04").click();
+    h.get_by_label("Make for $0.04").click();
     assert!(wait_for(&mut h, |_| !p.shot(R).unwrap().images.is_empty()));
     h.run();
     let img = &p.shot(R).unwrap().images[0];
@@ -905,10 +1066,20 @@ fn a_shot_s_pictures_and_a_take() {
     let before = p.takes(R).unwrap().len();
     h.get_by_label("Shoot a take…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Shoot it for 0.40 USD")
+        .query_by_label("Shoot a take for 0.40 USD")
         .is_some()));
     assert_eq!(p.takes(R).unwrap().len(), before);
-    h.get_by_label("Shoot it for 0.40 USD").click();
+    // A price is for what was there when it was asked; an edit means asking again.
+    let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Prompt");
+    prompt.focus();
+    prompt.type_text(" slowly");
+    h.run();
+    assert!(h.query_by_label("Shoot a take for 0.40 USD").is_none());
+    h.get_by_label("Shoot a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Shoot a take for 0.40 USD")
+        .is_some()));
+    h.get_by_label("Shoot a take for 0.40 USD").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("01-010#3 done · 0.40 USD")
         .is_some()));
@@ -968,11 +1139,11 @@ fn a_shot_s_pictures_and_a_take() {
     fp.focus();
     fp.type_text("at the edge");
     h.run();
-    h.get_by_label("Get price").click();
+    h.get_by_label("Make…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Make it for $0.04")
+        .query_by_label("Make for $0.04")
         .is_some()));
-    h.get_by_label("Make it for $0.04").click();
+    h.get_by_label("Make for $0.04").click();
     assert!(wait_for(&mut h, |_| p.shot(R).unwrap().frame.is_some()));
     h.run();
     let frame = p.shot(R).unwrap().frame.unwrap();
@@ -992,7 +1163,10 @@ fn translate_only_when_it_helps() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     let home = tmp.path().join("home");
-    let mut app = App::new(p, home.clone()).with_viewer(None).silent();
+    let mut app = App::new(p, home.clone())
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
     let model = |id: &str, op| ModelInfo {
         id: id.into(),
         op,
@@ -1171,6 +1345,7 @@ fn edit_elements() {
     let bytes = std::fs::read(&anchor).unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let tts = |id: &str| ModelInfo {
         id: id.into(),
@@ -1402,6 +1577,7 @@ fn keeps_history_with_git() {
     let tmp = tempfile::tempdir().unwrap();
     let app = App::new(film(tmp.path()), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .with_git(Git::find().map(|g| g.with_identity("Test", "test@example.com")))
         .silent();
     let mut h = Harness::builder()
@@ -1679,6 +1855,7 @@ fn a_selected_take_s_last_frame() {
     }
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -1751,6 +1928,7 @@ fn a_continue_shot_keeps_its_start_until_told() {
     let third = p.take(R, "3").unwrap();
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -1821,6 +1999,7 @@ fn an_editor_s_sequence_on_the_cut_page() {
     let p = film(tmp.path());
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -1967,6 +2146,26 @@ fn editor_clip(id: &str, file: &Path, start: f64) -> ClipInfo {
 
 /// What the editor plugin reads: one project with "Main edit", these clips on V1.
 fn write_edits(p: &Project, clips: Vec<ClipInfo>, transitions: Vec<TransitionInfo>) {
+    write_edits_with(p, clips, transitions, vec![]);
+}
+
+/// The same, with these clips on A1.
+fn write_edits_with(
+    p: &Project,
+    clips: Vec<ClipInfo>,
+    transitions: Vec<TransitionInfo>,
+    sounds: Vec<ClipInfo>,
+) {
+    let audio = if sounds.is_empty() {
+        vec![]
+    } else {
+        vec![TrackInfo {
+            name: "1".into(),
+            enabled: true,
+            clips: sounds,
+            transitions: vec![],
+        }]
+    };
     let edits = vec![EditInfo {
         file: p.root.join("shared/edit.fcproj"),
         name: "Rain edit".into(),
@@ -1984,7 +2183,7 @@ fn write_edits(p: &Project, clips: Vec<ClipInfo>, transitions: Vec<TransitionInf
                 clips,
                 transitions,
             }],
-            audio: vec![],
+            audio,
         }],
     }];
     std::fs::create_dir_all(p.root.join("shared")).unwrap();
@@ -2006,8 +2205,20 @@ fn on_main_edit_with(
     p: &Project,
     take: &str,
 ) -> (Harness<'static, App>, impl Fn() -> Vec<EditParams>) {
+    on_main_edit_picking(tmp, p, take, vec![])
+}
+
+/// The same, with file dialogs answered by `picks`.
+fn on_main_edit_picking(
+    tmp: &Path,
+    p: &Project,
+    take: &str,
+    picks: Vec<PathBuf>,
+) -> (Harness<'static, App>, impl Fn() -> Vec<EditParams>) {
     let mut app = App::new(p.clone(), tmp.join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .picking(picks)
         .silent();
     let local = Description {
         name: "local".into(),
@@ -2022,7 +2233,41 @@ fn on_main_edit_with(
         editor: false,
         app: String::new(),
     };
-    app.set_plugins(vec![editor_plugin(), local], Some(Arc::new(TestHost)));
+    let fal = Description {
+        name: "fal".into(),
+        version: "0.1.0".into(),
+        protocol: 1,
+        env: vec![],
+        models: vec![ModelInfo {
+            id: "minimax/h3-max/reference-to-video".into(),
+            op: Op::VideoGenerate,
+            min_duration: Some(0.92),
+            max_duration: Some(15.0),
+            resolutions: vec!["480P".into(), "768P".into(), "1080P".into()],
+            start_frame: true,
+            end_frame: true,
+            ..ModelInfo::default()
+        }],
+        editor: false,
+        app: String::new(),
+    };
+    let sfx = Description {
+        name: "elevenlabs".into(),
+        version: "0.1.0".into(),
+        protocol: 1,
+        env: vec![],
+        models: vec![ModelInfo {
+            id: "eleven_text_to_sound_v2".into(),
+            op: Op::AudioSfx,
+            ..ModelInfo::default()
+        }],
+        editor: false,
+        app: String::new(),
+    };
+    app.set_plugins(
+        vec![editor_plugin(), local, fal, sfx],
+        Some(Arc::new(TestHost)),
+    );
     let mut h = Harness::builder()
         .with_max_steps(16)
         .with_size(egui::vec2(1000.0, 1200.0))
@@ -2056,6 +2301,8 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     let (video, third) = another_take(&p);
+    // A real one, so its length goes with it.
+    let real = real_video(&third);
     write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
     let (mut h, lines) = on_main_edit(tmp.path(), &p);
     // A clip with the editor's id is picked rather than opened.
@@ -2077,13 +2324,15 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
         ("7", "Main edit")
     );
     assert_eq!(ask.file, p.root.join("shared/edit.fcproj"));
-    assert_eq!(
-        ask.change,
-        Change::Replace {
-            file: third,
-            from: 0.25
-        }
-    );
+    let Change::Replace { file, from, length } = &ask.change else {
+        panic!("{:?}", ask.change)
+    };
+    assert_eq!((file, *from), (&third, 0.25));
+    // All of the 2 s take from 0.25 s in.
+    match length {
+        Some(l) => assert!(real && (l - 1.75).abs() < 0.05, "{l}"),
+        None => assert!(!real),
+    }
     let undo = "Undo swap 01-010#1 for 01-010#3";
     assert!(wait_for(&mut h, |h| h.query_by_label(undo).is_some()));
     // The timeline's panel grows a frame later to fit it.
@@ -2132,9 +2381,547 @@ fn dissolves_a_join_in_an_editor() {
         .query_by_label("Straight cut")
         .is_some()));
     h.get_by_label("Change dissolve");
+    // The tools wrap onto a second line, and the panel grows a frame later to fit them.
+    wait(&mut h, 0.1);
     h.get_by_label("Straight cut").click();
     assert!(wait_for(&mut h, |_| lines().len() == 2));
     assert_eq!(lines()[1].change, Change::Crossfade { frames: 0 });
+}
+
+/// Two seconds of test pattern at 24 fps, in place of a stand-in file.
+fn real_video(path: &Path) -> bool {
+    let ffmpeg = std::env::var("SHOTLINE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    Command::new(ffmpeg)
+        .args(["-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i"])
+        .arg("testsrc=size=160x90:rate=24:duration=2")
+        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-f", "mp4"])
+        .arg(path)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[test]
+fn puts_a_shot_added_later_into_the_editors_sequence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let r = p.add_shot("1", None, Shot::default()).unwrap();
+    let file = tmp.path().join("brought.mp4");
+    std::fs::write(&file, "mp4").unwrap();
+    let t = p.import_take(r, &file).unwrap();
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    let put = format!("Put {t} in");
+    assert!(wait_for(&mut h, |h| h.query_by_label(&put).is_some()));
+    h.get_by_label(&put).click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let made = p.job_dir(t.output().unwrap().id).join("take.mp4");
+    assert_eq!(lines()[0].clip, "7");
+    assert_eq!(
+        lines()[0].change,
+        Change::Insert {
+            file: std::path::absolute(&made).unwrap(),
+            after: true,
+            sound: true,
+        }
+    );
+    // Selected too, so the Shots page and the film's own cut agree.
+    assert_eq!(p.selected_take(r).unwrap().map(|x| x.id), Some(t.id));
+}
+
+#[test]
+fn a_take_used_on_the_shot_page_goes_in_the_editors_sequence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let r = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                title: "Paka stops".into(),
+                ..Shot::default()
+            },
+        )
+        .unwrap();
+    let file = tmp.path().join("brought.mp4");
+    std::fs::write(&file, "mp4").unwrap();
+    let t = p.import_take(r, &file).unwrap();
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    h.get_by_label("Shots").click();
+    h.run();
+    let open = |h: &mut Harness<App>, name: &str| {
+        h.get_by_label_contains(name).click();
+        h.run();
+        h.run();
+    };
+
+    // In place of the shot's clip, from the same point.
+    open(&mut h, "01-010  Paka walks in");
+    h.get_by_label("Use in the cut #3").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    assert_eq!(lines()[0].clip, "7");
+    assert_eq!(
+        lines()[0].change,
+        Change::Replace {
+            file: std::path::absolute(&third).unwrap(),
+            from: 0.25,
+            length: None,
+        }
+    );
+
+    // A shot the sequence hasn't got goes after the one before it.
+    open(&mut h, &format!("{r}  Paka stops"));
+    h.get_by_label(&format!("Use in the cut #{}", t.number))
+        .click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    let made = p.job_dir(t.output().unwrap().id).join("take.mp4");
+    assert_eq!(lines()[1].clip, "7");
+    assert_eq!(
+        lines()[1].change,
+        Change::Insert {
+            file: std::path::absolute(&made).unwrap(),
+            after: true,
+            sound: true,
+        }
+    );
+}
+
+#[test]
+fn lays_a_sound_over_a_take_in_the_editors_sequence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let door = tmp.path().join("Door.wav");
+    std::fs::write(&door, "wav").unwrap();
+    let (mut h, lines) = on_main_edit_picking(tmp.path(), &p, "01-010#1", vec![door]);
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds…").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds over 01-010#1");
+    // Nobody has a voice, so there's no one to say anything.
+    h.get_by_label_contains("Give one of the cast a voice");
+    h.get_by_label("From a file…").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let got = p.take_sounds(&first).unwrap();
+    assert_eq!(got.len(), 1);
+    let (sound, _, copied) = &got[0];
+    // From where the clip starts using the take.
+    assert_eq!(sound.at, 0.25);
+    assert_eq!(lines()[0].clip, "7");
+    assert_eq!(
+        lines()[0].change,
+        Change::Sound {
+            file: std::path::absolute(copied).unwrap(),
+            at: 0.25,
+        }
+    );
+
+    // Once the editor has it, taking it off lifts it out of the sequence too.
+    let mut laid = editor_clip("9", copied, 0.0);
+    laid.from = 0.0;
+    write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![laid]);
+    wait(&mut h, 0.3);
+    // A file brought in can't be made again.
+    assert!(h.query_by_label("Remake Door.wav").is_none());
+    h.get_by_label("Remove Door.wav").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    assert_eq!(
+        (lines()[1].clip.as_str(), &lines()[1].change),
+        ("9", &Change::Lift)
+    );
+    assert!(p.take_sounds(&first).unwrap().is_empty());
+}
+
+#[test]
+fn one_of_the_cast_says_something_over_a_take() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: None,
+            voice_id: Some("v1".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds…").click();
+    wait(&mut h, 0.1);
+    assert!(
+        h.get_by_label("Make the speech")
+            .accesskit_node()
+            .is_disabled()
+    );
+    h.get_by_label("What they say").focus();
+    h.get_by_label("What they say").type_text("Over here!");
+    h.run();
+    h.get_by_label("Make the speech").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make for 0.02 USD")
+        .is_some()));
+    h.get_by_label("Make for 0.02 USD").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let got = p.take_sounds(&first).unwrap();
+    assert_eq!(got.len(), 1);
+    let (sound, job, made) = &got[0];
+    assert_eq!(
+        (sound.at, job.prompt.as_deref()),
+        (0.25, Some("Over here!"))
+    );
+    assert_eq!(
+        lines()[0].change,
+        Change::Sound {
+            file: std::path::absolute(made).unwrap(),
+            at: 0.25,
+        }
+    );
+    h.get_by_label("Play @paka: Over here!");
+
+    // A sound effect, as long as the model makes it, once the editor has the speech.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make the sound effect")
+        .is_some_and(|b| b.accesskit_node().is_disabled())));
+    h.get_by_label("What it sounds like").focus();
+    h.get_by_label("What it sounds like")
+        .type_text("a door slams");
+    h.run();
+    assert!(wait_for(&mut h, |h| !h
+        .get_by_label("Make the sound effect")
+        .accesskit_node()
+        .is_disabled()));
+    h.get_by_label("Make the sound effect").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make for 0.01 USD")
+        .is_some()));
+    h.get_by_label("Make for 0.01 USD").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    let got = p.take_sounds(&first).unwrap();
+    assert_eq!(got.len(), 2);
+    let (_, job, made) = &got[1];
+    assert_eq!(job.op, Op::AudioSfx);
+    assert_eq!(
+        lines()[1].change,
+        Change::Sound {
+            file: std::path::absolute(made).unwrap(),
+            at: 0.25,
+        }
+    );
+    h.get_by_label("Play a door slams");
+    // Made again: priced straight away, then in the old one's place, there and in the editor.
+    let (_, old, said) = &got[0];
+    let mut laid = editor_clip("9", said, 0.0);
+    laid.from = 0.0;
+    write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![laid]);
+    wait(&mut h, 0.3);
+    h.get_by_label("Remake @paka: Over here!").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make for 0.02 USD")
+        .is_some()));
+    h.get_by_label_contains("in place of @paka: Over here!");
+    h.get_by_label("Make for 0.02 USD").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 4));
+    let got = p.take_sounds(&first).unwrap();
+    assert_eq!(got.len(), 2);
+    assert!(got.iter().all(|(_, j, _)| j.id != old.id));
+    let (sound, job, made) = got.iter().find(|(_, j, _)| j.who.is_some()).unwrap();
+    assert_eq!(
+        (sound.at, job.prompt.as_deref()),
+        (0.25, Some("Over here!"))
+    );
+    let changes: Vec<_> = lines()[2..]
+        .iter()
+        .map(|l| (l.clip.clone(), l.change.clone()))
+        .collect();
+    assert!(changes.contains(&(
+        "7".into(),
+        Change::Sound {
+            file: std::path::absolute(made).unwrap(),
+            at: 0.25,
+        }
+    )));
+    assert!(changes.contains(&("9".into(), Change::Lift)));
+
+    // An effect is asked for again with its model.
+    h.get_by_label("Remake a door slams").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make for 0.01 USD")
+        .is_some()));
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(h.query_by_label_contains("in place of").is_none());
+}
+
+#[test]
+fn a_bridge_in_the_cut_has_sounds_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    let id = p
+        .new_bridge(&shotline_core::Bridge {
+            sequence: "Main edit".into(),
+            length: 2.0,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut j = Job::new(Op::VideoGenerate, "fal", "fake/r2v");
+    j.bridge = Some(id);
+    let mut j = p.create_job(j).unwrap();
+    let made = p.job_dir(j.id).join("out.mp4");
+    std::fs::write(&made, "mp4").unwrap();
+    j.status = JobStatus::Done;
+    j.outputs = vec!["out.mp4".into()];
+    p.save_job(&j).unwrap();
+    let mut bridge = editor_clip("9", &made, 1.0);
+    bridge.from = 0.0;
+    write_edits(&p, vec![editor_clip("7", &video, 0.0), bridge], vec![]);
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: None,
+            voice_id: Some("v1".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    let door = tmp.path().join("Door.wav");
+    std::fs::write(&door, "wav").unwrap();
+    let (mut h, lines) = on_main_edit_picking(tmp.path(), &p, "01-010#1", vec![door]);
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::Button, "bridge #1")
+        .is_some()));
+    h.get_by_role_and_label(Role::Button, "bridge #1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds…").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds over bridge #1");
+    h.get_by_label("From a file…").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let over = shotline_core::Under::Bridge(id, j.id);
+    let got = p.sounds(over).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(p.bridge(id).unwrap().sounds.len(), 1);
+    assert_eq!(lines()[0].clip, "9");
+    assert_eq!(
+        lines()[0].change,
+        Change::Sound {
+            file: std::path::absolute(&got[0].2).unwrap(),
+            at: 0.0,
+        }
+    );
+
+    // Speech too, made without a shot.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make the speech")
+        .is_some()));
+    h.get_by_label("What they say").focus();
+    h.get_by_label("What they say").type_text("Over here!");
+    h.run();
+    h.get_by_label("Make the speech").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make for 0.02 USD")
+        .is_some()));
+    h.get_by_label("Make for 0.02 USD").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    let got = p.sounds(over).unwrap();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[1].1.shot, None);
+    assert_eq!(lines()[1].clip, "9");
+}
+
+#[test]
+fn bridges_a_join_in_an_editor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    if !real_video(&video) || !real_video(&third) {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    }
+    let clips = vec![editor_clip("7", &video, 0.0), editor_clip("8", &third, 1.0)];
+    write_edits(&p, clips, vec![]);
+    let (mut h, lines) = on_main_edit(tmp.path(), &p);
+    h.get_by_label("Join 01-010#1 to 01-010#3").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Bridge…").click();
+    // The frames either side of the join, taken from the clips' files.
+    assert!(wait_for(&mut h, |_| p
+        .bridges()
+        .unwrap()
+        .first()
+        .is_some_and(|(_, b)| !b.end.is_empty())));
+    let (id, b) = p.bridges().unwrap().remove(0);
+    assert_eq!(
+        (b.from.file.as_str(), b.to.file.as_str()),
+        (p.rel(&video).as_str(), p.rel(&third).as_str())
+    );
+    assert!(
+        (b.from.at - (1.25 - 0.5 / 24.0)).abs() < 1e-6,
+        "{}",
+        b.from.at
+    );
+    assert!((b.to.at - (0.25 + 0.5 / 24.0)).abs() < 1e-6, "{}", b.to.at);
+    assert!(p.root.join(&b.start).is_file() && p.root.join(&b.end).is_file());
+    assert_eq!(
+        (b.sequence.as_str(), b.plugin.as_str()),
+        ("Main edit", "fal")
+    );
+    assert_eq!((b.length, b.resolution.as_deref()), (2.0, Some("768P")));
+    h.get_by_label("Bridge 01-010#1 to 01-010#3");
+
+    h.get_by_label("Make a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take for 0.40 USD")
+        .is_some()));
+    h.get_by_label("Make a take for 0.40 USD").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Use in the cut #1")
+        .is_some()));
+    let (n, job) = p.bridge_takes(id).unwrap().remove(0);
+    assert_eq!(n, 1);
+    // Away from Go, whose tip would cover it.
+    h.get_by_label("Bridge 01-010#1 to 01-010#3").hover();
+    wait(&mut h, 0.1);
+    h.get_by_label("Use in the cut #1").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 1));
+    let made = p.bridge_video(&job).unwrap();
+    assert_eq!(lines()[0].clip, "8");
+    assert_eq!(
+        lines()[0].change,
+        Change::Insert {
+            file: std::path::absolute(&made).unwrap(),
+            after: false,
+            sound: false,
+        }
+    );
+    assert_eq!(p.bridge(id).unwrap().used, Some(job.id));
+
+    // Once the editor has it in, the window says so and the clip is named for it.
+    let mut bridge = editor_clip("9", &made, 1.0);
+    bridge.from = 0.0;
+    bridge.length = 2.0;
+    let mut after = editor_clip("8", &third, 3.0);
+    after.from = 0.25;
+    write_edits(
+        &p,
+        vec![editor_clip("7", &video, 0.0), bridge, after],
+        vec![],
+    );
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("in the cut")
+        .is_some()));
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
+    assert!(h.query_by_label("Bridge 01-010#1 to 01-010#3").is_none());
+    assert!(p.bridge(id).is_ok(), "a bridge with takes stays");
+    h.get_by_role_and_label(Role::Button, "bridge #1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Bridge…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("in the cut")
+        .is_some()));
+    assert!(h.get_by_label("Remove #1").accesskit_node().is_disabled());
+
+    // Its picture opens it in a popup of its own; Esc closes just that.
+    h.get_by_label("bridge #1 poster").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Save frame")
+        .is_some()));
+    h.key_press(egui::Key::Escape);
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Save frame")
+        .is_none()));
+    h.get_by_label("Bridge 01-010#1 to 01-010#3");
+
+    // A second take, not used, comes off the list.
+    h.get_by_label("Make a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take for 0.40 USD")
+        .is_some()));
+    h.get_by_label("Make a take for 0.40 USD").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Remove #2")
+        .is_some()));
+    h.get_by_label("Bridge 01-010#1 to 01-010#3").hover();
+    wait(&mut h, 0.1);
+    // The list scrolls, and the second one is below where it shows.
+    h.get_by_label("Remove #2").scroll_to_me();
+    wait(&mut h, 0.1);
+    h.get_by_label("Remove #2").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Remove #2")
+        .is_none()));
+    assert_eq!(p.bridge_takes(id).unwrap().len(), 1);
+    assert_eq!(p.bridge(id).unwrap().used, Some(job.id));
+
+    // Another take of the shot after it goes in: still the same join, with new frames to take.
+    let other = p.take(R, "1").unwrap();
+    let other = p.job_dir(other.output().unwrap().id).join("out.mp4");
+    assert!(real_video(&other));
+    let mut bridge = editor_clip("9", &made, 1.0);
+    bridge.from = 0.0;
+    bridge.length = 2.0;
+    let mut after = editor_clip("10", &other, 3.0);
+    after.from = 0.25;
+    write_edits(
+        &p,
+        vec![editor_clip("7", &video, 0.0), bridge, after],
+        vec![],
+    );
+    let changed = "The cut changed here since these frames were taken.";
+    assert!(wait_for(&mut h, |h| h.query_by_label(changed).is_some()));
+    h.get_by_label("in the cut");
+    h.get_by_label_contains("Bridge 01-010#1 to ").hover();
+    wait(&mut h, 0.1);
+    h.get_by_label("Use the new frames").click();
+    assert!(wait_for(&mut h, |_| p.bridge(id).unwrap().to.file == p.rel(&other)));
+}
+
+#[test]
+fn a_bridge_without_takes_goes_when_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    if !real_video(&video) || !real_video(&third) {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    }
+    write_edits(
+        &p,
+        vec![editor_clip("7", &video, 0.0), editor_clip("8", &third, 1.0)],
+        vec![],
+    );
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    h.get_by_label("Join 01-010#1 to 01-010#3").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Bridge…").click();
+    // Free once the frames either side of the join are taken.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take…")
+        .is_some_and(|b| !b.accesskit_node().is_disabled())));
+    h.get_by_label("Make a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take for 0.40 USD")
+        .is_some()));
+    assert_eq!(p.bridges().unwrap().len(), 1);
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
+    assert!(p.bridges().unwrap().is_empty());
+    assert!(!p.root.join("bridges").read_dir().unwrap().any(|_| true));
 }
 
 #[test]
@@ -2178,7 +2965,54 @@ fn renders_an_editor_sequence() {
 }
 
 #[test]
-fn the_editor_renders_the_preview_once_it_stays_the_same() {
+fn pinches_and_scrolls_the_timeline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (one, two) = another_take(&p);
+    write_edits(
+        &p,
+        vec![editor_clip("7", &one, 0.0), editor_clip("8", &two, 7.0)],
+        vec![],
+    );
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    let shown =
+        |h: &Harness<App>, take: &str| h.query_by_role_and_label(Role::Button, take).is_some();
+    assert!(
+        shown(&h, "01-010#1") && shown(&h, "01-010#3"),
+        "the whole of it"
+    );
+    assert!(h.query_by_label("Scroll the timeline").is_none());
+
+    // Pinched in on the first clip, the last is out of sight, with a bar to get to it.
+    let first = h
+        .get_by_role_and_label(Role::Button, "01-010#1")
+        .rect()
+        .center();
+    h.hover_at(first);
+    h.run_ok();
+    h.event(egui::Event::Zoom(6.0));
+    wait(&mut h, 0.1);
+    assert!(shown(&h, "01-010#1") && !shown(&h, "01-010#3"));
+    let bar = h.get_by_label("Scroll the timeline").rect();
+    let end = egui::pos2(bar.right() - 2.0, bar.center().y);
+    h.hover_at(end);
+    h.drag_at(end);
+    h.step();
+    h.drop_at(end);
+    wait(&mut h, 0.1);
+    assert!(!shown(&h, "01-010#1") && shown(&h, "01-010#3"));
+
+    // Pinched all the way out, it's whole again.
+    h.hover_at(first);
+    h.run_ok();
+    h.event(egui::Event::Zoom(0.01));
+    wait(&mut h, 0.1);
+    assert!(shown(&h, "01-010#1") && shown(&h, "01-010#3"));
+    assert!(h.query_by_label("Scroll the timeline").is_none());
+}
+
+#[test]
+fn the_editor_renders_the_preview_when_asked() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     let (video, _) = another_take(&p);
@@ -2191,13 +3025,85 @@ fn the_editor_renders_the_preview_once_it_stays_the_same() {
             .flatten()
             .any(|e| e.file_name().to_string_lossy().ends_with("-full.mp4"))
     };
-    wait(&mut h, 2.0);
-    assert!(!full(), "not straight away");
-    wait(&mut h, 3.0);
+    wait(&mut h, 0.3);
+    h.get_by_label_contains("Preview not updated");
+    assert!(!full(), "not by itself");
+    h.get_by_label("Update preview").click();
     assert!(wait_for(&mut h, |_| full()));
     assert!(wait_for(&mut h, |h| h
         .query_by_label_contains("Preview rendered by")
         .is_some()));
+    assert!(h.query_by_label("Update preview").is_none());
+}
+
+#[test]
+fn a_picked_sound_clip_has_its_tools_above() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    let door = tmp.path().join("Door.wav");
+    std::fs::write(&door, "wav").unwrap();
+    p.add_sound((&first).into(), &door, 0.5).unwrap();
+    let (_, _, laid) = p.take_sounds(&first).unwrap().remove(0);
+    let mut own = editor_clip("8", &video, 0.0);
+    own.name = "own".into();
+    let mut door_clip = editor_clip("9", &laid, 0.0);
+    door_clip.from = 0.0;
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![own]);
+    wait(&mut h, 0.3);
+
+    // The take's own sound: picked, with its tools above, not its shot.
+    let clips = h
+        .get_all_by_role_and_label(Role::Button, "01-010#1")
+        .count();
+    assert_eq!(clips, 2, "the picture and its sound");
+    h.get_all_by_role_and_label(Role::Button, "01-010#1")
+        .last()
+        .unwrap()
+        .click();
+    wait(&mut h, 0.1);
+    h.get_by_label("01-010#1's own sound");
+    h.get_by_label("Open the shot");
+    assert!(
+        h.query_by_label("Swap take").is_none(),
+        "not the picture's tools"
+    );
+    h.get_by_label("Sounds (1)…").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds over 01-010#1");
+    h.get_by_label("Door.wav");
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
+
+    // A sound laid over it says what it is and what it's over.
+    door_clip.name = "Door.wav".into();
+    write_edits_with(
+        &p,
+        vec![editor_clip("7", &video, 0.0)],
+        vec![],
+        vec![door_clip],
+    );
+    wait(&mut h, 0.3);
+    h.get_by_role_and_label(Role::Button, "Door.wav").click();
+    wait(&mut h, 0.1);
+    assert_eq!(
+        h.get_all_by_label("Door.wav").count(),
+        2,
+        "the clip and its name above"
+    );
+    h.get_by_label("over 01-010#1");
+    h.get_by_label("Sounds over 01-010#1…").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds over 01-010#1");
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
+    // Clicked again, it's let go.
+    h.get_by_role_and_label(Role::Button, "Door.wav").click();
+    wait(&mut h, 0.1);
+    assert!(h.query_by_label("over 01-010#1").is_none());
 }
 
 #[test]
@@ -2222,9 +3128,11 @@ fn processes_the_used_part_of_a_clip() {
     wait(&mut h, 0.1);
     h.get_by_label("video.interpolate · local ffmpeg/minterpolate")
         .click();
-    assert!(wait_for(&mut h, |h| h.query_by_label("Go").is_some()));
-    h.get_by_label_contains("ffmpeg/minterpolate on 01-010#1 · 0.00 USD");
-    h.get_by_label("Go").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Run for 0.00 USD")
+        .is_some()));
+    h.get_by_label_contains("ffmpeg/minterpolate on 01-010#1");
+    h.get_by_label("Run for 0.00 USD").click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let ran: Request =
         serde_json::from_str(&std::fs::read_to_string(p.root.join("ran-local.json")).unwrap())
@@ -2241,7 +3149,8 @@ fn processes_the_used_part_of_a_clip() {
         lines()[0].change,
         Change::Replace {
             file: part.with_extension("done.mp4"),
-            from: 0.25
+            from: 0.25,
+            length: None,
         }
     );
     assert!(wait_for(&mut h, |h| h
@@ -2317,6 +3226,7 @@ fn shows_the_editor_cut_shotline_made_first() {
     write();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -2333,7 +3243,7 @@ fn shows_the_editor_cut_shotline_made_first() {
     h.run();
     h.get_by_label("shared/other.fcproj");
     write();
-    wait(&mut h, 1.5);
+    wait(&mut h, 0.3);
     h.get_by_label("shared/other.fcproj");
 }
 
@@ -2348,6 +3258,7 @@ fn shows_an_editor_warning_whole() {
     std::fs::write(p.root.join("editor-warnings.txt"), says).unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -2357,6 +3268,37 @@ fn shows_an_editor_warning_whole() {
     h.run();
     h.get_by_label("Cut").click();
     assert!(wait_for(&mut h, |h| h.query_by_label(says).is_some()));
+    assert!(h.query_by_label("Update filmcraft-cli to 0.18.0").is_none());
+}
+
+#[test]
+fn updates_filmcraft_cli_from_its_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let says = "filmcraft: filmcraft-cli 0.17.2 doesn't match FilmCraft 0.18.0";
+    std::fs::write(p.root.join("editor-warnings.txt"), says).unwrap();
+    std::fs::write(
+        p.root.join("editor-fix.txt"),
+        "Update filmcraft-cli to 0.18.0",
+    )
+    .unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label(says).is_some()));
+    h.get_by_label("Update filmcraft-cli to 0.18.0").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("filmcraft-cli is now 0.18.0")
+        .is_some()));
+    assert!(wait_for(&mut h, |h| h.query_by_label(says).is_none()));
 }
 
 #[test]
@@ -2371,6 +3313,7 @@ fn starts_an_editor_project_from_the_cut() {
     p.select_take(R, "1").unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -2489,6 +3432,7 @@ fn plays_compares_and_plays_the_cut() {
 
     let app = App::new(p, tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     // Tall enough that the takes stay in view under the player.
     let mut h = Harness::builder()
@@ -2683,7 +3627,10 @@ fn release_what_a_dead_job_held() {
     };
     books.reserve(jiff::Timestamp::now(), &ctx, &quote).unwrap();
 
-    let app = App::new(p.clone(), home).with_viewer(None).silent();
+    let app = App::new(p.clone(), home)
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
         .with_size(egui::vec2(1000.0, 1800.0))
@@ -2758,7 +3705,10 @@ fn warn_about_stuck_jobs_on_open() {
     }
 
     let open = || {
-        let app = App::new(p.clone(), home.clone()).with_viewer(None).silent();
+        let app = App::new(p.clone(), home.clone())
+            .with_viewer(None)
+            .checking_edits_every(EDITS_EVERY)
+            .silent();
         let mut h = Harness::builder()
             .with_max_steps(16)
             .with_size(egui::vec2(1400.0, 1800.0))
@@ -2792,6 +3742,7 @@ fn set_the_format_on_the_story_tab() {
     p.select_take("01-010".parse().unwrap(), "1").unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(
         vec![Description {
@@ -2873,6 +3824,7 @@ fn a_shot_on_another_model() {
     let p = film(tmp.path());
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let video = |id: &str, res: &[&str]| ModelInfo {
         id: id.into(),
@@ -2960,6 +3912,7 @@ fn details_of_a_made_picture() {
 
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -3003,6 +3956,7 @@ fn opens_where_it_was_left() {
     let home = tmp.path().join("home");
     let app = App::new(p.clone(), home.clone())
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent()
         .remember_place();
     let mut h = Harness::builder()
@@ -3045,6 +3999,7 @@ fn a_take_in_its_popup() {
 
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -3070,9 +4025,59 @@ fn a_take_in_its_popup() {
 }
 
 #[test]
+fn the_take_in_the_cut_opens_in_its_popup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut j = Job::new(Op::VideoGenerate, "fake", "fake/video");
+    j.shot = Some(R);
+    j.take = Some(p.new_take_id());
+    let mut j = p.create_job(j).unwrap();
+    if clip(&p.job_dir(j.id).join("out.mp4")).is_none() {
+        return;
+    }
+    j.status = JobStatus::Done;
+    j.outputs = vec!["out.mp4".into()];
+    p.save_job(&j).unwrap();
+    p.select_take(R, "3").unwrap();
+
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size([1000.0, 1800.0])
+        .allow_missing_glyphs()
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.step();
+    h.get_by_label_contains("01-010").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label("01-010#3").is_some()));
+    assert!(h.query_by_label("Compare with").is_none());
+    h.get_by_label("01-010#3").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Compare with")
+        .is_some()));
+    // The page's own player has one too once its frame is in, so there can be two.
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("Save frame")
+        .next()
+        .is_some()));
+}
+
+#[test]
 fn remake_replaces_a_line_s_recording() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: None,
+            voice_id: Some("v1".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
     p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
     let mut s = p.shot(R).unwrap();
     s.recipe = Some("spoken".into());
@@ -3082,6 +4087,7 @@ fn remake_replaces_a_line_s_recording() {
 
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -3110,9 +4116,9 @@ fn remake_replaces_a_line_s_recording() {
     h.run();
     h.get_by_label("Record…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Record it for 0.02 USD")
+        .query_by_label("Record for 0.02 USD")
         .is_some()));
-    h.get_by_label("Record it for 0.02 USD").click();
+    h.get_by_label("Record for 0.02 USD").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::ComboBox, "Line 1")
         .is_some()));
@@ -3127,6 +4133,16 @@ fn remake_replaces_a_line_s_recording() {
 fn a_line_recorded_and_picked() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: None,
+            voice_id: Some("v1".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
     p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
     let mut s = p.shot(R).unwrap();
     s.recipe = Some("spoken".into());
@@ -3156,6 +4172,7 @@ fn a_line_recorded_and_picked() {
 
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -3167,9 +4184,9 @@ fn a_line_recorded_and_picked() {
     h.run();
     h.get_by_label("Record…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Record it for 0.02 USD")
+        .query_by_label("Record for 0.02 USD")
         .is_some()));
-    h.get_by_label("Record it for 0.02 USD").click();
+    h.get_by_label("Record for 0.02 USD").click();
     // Recorded, the words give way to the dropdown, on what was just made.
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::ComboBox, "Line 1")
@@ -3264,6 +4281,7 @@ fn lines_dragged_into_order() {
     p.save_shot(R, &s).unwrap();
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -3521,6 +4539,7 @@ fn a_take_from_pieces() {
 
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -3778,6 +4797,7 @@ fn no_more_lines_than_the_video_model_takes() {
     let show = |mix: bool| {
         let mut app = App::new(p.clone(), tmp.path().join("home"))
             .with_viewer(None)
+            .checking_edits_every(EDITS_EVERY)
             .silent();
         app.set_plugins(vec![video(mix)], None);
         let mut h = Harness::builder()
@@ -3830,6 +4850,7 @@ fn a_recorded_line_has_a_player_under_it() {
     }
     let app = App::new(p, tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -3949,6 +4970,7 @@ fn plays_an_editor_sequence() {
     .unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -3983,4 +5005,105 @@ fn plays_an_editor_sequence() {
             .count(),
         1
     );
+}
+
+#[test]
+fn a_frame_opened_from_the_bridge_shows_above_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    if !real_video(&video) || !real_video(&third) {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    }
+    write_edits(
+        &p,
+        vec![editor_clip("7", &video, 0.0), editor_clip("8", &third, 1.0)],
+        vec![],
+    );
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    h.get_by_label("Join 01-010#1 to 01-010#3").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Bridge…").click();
+    assert!(wait_for(&mut h, |_| p
+        .bridges()
+        .unwrap()
+        .first()
+        .is_some_and(|(_, b)| !b.end.is_empty())));
+    let end = p.bridges().unwrap()[0].1.end.clone();
+    let big = format!("{end} big");
+    // Twice, with a click on the bridge's own window in between, which raises it.
+    for _ in 0..2 {
+        assert!(wait_for(&mut h, |h| h
+            .query_by_role_and_label(Role::Image, "first frame after")
+            .is_some()));
+        h.get_by_role_and_label(Role::Image, "first frame after")
+            .click();
+        assert!(wait_for(&mut h, |h| h.query_by_label(&big).is_some()));
+        wait(&mut h, 0.2);
+        // Clicking the picture closes it, which it only can when it's on top.
+        h.get_by_label(&big).click();
+        assert!(wait_for(&mut h, |h| h.query_by_label(&big).is_none()));
+        h.get_by_label("Bridge 01-010#1 to 01-010#3").click();
+        wait(&mut h, 0.1);
+    }
+}
+
+#[test]
+fn the_bridges_takes_get_the_room_the_window_has() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    if !real_video(&video) || !real_video(&third) {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    }
+    write_edits(
+        &p,
+        vec![editor_clip("7", &video, 0.0), editor_clip("8", &third, 1.0)],
+        vec![],
+    );
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    h.get_by_label("Join 01-010#1 to 01-010#3").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Bridge…").click();
+    assert!(wait_for(&mut h, |_| p
+        .bridges()
+        .unwrap()
+        .first()
+        .is_some_and(|(_, b)| !b.end.is_empty())));
+    let id = p.bridges().unwrap()[0].0;
+    for _ in 0..6 {
+        let mut j = Job::new(
+            Op::VideoGenerate,
+            "fal",
+            "minimax/h3-max/reference-to-video",
+        );
+        j.bridge = Some(id);
+        let mut j = p.create_job(j).unwrap();
+        std::fs::copy(&video, p.job_dir(j.id).join("out.mp4")).unwrap();
+        j.outputs = vec!["out.mp4".into()];
+        j.status = JobStatus::Done;
+        p.save_job(&j).unwrap();
+    }
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
+    // The join stays picked.
+    h.get_by_label("Bridge…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Remove #6")
+        .is_some()));
+    wait(&mut h, 0.2);
+    // All six show without scrolling: each one's button is on the window, not under its edge.
+    for n in 1..=6 {
+        let at = h.get_by_label(&format!("Remove #{n}")).rect().center();
+        assert_eq!(
+            h.ctx.layer_id_at(at).map(|l| l.id),
+            Some(egui::Id::unique("bridge")),
+            "#{n} at {at:?}"
+        );
+    }
+    // And the window still fits: its title is on screen.
+    let top = h.get_by_label("Bridge 01-010#1 to 01-010#3").rect();
+    assert!(top.top() >= 0.0, "{top:?}");
 }

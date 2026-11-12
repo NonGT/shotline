@@ -130,6 +130,9 @@ pub struct ModelInfo {
     pub start_frame: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub start_frame_with_refs: bool,
+    /// Takes a frame to end on too, so it can make a clip between two others.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub end_frame: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub audio_input: bool,
     /// Audio only goes along with at least one reference image.
@@ -409,6 +412,34 @@ pub struct Sequences {
     /// Something to fix on the editor's side, shown on the Cut page.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// What the plugin can put right itself, through `fix`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<FixInfo>,
+}
+
+/// A fix for one of the `warnings`, offered as a button next to it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct FixInfo {
+    /// Which warning, by its place in the list.
+    pub warning: usize,
+    /// Handed back in `fix`.
+    pub id: String,
+    /// The button's words, e.g. "Update filmcraft-cli to 0.19.0".
+    pub label: String,
+}
+
+/// Params of `fix`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct FixParams {
+    pub film: PathBuf,
+    pub id: String,
+}
+
+/// What `fix` did, said in a line.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Fixed {
+    #[serde(default)]
+    pub said: String,
 }
 
 /// One editor project, or why it couldn't be read.
@@ -517,8 +548,28 @@ pub struct EditParams {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Change {
     /// Puts `file` over the clip, from `from` seconds into it, at the same place and length.
-    /// The clip's sound stays when the file has none.
-    Replace { file: PathBuf, from: f64 },
+    /// The clip's sound stays when the file has none. With `length`, that much of the file
+    /// instead, moving what follows by the difference.
+    Replace {
+        file: PathBuf,
+        from: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<f64>,
+    },
+    /// Puts all of `file` in just before the clip, or just after it, moving what follows on
+    /// every track later by its length. Its picture only, unless `sound`.
+    Insert {
+        file: PathBuf,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        after: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sound: bool,
+    },
+    /// Lays all of `file` on an audio track with room for it, starting `at` seconds into the
+    /// clip's own file. Nothing moves.
+    Sound { file: PathBuf, at: f64 },
+    /// Takes the clip out, on a video or an audio track, and leaves its place empty.
+    Lift,
     /// The clip's input LUT, a `.cube` file; none takes it off.
     Lut {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -544,6 +595,9 @@ pub struct ExportParams {
     /// Render the project as saved, leaving an open editor alone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub saved: bool,
+    /// A fraction of the sequence's frame size, for a quicker render; full size without.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
 }
 
 /// What `export` made.

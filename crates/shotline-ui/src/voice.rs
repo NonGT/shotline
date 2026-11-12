@@ -14,9 +14,9 @@ use shotline_media::play::PcmPipe;
 
 use crate::edit::{Action, LineForm};
 use crate::player::{hush, listen};
+use crate::price::{Pressed, Price, PriceRow};
 use crate::{
-    App, heading, hint, icon_button, pause_icon, play_icon, remove_button, short, spend, stop_icon,
-    theme,
+    App, heading, hint, icon_button, pause_icon, play_icon, remove_button, short, stop_icon, theme,
 };
 
 #[derive(Clone, Default)]
@@ -233,10 +233,8 @@ impl App {
             let Say::Done(r, i, out) = s.clone() else {
                 return;
             };
-            *s = match &out {
-                Ok(_) => Say::Idle,
-                Err(e) => Say::Failed(r, i, e.clone()),
-            };
+            // A failed recording says why in the status bar; Failed is for its price.
+            *s = Say::Idle;
             (r, i, out)
         };
         self.reload();
@@ -353,7 +351,7 @@ impl App {
     }
 
     /// True while `what` is playing.
-    fn hearing(&mut self, ctx: &egui::Context, what: &str) -> bool {
+    pub(crate) fn hearing(&mut self, ctx: &egui::Context, what: &str) -> bool {
         if self
             .hearing
             .as_ref()
@@ -499,22 +497,11 @@ impl App {
                     {
                         ui.horizontal(|ui| {
                             ui.add_space(12.0 + ui.spacing().item_spacing.x);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("Cancel").clicked() {
-                                        *self.say.lock().unwrap() = Say::Idle;
-                                    }
-                                    let wide = egui::Button::new(format!("Record it for {cost}"))
-                                        .min_size(egui::vec2(ui.available_width(), 0.0));
-                                    if spend(ui, wide)
-                                        .on_hover_text("spends this and writes it to the ledger")
-                                        .clicked()
-                                    {
-                                        self.ask(ui.ctx(), r, i, Some(cost.clone()));
-                                    }
-                                },
-                            );
+                            match PriceRow::new("Record").show(ui, Price::Priced(cost)) {
+                                Some(Pressed::Go) => self.ask(ui.ctx(), r, i, Some(cost.clone())),
+                                Some(Pressed::Cancel) => *self.say.lock().unwrap() = Say::Idle,
+                                _ => {}
+                            }
                         });
                     }
                 });
@@ -678,11 +665,11 @@ impl App {
     /// How long a recording is; None if ffprobe can't tell.
     fn length(&mut self, path: &Path) -> Option<f64> {
         if let Some(l) = self.lengths.get(path) {
-            return Some(*l);
+            return *l;
         }
-        let l = self.ff.as_ref()?.audio_duration(path).ok()?;
+        let l = self.ff.as_ref()?.audio_duration(path).ok();
         self.lengths.insert(path.to_path_buf(), l);
-        Some(l)
+        l
     }
 
     /// Where each line starts in the shot, as far as it's known: its own start, else after the
@@ -877,7 +864,7 @@ impl App {
                         .then_some(false);
                 }
                 let has = !self.form.lines[i].text.trim().is_empty();
-                self.record_button(ui, r, i, has);
+                self.record_button(ui, r, i, (&who, has));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.form.lines[i].text)
                         .hint_text(RichText::new("What they say").color(theme::DUST))
@@ -938,6 +925,20 @@ impl App {
                     self.ask(ui.ctx(), r, s.lines.len(), None);
                     return;
                 }
+                if ui
+                    .add_enabled(has, egui::Button::new("From a file…"))
+                    .on_hover_text("a recording made somewhere else, of these words")
+                    .on_disabled_hover_text("type what they say first")
+                    .clicked()
+                    && let Some(file) = rfd::FileDialog::new()
+                        // What the video models take as a voice.
+                        .add_filter("Audio", &["wav", "mp3", "m4a"])
+                        .pick_file()
+                {
+                    self.flush();
+                    self.apply(vec![Action::ImportLine(r, self.form.new.clone(), file)]);
+                    return;
+                }
                 let text = ui
                     .add(
                         egui::TextEdit::singleline(&mut self.form.new.text)
@@ -953,41 +954,54 @@ impl App {
         open
     }
 
-    /// Record… and what follows it, right to left: the price, the spend button, the wait.
-    fn record_button(&mut self, ui: &mut egui::Ui, r: ShotRef, i: usize, has_words: bool) {
+    /// Record…, then the wait. Its price goes on a row of its own under the line.
+    fn record_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        r: ShotRef,
+        i: usize,
+        (who, has_words): (&str, bool),
+    ) {
         let say = self.say.lock().unwrap().clone();
         let mine = say.line() == Some((r, i));
-        match &say {
-            Say::Pricing(..) if mine => {
-                ui.weak("asking the price…");
-                ui.spinner();
+        let shown = match &say {
+            Say::Priced(..) if mine => return,
+            Say::Pricing(..) if mine => Price::Asking,
+            Say::Recording(..) if mine => Price::Working("recording…"),
+            Say::Failed(.., e) if mine => Price::Failed(e),
+            _ => Price::Idle,
+        };
+        let plugin = self.voice_plugin(who);
+        // One line at a time, so a price waiting on another line isn't lost.
+        let blocked = if let Err(why) = &plugin {
+            Some(why.clone())
+        } else if !has_words {
+            Some("type what they say first".to_string())
+        } else if let Some((sr, si)) = say.line().filter(|_| {
+            !mine && matches!(say, Say::Pricing(..) | Say::Priced(..) | Say::Recording(..))
+        }) {
+            Some(if sr == r {
+                format!("line {} is waiting; record or cancel it first", si + 1)
+            } else {
+                format!("a line of {sr} is waiting; record or cancel it first")
+            })
+        } else {
+            None
+        };
+        let keys = plugin.as_ref().ok().and_then(|p| self.needs_keys(p));
+        match PriceRow::new("Record")
+            .keys(keys)
+            .blocked(blocked)
+            .show(ui, shown)
+        {
+            Some(Pressed::Keys) => self.wants_keys = plugin.ok(),
+            Some(Pressed::Ask) => {
+                // What's typed is saved first, so that's what gets recorded.
+                self.flush();
+                self.ask(ui.ctx(), r, i, None);
             }
-            Say::Recording(..) if mine => {
-                ui.weak("recording…");
-                ui.spinner();
-            }
-            _ => {
-                if ui
-                    .add_enabled(has_words && !say.busy(), egui::Button::new("Record…"))
-                    .on_hover_text("hear it before a take; asking the price is free")
-                    .on_disabled_hover_text(if has_words {
-                        "still recording another line"
-                    } else {
-                        "type what they say first"
-                    })
-                    .clicked()
-                {
-                    // What's typed is saved first, so that's what gets recorded.
-                    self.flush();
-                    self.ask(ui.ctx(), r, i, None);
-                }
-                if let Say::Failed(.., e) = &say
-                    && mine
-                {
-                    ui.label(RichText::new(short(e, 40)).color(theme::FLAG))
-                        .on_hover_text(e);
-                }
-            }
+            Some(Pressed::Cancel) => *self.say.lock().unwrap() = Say::Idle,
+            _ => {}
         }
     }
 

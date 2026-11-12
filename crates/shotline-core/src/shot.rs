@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use ulid::Ulid;
 
 use crate::error::invalid;
 use crate::protocol::Op;
-use crate::{Error, Job, JobStatus, Project, Result, fsx, handle, slug};
+use crate::{Error, Job, JobStatus, Project, Result, Take, fsx, handle, slug};
 
 const STEP: u32 = 10;
 
@@ -100,6 +101,48 @@ pub struct Shot {
     /// The prompt put into English, sent instead while the prompt is still what it was made from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub english: Option<Translated>,
+    /// Sounds laid over its takes in the cut.
+    #[serde(default, rename = "sound", skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<TakeSound>,
+}
+
+/// A sound over one take in the cut, like an effect or a voice off. The model never hears it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TakeSound {
+    pub take: String,
+    /// The job that holds the file.
+    pub job: String,
+    /// Seconds into the take where it starts.
+    #[serde(default)]
+    pub at: f64,
+}
+
+/// What a sound is laid over: a shot's take, or a bridge's (its job id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Under {
+    Take(ShotRef, Ulid),
+    Bridge(Ulid, Ulid),
+}
+
+impl Under {
+    pub fn shot(&self) -> Option<ShotRef> {
+        match self {
+            Under::Take(r, _) => Some(*r),
+            Under::Bridge(..) => None,
+        }
+    }
+
+    pub fn take(&self) -> Ulid {
+        match self {
+            Under::Take(_, t) | Under::Bridge(_, t) => *t,
+        }
+    }
+}
+
+impl From<&Take> for Under {
+    fn from(t: &Take) -> Self {
+        Under::Take(t.shot, t.id)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -566,6 +609,136 @@ impl Project {
         }
         out.sort_by_key(|j| (j.shot != first || first.is_none(), j.shot, j.id));
         Ok(out)
+    }
+
+    /// A recording made somewhere else of @`who` saying `text` in shot `r`, kept like one made
+    /// here.
+    pub fn import_recording(&self, r: ShotRef, who: &str, text: &str, file: &Path) -> Result<Job> {
+        self.shot(r)?;
+        if text.trim().is_empty() {
+            return invalid("type what they say first");
+        }
+        if !file.is_file() {
+            return invalid(format!("{} isn't a file", file.display()));
+        }
+        let ext = file
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| "wav".into());
+        let mut job = Job::new(Op::AudioTts, "shotline", "import");
+        job.brief = file.file_name().map(|n| n.to_string_lossy().to_string());
+        job.shot = Some(r);
+        job.who = Some(who.trim_start_matches('@').to_string());
+        job.prompt = Some(text.to_string());
+        let mut job = self.create_job(job)?;
+        let name = format!("out.{ext}");
+        fsx::copy(file, &self.job_dir(job.id).join(&name))?;
+        job.outputs = vec![name];
+        job.status = JobStatus::Done;
+        self.save_job(&job)?;
+        Ok(job)
+    }
+
+    /// Copies `file` into the film as a sound over `u`, starting `at` seconds into it.
+    pub fn add_sound(&self, u: Under, file: &Path, at: f64) -> Result<Job> {
+        if !file.is_file() {
+            return invalid(format!("{} isn't a file", file.display()));
+        }
+        if at < 0.0 {
+            return invalid("a sound can't start before its take");
+        }
+        self.sound_list(u)?;
+        let ext = file
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| "wav".into());
+        let mut job = Job::new(Op::AudioSfx, "shotline", "import");
+        job.brief = file.file_name().map(|n| n.to_string_lossy().to_string());
+        job.shot = u.shot();
+        let mut job = self.create_job(job)?;
+        let name = format!("out.{ext}");
+        fsx::copy(file, &self.job_dir(job.id).join(&name))?;
+        job.outputs = vec![name];
+        job.status = JobStatus::Done;
+        self.save_job(&job)?;
+        self.add_sound_job(u, &job.id.to_string(), at)
+    }
+
+    /// A finished sound job, like a recording, over `u` from `at` seconds into it.
+    pub fn add_sound_job(&self, u: Under, job: &str, at: f64) -> Result<Job> {
+        if at < 0.0 {
+            return invalid("a sound can't start before its take");
+        }
+        let j = self.job(job)?;
+        if j.status != JobStatus::Done || j.outputs.is_empty() {
+            return invalid(format!("job {job} has no sound to lay over a take"));
+        }
+        let mut list = self.sound_list(u)?;
+        list.push(TakeSound {
+            take: u.take().to_string(),
+            job: j.id.to_string(),
+            at,
+        });
+        self.save_sound_list(u, list)?;
+        Ok(j)
+    }
+
+    /// The sounds over `u` whose files are still there, with them.
+    pub fn sounds(&self, u: Under) -> Result<Vec<(TakeSound, Job, PathBuf)>> {
+        let id = u.take().to_string();
+        let mut out = vec![];
+        for s in self.sound_list(u)?.into_iter().filter(|s| s.take == id) {
+            let Ok(j) = self.job(&s.job) else { continue };
+            let Some(f) = j.outputs.first().map(|f| self.job_dir(j.id).join(f)) else {
+                continue;
+            };
+            if !j.discarded && f.is_file() {
+                out.push((s, j, f));
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn take_sounds(&self, take: &Take) -> Result<Vec<(TakeSound, Job, PathBuf)>> {
+        self.sounds(Under::from(take))
+    }
+
+    /// Takes a sound off; the file stays in its job, thrown away.
+    pub fn remove_sound(&self, u: Under, job: &str) -> Result<()> {
+        let mut list = self.sound_list(u)?;
+        let before = list.len();
+        list.retain(|s| s.job != job);
+        if list.len() == before {
+            return invalid(format!("no sound {job} there"));
+        }
+        self.save_sound_list(u, list)?;
+        if let Ok(j) = self.job(job) {
+            self.set_discarded(j.id, true)?;
+        }
+        Ok(())
+    }
+
+    /// The shot's or the bridge's sounds, all of its takes'.
+    fn sound_list(&self, u: Under) -> Result<Vec<TakeSound>> {
+        Ok(match u {
+            Under::Take(r, _) => self.shot(r)?.sounds,
+            Under::Bridge(b, _) => self.bridge(b)?.sounds,
+        })
+    }
+
+    fn save_sound_list(&self, u: Under, list: Vec<TakeSound>) -> Result<()> {
+        match u {
+            Under::Take(r, _) => {
+                let mut shot = self.shot(r)?;
+                shot.sounds = list;
+                self.save_shot(r, &shot)
+            }
+            Under::Bridge(b, _) => {
+                let mut bridge = self.bridge(b)?;
+                bridge.sounds = list;
+                self.save_bridge(b, &bridge)
+            }
+        }
     }
 
     /// The recording line `i` sends with a take, if one's picked and still kept.

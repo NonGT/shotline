@@ -1048,6 +1048,8 @@ pub struct Once<'a> {
     pub quote: &'a Quote,
     /// The shot it's for, like a storyboard frame; none for one-off runs.
     pub shot: Option<ShotRef>,
+    /// The bridge it's a take of.
+    pub bridge: Option<Ulid>,
     /// What the person wrote, when the prompt was made from it.
     pub brief: Option<Brief<'a>>,
     /// Who speaks, for a line's recording.
@@ -1074,12 +1076,14 @@ pub async fn run_once(
         request,
         quote,
         shot,
+        bridge,
         brief,
         who,
     } = once;
     let mut job = Job::new(request.op.clone(), name, &request.model);
     job.id = project.clock.ulid();
     job.shot = shot;
+    job.bridge = bridge;
     job.who = who.map(Into::into);
     if let Some(b) = brief.filter(|b| !b.text.trim().is_empty()) {
         job.brief = Some(b.text.trim().into());
@@ -1091,6 +1095,8 @@ pub async fn run_once(
         .values()
         .map(|p| project.rel(p))
         .chain(request.references.iter().map(|r| project.rel(&r.path)))
+        .chain(request.start_frame.iter().map(|p| project.rel(p)))
+        .chain(request.end_frame.iter().map(|p| project.rel(p)))
         .collect();
     job.params = toml::Table::try_from(&request.params).unwrap_or_default();
     let r = books.reserve(project.clock.now(), &context(&job), quote)?;
