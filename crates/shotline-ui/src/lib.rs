@@ -17,6 +17,7 @@ mod menu;
 mod pieces;
 mod player;
 mod prefs;
+mod price;
 mod shoot;
 mod sounds;
 mod start;
@@ -330,6 +331,10 @@ enum VoiceList {
     Failed(String),
 }
 
+/// The thread that asks which keys plugins are missing; tests tell it apart by name.
+#[doc(hidden)]
+pub const KEYS_THREAD: &str = "plugin keys";
+
 pub struct App {
     project: Project,
     user_dir: PathBuf,
@@ -441,9 +446,13 @@ pub struct App {
     host: Option<Arc<dyn Host>>,
     /// A plugin's keys asked for, e.g. one that said it has none; the shell opens Preferences.
     pub(crate) wants_keys: Option<String>,
+    /// Keys each plugin needs that aren't set, by plugin, worked out off the UI thread.
+    missing_keys: Arc<Mutex<HashMap<String, Vec<String>>>>,
     maker: Option<anchor::Maker>,
     /// The open shot as it would be sent; None once anything is read again.
     built: Option<(ShotRef, Result<shotline_core::Built, String>)>,
+    /// What the shot was when its take was priced.
+    shoot_for: Option<Result<shotline_core::Built, String>>,
     /// Ticked: a shot's prompt goes into English before its next take.
     translate_prompt: bool,
     shoot: Arc<Mutex<shoot::Shoot>>,
@@ -796,8 +805,10 @@ impl App {
             plugins: vec![],
             host: None,
             wants_keys: None,
+            missing_keys: Arc::default(),
             maker: None,
             built: None,
+            shoot_for: None,
             translate_prompt: false,
             shoot: Arc::default(),
             say: Arc::default(),
@@ -842,6 +853,56 @@ impl App {
     pub fn set_plugins(&mut self, plugins: Vec<Description>, host: Option<Arc<dyn Host>>) {
         self.plugins = plugins;
         self.host = host;
+        self.check_keys();
+    }
+
+    /// Works out again which plugins are missing a key, after keys were changed.
+    pub fn check_keys(&self) {
+        let Some(host) = self.host.clone() else {
+            return;
+        };
+        let into = self.missing_keys.clone();
+        let spawned = std::thread::Builder::new()
+            .name(KEYS_THREAD.into())
+            .spawn(move || {
+                let got = host
+                    .plugins()
+                    .0
+                    .into_iter()
+                    .filter(|p| !p.missing.is_empty())
+                    .map(|p| (p.name, p.missing))
+                    .collect();
+                *into.lock().unwrap() = got;
+            });
+        if let Err(e) = spawned {
+            eprintln!("can't check plugin keys: {e}");
+        }
+    }
+
+    /// The plugin `who` speaks through, or why they can't speak.
+    pub(crate) fn voice_plugin(&self, who: &str) -> Result<String, String> {
+        let who = who.trim_start_matches('@');
+        if who.is_empty() {
+            return Err("pick who says it first".into());
+        }
+        let el = self
+            .film
+            .elements
+            .iter()
+            .find(|(e, _)| e.handle == who)
+            .map(|(e, _)| e)
+            .ok_or_else(|| format!("there's no @{who} in the cast"))?;
+        el.voice
+            .as_ref()
+            .map(|v| v.plugin.clone())
+            .ok_or_else(|| format!("@{who} has no voice yet; give them one on the Elements page"))
+    }
+
+    /// Why `plugin` can't be asked yet: a key it needs isn't set.
+    pub(crate) fn needs_keys(&self, plugin: &str) -> Option<String> {
+        let missing = self.missing_keys.lock().unwrap();
+        let keys = missing.get(plugin)?;
+        Some(format!("{plugin} needs {}", keys.join(", ")))
     }
 
     /// A paid-for image is kept whichever element is showing now.
@@ -895,6 +956,8 @@ impl App {
     fn show_maker(&mut self, ui: &mut egui::Ui, models: &[anchor::ImageModel]) {
         let pool = self.anchor_pool();
         let translator = self.translator();
+        let missing = self.missing_keys.lock().unwrap().clone();
+        self.maker.as_mut().unwrap().missing = missing;
         let wants = self.maker.as_mut().unwrap().show(
             ui,
             models,
@@ -925,6 +988,7 @@ impl App {
             }
             (anchor::Wants::Zoom(p), _) => self.zoom = Some(p),
             (anchor::Wants::Close, _) => self.maker = None,
+            (anchor::Wants::Keys(plugin), _) => self.wants_keys = Some(plugin),
             _ => {}
         }
     }

@@ -12,15 +12,13 @@ use shotline_media::Ffmpeg;
 
 use crate::cut_tools::Undo;
 use crate::player::Deck;
+use crate::price::{Pressed, Price, PriceRow};
 use crate::{App, short, theme};
 
 type Slot<T> = Arc<Mutex<Option<T>>>;
 
 /// The points either side of the join and their frames' files.
 type Framed = (Point, Point, String, String);
-
-/// How long the form has to stay put before it's priced again.
-const SETTLE: f64 = 0.6;
 
 pub(crate) struct BridgeWin {
     id: Ulid,
@@ -329,6 +327,7 @@ impl App {
         let wide = (ctx.content_rect().width() * 0.6).clamp(480.0, 860.0);
         let mut close = false;
         let mut go = None;
+        let mut ask = false;
         let mut new_frames = None;
         let mut play = None;
         let mut remove = None;
@@ -515,37 +514,43 @@ impl App {
                 }
             });
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                let priced = w
-                    .price
-                    .as_ref()
-                    .filter(|(f, _)| *f == w.form)
-                    .map(|(_, p)| p.clone());
-                match (&w.making, priced) {
-                    (Some(_), _) => {
-                        ui.spinner();
-                        ui.weak("making the take…");
-                    }
-                    (None, Some(Ok(price))) => {
-                        let ok = !busy && w.framing.is_none() && model.is_some();
-                        if ui
-                            .add_enabled(ok, egui::Button::new(format!("Go · {price}")))
-                            .on_hover_text("makes another take of the bridge")
-                            .clicked()
-                        {
-                            go = Some(price);
-                        }
-                    }
-                    (None, Some(Err(e))) => {
-                        ui.label(RichText::new(short(&e, 120)).color(theme::FLAG))
-                            .on_hover_text(e);
-                    }
-                    (None, None) => {
-                        ui.spinner();
-                        ui.weak("asking the price…");
+            let priced = w
+                .price
+                .as_ref()
+                .filter(|(f, _)| *f == w.form)
+                .map(|(_, p)| p.clone());
+            let asking = w.pricing.as_ref().is_some_and(|(f, _)| *f == w.form);
+            let shown = match (&w.making, &priced) {
+                (Some(_), _) => Price::Working("making the take…"),
+                (None, _) if asking => Price::Asking,
+                (None, Some(Ok(price))) => Price::Priced(price),
+                (None, Some(Err(e))) => Price::Failed(e),
+                (None, None) => Price::Idle,
+            };
+            let blocked = if model.is_none() {
+                Some("pick a model first".to_string())
+            } else if busy || w.framing.is_some() {
+                Some("busy with the frames".to_string())
+            } else {
+                None
+            };
+            let keys = self.needs_keys(&w.form.plugin);
+            match PriceRow::new("Make a take")
+                .keys(keys)
+                .blocked(blocked)
+                .go_hover("makes another take of the bridge")
+                .show(ui, shown)
+            {
+                Some(Pressed::Ask) => ask = true,
+                Some(Pressed::Go) => {
+                    if let Some(Ok(price)) = priced {
+                        go = Some(price);
                     }
                 }
-            });
+                Some(Pressed::Cancel) => w.price = None,
+                Some(Pressed::Keys) => self.wants_keys = Some(w.form.plugin.clone()),
+                None => {}
+            }
             if let Some(e) = &w.error {
                 ui.label(RichText::new(short(e, 200)).color(theme::FLAG))
                     .on_hover_text(e);
@@ -734,13 +739,9 @@ impl App {
                 });
         });
 
-        // Priced once the form has settled; saved first, since the price is of what's saved.
-        let unpriced = w.price.as_ref().is_none_or(|(f, _)| *f != w.form);
-        let asking = w.pricing.as_ref().is_some_and(|(f, _)| *f == w.form);
-        if unpriced && !asking && w.framing.is_none() && now - w.edited >= SETTLE {
+        // Saved first, since the price is of what's saved.
+        if ask {
             self.price_bridge(&ctx, &mut w);
-        } else if unpriced && !asking {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(SETTLE));
         }
         if let Some(at) = new_frames {
             self.frames(&ctx, &mut w, at);

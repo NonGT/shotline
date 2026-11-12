@@ -10,6 +10,7 @@ use shotline_core::{Job, Kind, TakeSound, Under};
 
 use crate::cut_tools::Undo;
 use crate::edit::Action;
+use crate::price::{Pressed, Price, PriceRow};
 use crate::{App, hint, short, theme};
 
 type Slot = Arc<Mutex<Option<Result<String, String>>>>;
@@ -20,7 +21,10 @@ enum Speak {
     Asking(Slot),
     Priced(String),
     Making(Slot),
+    /// Asking the price didn't work.
     Failed(String),
+    /// Making it didn't work.
+    Unmade(String),
 }
 
 pub(crate) struct SoundsWin {
@@ -176,6 +180,10 @@ impl App {
         let effects = self.effect_models();
         if w.who.is_empty() || !voiced.contains(&w.who) {
             w.who = voiced.first().cloned().unwrap_or_default();
+            // Its price was for someone else.
+            if matches!(w.speak, Speak::Priced(_)) {
+                w.speak = Speak::Idle;
+            }
         }
         let mut add = false;
         let mut remove: Option<(TakeSound, Job, PathBuf)> = None;
@@ -379,7 +387,10 @@ impl App {
             }
         });
         if (w.effect_text.clone(), w.length, w.model) != before
-            && matches!(w.effect, Speak::Priced(_) | Speak::Failed(_))
+            && matches!(
+                w.effect,
+                Speak::Priced(_) | Speak::Failed(_) | Speak::Unmade(_)
+            )
         {
             w.effect = Speak::Idle;
         }
@@ -396,7 +407,9 @@ impl App {
             free,
             at,
             ("the sound effect", "say what it sounds like first"),
+            (&models[w.model].0, self.needs_keys(&models[w.model].0)),
         ) {
+            Some(Ask::Keys(p)) => self.wants_keys = Some(p),
             Some(Ask::Price) => {
                 w.effect = Speak::Asking(self.ask_effect(ui.ctx(), w, &models[w.model], None));
             }
@@ -466,7 +479,10 @@ impl App {
         });
         // Another voice or other words need their own price.
         if (w.who.clone(), w.text.clone()) != before
-            && matches!(w.speak, Speak::Priced(_) | Speak::Failed(_))
+            && matches!(
+                w.speak,
+                Speak::Priced(_) | Speak::Failed(_) | Speak::Unmade(_)
+            )
         {
             w.speak = Speak::Idle;
         }
@@ -475,6 +491,7 @@ impl App {
         }
         let ready = !w.text.trim().is_empty();
         let free = self.changing.is_none();
+        let speaker = self.voice_plugin(&w.who).unwrap_or_default();
         match go_buttons(
             ui,
             &w.speak,
@@ -482,7 +499,9 @@ impl App {
             free,
             w.at,
             ("the speech", "type what they say first"),
+            (&speaker, self.needs_keys(&speaker)),
         ) {
+            Some(Ask::Keys(p)) => self.wants_keys = Some(p),
             Some(Ask::Price) => w.speak = Speak::Asking(self.ask_speech(ui.ctx(), w, None)),
             Some(Ask::Go(cost)) => {
                 w.speak = Speak::Making(self.ask_speech(ui.ctx(), w, Some(cost)));
@@ -594,7 +613,7 @@ impl App {
             .iter()
             .position(|(p, m)| *p == job.plugin && *m == job.model)
         else {
-            w.effect = Speak::Failed(format!("{} · {} isn't installed", job.plugin, job.model));
+            w.effect = Speak::Unmade(format!("{} · {} isn't installed", job.plugin, job.model));
             return;
         };
         w.model = i;
@@ -660,9 +679,11 @@ enum Ask {
     Price,
     Go(String),
     Cancel,
+    /// Preferences, at this plugin's keys.
+    Keys(String),
 }
 
-/// Price…, then Go or Cancel, or why not.
+/// Make…, then Make for $X or Cancel, or why not.
 fn go_buttons(
     ui: &mut egui::Ui,
     state: &Speak,
@@ -670,50 +691,39 @@ fn go_buttons(
     free: bool,
     at: f64,
     (name, not_ready): (&str, &str),
+    (plugin, keys): (&str, Option<String>),
 ) -> Option<Ask> {
-    let mut out = None;
-    ui.horizontal(|ui| match state {
-        Speak::Asking(_) => {
-            ui.weak("asking the price…");
-            ui.spinner();
-        }
-        Speak::Making(_) => {
-            ui.weak("making it…");
-            ui.spinner();
-        }
-        Speak::Priced(cost) => {
-            if crate::spend_button(ui, &format!("Go · {cost}"))
-                .on_hover_text(format!("makes it, from {at:.2} s into the take"))
-                .clicked()
-            {
-                out = Some(Ask::Go(cost.clone()));
-            } else if ui.button("Cancel").clicked() {
-                out = Some(Ask::Cancel);
-            }
-        }
-        Speak::Idle | Speak::Failed(_) => {
-            if let Speak::Failed(e) = state {
-                ui.label(RichText::new(short(e, 60)).color(theme::FLAG))
-                    .on_hover_text(e);
-            }
-            let price = ui.add_enabled(ready && free, egui::Button::new("Price…"));
-            price.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::Role::Button,
-                    ready && free,
-                    format!("Price {name}"),
-                )
-            });
-            if price
-                .on_hover_text("asking the price is free")
-                .on_disabled_hover_text(not_ready)
-                .clicked()
-            {
-                out = Some(Ask::Price);
-            }
-        }
-    });
-    out
+    let shown = match state {
+        Speak::Asking(_) => Price::Asking,
+        Speak::Making(_) => Price::Working("making it…"),
+        Speak::Priced(cost) => Price::Priced(cost),
+        Speak::Failed(e) => Price::Failed(e),
+        Speak::Idle | Speak::Unmade(_) => Price::Idle,
+    };
+    let blocked = if !ready {
+        Some(not_ready.to_string())
+    } else if !free {
+        Some("the editor is busy with another change".to_string())
+    } else {
+        None
+    };
+    let pressed = PriceRow::new("Make")
+        .named(format!("Make {name}"))
+        .keys(keys)
+        .blocked(blocked)
+        .go_hover(format!("makes it, from {at:.2} s into the take"))
+        .show(ui, shown);
+    if let Speak::Unmade(e) = state {
+        ui.label(RichText::new(format!("Couldn't make it: {}", short(e, 200))).color(theme::FLAG))
+            .on_hover_text(e);
+    }
+    match (pressed, state) {
+        (Some(Pressed::Ask), _) => Some(Ask::Price),
+        (Some(Pressed::Go), Speak::Priced(cost)) => Some(Ask::Go(cost.clone())),
+        (Some(Pressed::Cancel), _) => Some(Ask::Cancel),
+        (Some(Pressed::Keys), _) => Some(Ask::Keys(plugin.to_string())),
+        _ => None,
+    }
 }
 
 /// A price that came back is kept; a job that came back made is handed on.
@@ -725,6 +735,10 @@ fn news(state: &mut Speak) -> Option<String> {
     let got = slot.lock().unwrap().take()?;
     let making = matches!(state, Speak::Making(_));
     match got {
+        Err(e) if making => {
+            *state = Speak::Unmade(e);
+            None
+        }
         Err(e) => {
             *state = Speak::Failed(e);
             None

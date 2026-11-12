@@ -291,6 +291,7 @@ impl Shell {
             }
             if done.keys_changed {
                 app.forget_voices();
+                app.check_keys();
             }
             if !done.film.is_empty() {
                 app.apply(done.film);

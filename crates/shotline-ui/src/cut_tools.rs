@@ -13,6 +13,7 @@ use shotline_core::protocol::{
 };
 use shotline_core::{ShotRef, Take};
 
+use crate::price::{Pressed, Price, PriceRow};
 use crate::{App, short, theme};
 
 const KEPT: usize = 30;
@@ -1216,20 +1217,20 @@ impl App {
         let p = self.process.as_ref().unwrap();
         let mut go = false;
         let mut cancel = false;
-        ui.horizontal(|ui| match &p.priced {
-            None => {
-                ui.spinner();
-                ui.weak(format!(
-                    "{}: cutting the part and asking the price…",
-                    p.what
-                ));
-            }
-            Some((_, price)) => {
-                ui.label(format!("{} · {price}", p.what));
-                go = ui
-                    .add_enabled(self.changing.is_none(), egui::Button::new("Go"))
-                    .clicked();
-                cancel = ui.button("Cancel").clicked();
+        let free = self.changing.is_none();
+        ui.horizontal(|ui| {
+            ui.label(&p.what);
+            let shown = match &p.priced {
+                None => Price::Working("cutting the part and asking the price…"),
+                Some((_, price)) => Price::Priced(price),
+            };
+            let pressed = PriceRow::new("Run")
+                .go_hover("runs it on the part in use and swaps the result in")
+                .show(ui, shown);
+            match pressed {
+                Some(Pressed::Go) if free => go = true,
+                Some(Pressed::Cancel) => cancel = true,
+                _ => {}
             }
         });
         if cancel {

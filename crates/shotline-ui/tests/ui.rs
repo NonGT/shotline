@@ -353,7 +353,12 @@ impl Host for TestHost {
                     runs: Runs::Builtin,
                     skipped: vec![],
                     description: Ok(d("fal", vec![h3])),
-                    missing: vec!["FAL_API_KEY".into()],
+                    // Missing for Preferences only, so tests can still shoot with fal.
+                    missing: if std::thread::current().name() != Some(shotline_ui::KEYS_THREAD) {
+                        vec!["FAL_API_KEY".into()]
+                    } else {
+                        vec![]
+                    },
                 },
                 PluginInfo {
                     name: "venice".into(),
@@ -905,24 +910,24 @@ fn make_an_anchor_image() {
     h.get_by_label("Outfit exactly as in their reference images")
         .click();
     h.run();
-    h.get_by_label("Get price").click();
+    h.get_by_label("Make…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Make it for $0.04")
+        .query_by_label("Make for $0.04")
         .is_some()));
     assert!(anchors(&p).is_empty());
-    h.get_by_label("Make it for $0.04").click();
+    h.get_by_label("Make for $0.04").click();
     assert!(wait_for(&mut h, |_| !anchors(&p).is_empty()));
     h.run();
     assert_eq!(anchors(&p).len(), 1);
     // Done with, so it closes.
-    assert!(h.query_by_label("Get price").is_none());
+    assert!(h.query_by_label("Make…").is_none());
     // The anchor it made doesn't go along with the next one.
     h.get_by_label("Make image…").click();
     h.run();
     h.get_by_label("None: the image comes from the words alone.");
     h.get_by_label("Close").click();
     h.run();
-    assert!(h.query_by_label("Get price").is_none());
+    assert!(h.query_by_label("Make…").is_none());
     // Undone like an image added from a file.
     h.get_by_label("Undo").click();
     h.run();
@@ -987,18 +992,16 @@ fn a_shot_s_pictures_and_a_take() {
     h.get_by_label("Make image…").click();
     h.run();
     // The panel pushes what follows down rather than lying over it.
-    assert!(
-        h.get_by_label("Shoot a take…").rect().top() > h.get_by_label("Get price").rect().bottom()
-    );
+    assert!(h.get_by_label("Shoot a take…").rect().top() > h.get_by_label("Make…").rect().bottom());
     let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
     prompt.focus();
     prompt.type_text("the café");
     h.run();
-    h.get_by_label("Get price").click();
+    h.get_by_label("Make…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Make it for $0.04")
+        .query_by_label("Make for $0.04")
         .is_some()));
-    h.get_by_label("Make it for $0.04").click();
+    h.get_by_label("Make for $0.04").click();
     assert!(wait_for(&mut h, |_| !p.shot(R).unwrap().images.is_empty()));
     h.run();
     let img = &p.shot(R).unwrap().images[0];
@@ -1063,10 +1066,20 @@ fn a_shot_s_pictures_and_a_take() {
     let before = p.takes(R).unwrap().len();
     h.get_by_label("Shoot a take…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Shoot it for 0.40 USD")
+        .query_by_label("Shoot a take for 0.40 USD")
         .is_some()));
     assert_eq!(p.takes(R).unwrap().len(), before);
-    h.get_by_label("Shoot it for 0.40 USD").click();
+    // A price is for what was there when it was asked; an edit means asking again.
+    let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Prompt");
+    prompt.focus();
+    prompt.type_text(" slowly");
+    h.run();
+    assert!(h.query_by_label("Shoot a take for 0.40 USD").is_none());
+    h.get_by_label("Shoot a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Shoot a take for 0.40 USD")
+        .is_some()));
+    h.get_by_label("Shoot a take for 0.40 USD").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("01-010#3 done · 0.40 USD")
         .is_some()));
@@ -1126,11 +1139,11 @@ fn a_shot_s_pictures_and_a_take() {
     fp.focus();
     fp.type_text("at the edge");
     h.run();
-    h.get_by_label("Get price").click();
+    h.get_by_label("Make…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Make it for $0.04")
+        .query_by_label("Make for $0.04")
         .is_some()));
-    h.get_by_label("Make it for $0.04").click();
+    h.get_by_label("Make for $0.04").click();
     assert!(wait_for(&mut h, |_| p.shot(R).unwrap().frame.is_some()));
     h.run();
     let frame = p.shot(R).unwrap().frame.unwrap();
@@ -2548,18 +2561,18 @@ fn one_of_the_cast_says_something_over_a_take() {
     h.get_by_label("Sounds…").click();
     wait(&mut h, 0.1);
     assert!(
-        h.get_by_label("Price the speech")
+        h.get_by_label("Make the speech")
             .accesskit_node()
             .is_disabled()
     );
     h.get_by_label("What they say").focus();
     h.get_by_label("What they say").type_text("Over here!");
     h.run();
-    h.get_by_label("Price the speech").click();
+    h.get_by_label("Make the speech").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Go · 0.02 USD")
+        .query_by_label("Make for 0.02 USD")
         .is_some()));
-    h.get_by_label("Go · 0.02 USD").click();
+    h.get_by_label("Make for 0.02 USD").click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let got = p.take_sounds(&first).unwrap();
     assert_eq!(got.len(), 1);
@@ -2579,21 +2592,21 @@ fn one_of_the_cast_says_something_over_a_take() {
 
     // A sound effect, as long as the model makes it, once the editor has the speech.
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Price the sound effect")
+        .query_by_label("Make the sound effect")
         .is_some_and(|b| b.accesskit_node().is_disabled())));
     h.get_by_label("What it sounds like").focus();
     h.get_by_label("What it sounds like")
         .type_text("a door slams");
     h.run();
     assert!(wait_for(&mut h, |h| !h
-        .get_by_label("Price the sound effect")
+        .get_by_label("Make the sound effect")
         .accesskit_node()
         .is_disabled()));
-    h.get_by_label("Price the sound effect").click();
+    h.get_by_label("Make the sound effect").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Go · 0.01 USD")
+        .query_by_label("Make for 0.01 USD")
         .is_some()));
-    h.get_by_label("Go · 0.01 USD").click();
+    h.get_by_label("Make for 0.01 USD").click();
     assert!(wait_for(&mut h, |_| lines().len() == 2));
     let got = p.take_sounds(&first).unwrap();
     assert_eq!(got.len(), 2);
@@ -2615,10 +2628,10 @@ fn one_of_the_cast_says_something_over_a_take() {
     wait(&mut h, 0.3);
     h.get_by_label("Remake @paka: Over here!").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Go · 0.02 USD")
+        .query_by_label("Make for 0.02 USD")
         .is_some()));
     h.get_by_label_contains("in place of @paka: Over here!");
-    h.get_by_label("Go · 0.02 USD").click();
+    h.get_by_label("Make for 0.02 USD").click();
     assert!(wait_for(&mut h, |_| lines().len() == 4));
     let got = p.take_sounds(&first).unwrap();
     assert_eq!(got.len(), 2);
@@ -2644,7 +2657,7 @@ fn one_of_the_cast_says_something_over_a_take() {
     // An effect is asked for again with its model.
     h.get_by_label("Remake a door slams").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Go · 0.01 USD")
+        .query_by_label("Make for 0.01 USD")
         .is_some()));
     h.get_by_label("Cancel").click();
     h.run();
@@ -2713,16 +2726,16 @@ fn a_bridge_in_the_cut_has_sounds_too() {
 
     // Speech too, made without a shot.
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Price the speech")
+        .query_by_label("Make the speech")
         .is_some()));
     h.get_by_label("What they say").focus();
     h.get_by_label("What they say").type_text("Over here!");
     h.run();
-    h.get_by_label("Price the speech").click();
+    h.get_by_label("Make the speech").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Go · 0.02 USD")
+        .query_by_label("Make for 0.02 USD")
         .is_some()));
-    h.get_by_label("Go · 0.02 USD").click();
+    h.get_by_label("Make for 0.02 USD").click();
     assert!(wait_for(&mut h, |_| lines().len() == 2));
     let got = p.sounds(over).unwrap();
     assert_eq!(got.len(), 2);
@@ -2770,10 +2783,11 @@ fn bridges_a_join_in_an_editor() {
     assert_eq!((b.length, b.resolution.as_deref()), (2.0, Some("768P")));
     h.get_by_label("Bridge 01-010#1 to 01-010#3");
 
+    h.get_by_label("Make a take…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Go · 0.40 USD")
+        .query_by_label("Make a take for 0.40 USD")
         .is_some()));
-    h.get_by_label("Go · 0.40 USD").click();
+    h.get_by_label("Make a take for 0.40 USD").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Use in the cut #1")
         .is_some()));
@@ -2834,10 +2848,11 @@ fn bridges_a_join_in_an_editor() {
     h.get_by_label("Bridge 01-010#1 to 01-010#3");
 
     // A second take, not used, comes off the list.
+    h.get_by_label("Make a take…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Go · 0.40 USD")
+        .query_by_label("Make a take for 0.40 USD")
         .is_some()));
-    h.get_by_label("Go · 0.40 USD").click();
+    h.get_by_label("Make a take for 0.40 USD").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Remove #2")
         .is_some()));
@@ -2894,8 +2909,13 @@ fn a_bridge_without_takes_goes_when_closed() {
     h.get_by_label("Join 01-010#1 to 01-010#3").click();
     wait(&mut h, 0.1);
     h.get_by_label("Bridge…").click();
+    // Free once the frames either side of the join are taken.
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Go · 0.40 USD")
+        .query_by_label("Make a take…")
+        .is_some_and(|b| !b.accesskit_node().is_disabled())));
+    h.get_by_label("Make a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take for 0.40 USD")
         .is_some()));
     assert_eq!(p.bridges().unwrap().len(), 1);
     h.get_by_label("Close").click();
@@ -3108,9 +3128,11 @@ fn processes_the_used_part_of_a_clip() {
     wait(&mut h, 0.1);
     h.get_by_label("video.interpolate · local ffmpeg/minterpolate")
         .click();
-    assert!(wait_for(&mut h, |h| h.query_by_label("Go").is_some()));
-    h.get_by_label_contains("ffmpeg/minterpolate on 01-010#1 · 0.00 USD");
-    h.get_by_label("Go").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Run for 0.00 USD")
+        .is_some()));
+    h.get_by_label_contains("ffmpeg/minterpolate on 01-010#1");
+    h.get_by_label("Run for 0.00 USD").click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let ran: Request =
         serde_json::from_str(&std::fs::read_to_string(p.root.join("ran-local.json")).unwrap())
@@ -4042,6 +4064,16 @@ fn the_take_in_the_cut_opens_in_its_popup() {
 fn remake_replaces_a_line_s_recording() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: None,
+            voice_id: Some("v1".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
     p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
     let mut s = p.shot(R).unwrap();
     s.recipe = Some("spoken".into());
@@ -4080,9 +4112,9 @@ fn remake_replaces_a_line_s_recording() {
     h.run();
     h.get_by_label("Record…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Record it for 0.02 USD")
+        .query_by_label("Record for 0.02 USD")
         .is_some()));
-    h.get_by_label("Record it for 0.02 USD").click();
+    h.get_by_label("Record for 0.02 USD").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::ComboBox, "Line 1")
         .is_some()));
@@ -4097,6 +4129,16 @@ fn remake_replaces_a_line_s_recording() {
 fn a_line_recorded_and_picked() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: None,
+            voice_id: Some("v1".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
     p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
     let mut s = p.shot(R).unwrap();
     s.recipe = Some("spoken".into());
@@ -4138,9 +4180,9 @@ fn a_line_recorded_and_picked() {
     h.run();
     h.get_by_label("Record…").click();
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Record it for 0.02 USD")
+        .query_by_label("Record for 0.02 USD")
         .is_some()));
-    h.get_by_label("Record it for 0.02 USD").click();
+    h.get_by_label("Record for 0.02 USD").click();
     // Recorded, the words give way to the dropdown, on what was just made.
     assert!(wait_for(&mut h, |h| h
         .query_by_role_and_label(Role::ComboBox, "Line 1")

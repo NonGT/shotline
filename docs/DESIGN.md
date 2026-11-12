@@ -780,9 +780,10 @@ that look like that: still not sent after five minutes, not done after an hour, 
 job.toml yet never closed in the ledger. Review opens the release form on the first one.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
-in the project folder. Paid actions still quote and ask first: an element's "Make image…" shows
-"Get price" (free), then a "Make it for $0.04" button, and the CLI refuses the job if the price has
-changed since. The image becomes an anchor like one added from a file, so it can be undone.
+in the project folder. Every paid action looks the same: "Make…" (or Shoot a take…, Record…)
+asks the price for free, then "Make for $0.04" spends it and Cancel or Esc backs out. Nothing is
+priced on its own, a price goes away when what it was for is edited, and a plugin missing a key
+says so with a Set key… button instead. The CLI refuses the job if the price has changed since. The image becomes an anchor like one added from a file, so it can be undone.
 Models that take reference images start with none, so a new look isn't pulled toward the old
 anchors; they can be added from any element, a shot's storyboard frame or own pictures, a file, or a
 web address (downloaded into `.shotline/cache/refs`). Browse existing lists them under headers

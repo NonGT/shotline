@@ -539,7 +539,7 @@ impl Form {
     }
 
     /// What has to be written for the shot on disk to match the form.
-    fn changes(&self, r: ShotRef, s: &Shot, default_duration: f64) -> Vec<Action> {
+    pub(crate) fn changes(&self, r: ShotRef, s: &Shot, default_duration: f64) -> Vec<Action> {
         let mut out = vec![];
         let mut set = |differs: bool, f: Field| {
             if differs {
