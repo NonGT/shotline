@@ -4057,7 +4057,11 @@ fn the_take_in_the_cut_opens_in_its_popup() {
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Compare with")
         .is_some()));
-    h.get_by_label("Save frame");
+    // The page's own player has one too once its frame is in, so there can be two.
+    assert!(wait_for(&mut h, |h| h
+        .query_all_by_label("Save frame")
+        .next()
+        .is_some()));
 }
 
 #[test]
