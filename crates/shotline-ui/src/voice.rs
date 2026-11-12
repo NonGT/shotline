@@ -678,11 +678,11 @@ impl App {
     /// How long a recording is; None if ffprobe can't tell.
     fn length(&mut self, path: &Path) -> Option<f64> {
         if let Some(l) = self.lengths.get(path) {
-            return Some(*l);
+            return *l;
         }
-        let l = self.ff.as_ref()?.audio_duration(path).ok()?;
+        let l = self.ff.as_ref()?.audio_duration(path).ok();
         self.lengths.insert(path.to_path_buf(), l);
-        Some(l)
+        l
     }
 
     /// Where each line starts in the shot, as far as it's known: its own start, else after the

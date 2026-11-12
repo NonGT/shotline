@@ -412,6 +412,34 @@ pub struct Sequences {
     /// Something to fix on the editor's side, shown on the Cut page.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// What the plugin can put right itself, through `fix`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixes: Vec<FixInfo>,
+}
+
+/// A fix for one of the `warnings`, offered as a button next to it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct FixInfo {
+    /// Which warning, by its place in the list.
+    pub warning: usize,
+    /// Handed back in `fix`.
+    pub id: String,
+    /// The button's words, e.g. "Update filmcraft-cli to 0.19.0".
+    pub label: String,
+}
+
+/// Params of `fix`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct FixParams {
+    pub film: PathBuf,
+    pub id: String,
+}
+
+/// What `fix` did, said in a line.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Fixed {
+    #[serde(default)]
+    pub said: String,
 }
 
 /// One editor project, or why it couldn't be read.

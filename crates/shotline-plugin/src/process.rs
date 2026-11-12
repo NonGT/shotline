@@ -10,9 +10,9 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use shotline_protocol::rpc;
 use shotline_protocol::{
-    Balance, Description, EditParams, Edited, ExportParams, Exported, FetchParams, ImportParams,
-    Imported, JobRef, OpenParams, Outputs, PluginError, Quote, Rates, Request, RunParams,
-    Sequences, SequencesParams, Status, Usage, UsageParams, Voices,
+    Balance, Description, EditParams, Edited, ExportParams, Exported, FetchParams, FixParams,
+    Fixed, ImportParams, Imported, JobRef, OpenParams, Outputs, PluginError, Quote, Rates, Request,
+    RunParams, Sequences, SequencesParams, Status, Usage, UsageParams, Voices,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -292,6 +292,10 @@ impl Plugin for ProcessPlugin {
 
     async fn export(&self, ask: &ExportParams) -> Result<Exported> {
         self.call("export", ask).await
+    }
+
+    async fn fix(&self, ask: &FixParams) -> Result<Fixed> {
+        self.call("fix", ask).await
     }
 
     async fn import(&self, ask: &ImportParams) -> Result<Imported> {

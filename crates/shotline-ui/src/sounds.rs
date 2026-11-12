@@ -638,7 +638,7 @@ impl App {
 }
 
 /// A file's name, what was said, or what an effect was asked to sound like.
-fn sound_name(j: &Job) -> String {
+pub(crate) fn sound_name(j: &Job) -> String {
     match (&j.prompt, &j.who, &j.brief) {
         (Some(text), Some(who), _) => format!("@{who}: {text}"),
         (_, _, Some(b)) => b.clone(),
@@ -740,7 +740,7 @@ fn news(state: &mut Speak) -> Option<String> {
     }
 }
 
-fn same(a: &Path, b: &Path) -> bool {
+pub(crate) fn same(a: &Path, b: &Path) -> bool {
     let full = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     full(a) == full(b)
 }

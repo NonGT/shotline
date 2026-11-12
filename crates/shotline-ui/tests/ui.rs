@@ -13,7 +13,9 @@ use shotline_core::protocol::{
     OpenParams, Quote, Request, SequenceInfo, TrackInfo, TransitionInfo, VoiceInfo,
 };
 use shotline_core::{Git, Job, JobStatus, Kind, Project, Shot, ShotRef, Transition, UserConfig};
-use shotline_ui::{AnchorAsk, App, Host, MenuCommand, PluginInfo, Runs, Shell, Tab};
+use shotline_ui::{
+    AnchorAsk, App, EditFix, EditWarning, Host, MenuCommand, PluginInfo, Runs, Shell, Tab,
+};
 
 /// Paka, one shot with a done take and a failed one, and 0.4 USD spent on the done one.
 fn film(dir: &Path) -> Project {
@@ -81,6 +83,7 @@ fn film(dir: &Path) -> Project {
 fn harness(dir: &Path) -> Harness<'static, App> {
     let app = App::new(film(dir), dir.join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     // Tall enough for a shot's takes, under its references.
     Harness::builder()
@@ -94,6 +97,9 @@ fn field(h: &Harness<'static, App>, role: Role, label: &str) -> String {
         .value()
         .unwrap_or_default()
 }
+
+/// How often the app looks for the editor's saves, so tests that save for it don't wait long.
+const EDITS_EVERY: Duration = Duration::from_millis(50);
 
 const R: ShotRef = ShotRef {
     chapter: 1,
@@ -552,14 +558,37 @@ impl Host for TestHost {
     }
 
     /// An editor plugin's answer, from shared/edits.json when a test writes one.
-    fn sequences(&self, film: &Path) -> (Vec<EditInfo>, Vec<String>) {
+    /// With a fix for the first warning when editor-fix.txt says what its button says.
+    fn sequences(&self, film: &Path) -> (Vec<EditInfo>, Vec<EditWarning>) {
         let edits = std::fs::read_to_string(film.join("shared/edits.json"))
             .map(|t| serde_json::from_str(&t).unwrap())
             .unwrap_or_default();
+        let fix = std::fs::read_to_string(film.join("editor-fix.txt"))
+            .ok()
+            .map(|label| EditFix {
+                plugin: "filmcraft".into(),
+                id: "update-cli".into(),
+                label,
+            });
         let warnings = std::fs::read_to_string(film.join("editor-warnings.txt"))
-            .map(|t| t.lines().map(String::from).collect())
+            .map(|t| {
+                t.lines()
+                    .enumerate()
+                    .map(|(i, l)| EditWarning {
+                        text: l.into(),
+                        fix: fix.clone().filter(|_| i == 0),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         (edits, warnings)
+    }
+
+    /// Puts it right: the warnings go.
+    fn fix_edit(&self, plugin: &str, film: &Path, id: &str) -> anyhow::Result<String> {
+        assert_eq!((plugin, id), ("filmcraft", "update-cli"));
+        std::fs::remove_file(film.join("editor-warnings.txt"))?;
+        Ok("filmcraft-cli is now 0.18.0".into())
     }
 
     /// Writes a stand-in video where it was asked to. Previews are of the saved file; Render
@@ -758,6 +787,7 @@ fn edit_the_cut_and_render() {
     let r: ShotRef = "01-010".parse().unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -807,6 +837,7 @@ fn make_an_anchor_image() {
     let p = film(tmp.path());
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let model = |id: &str| ModelInfo {
         id: id.into(),
@@ -911,6 +942,7 @@ fn a_shot_s_pictures_and_a_take() {
     p.add_anchor("jeep", &png).unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(
         vec![Description {
@@ -1118,7 +1150,10 @@ fn translate_only_when_it_helps() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     let home = tmp.path().join("home");
-    let mut app = App::new(p, home.clone()).with_viewer(None).silent();
+    let mut app = App::new(p, home.clone())
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
     let model = |id: &str, op| ModelInfo {
         id: id.into(),
         op,
@@ -1297,6 +1332,7 @@ fn edit_elements() {
     let bytes = std::fs::read(&anchor).unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let tts = |id: &str| ModelInfo {
         id: id.into(),
@@ -1528,6 +1564,7 @@ fn keeps_history_with_git() {
     let tmp = tempfile::tempdir().unwrap();
     let app = App::new(film(tmp.path()), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .with_git(Git::find().map(|g| g.with_identity("Test", "test@example.com")))
         .silent();
     let mut h = Harness::builder()
@@ -1805,6 +1842,7 @@ fn a_selected_take_s_last_frame() {
     }
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -1877,6 +1915,7 @@ fn a_continue_shot_keeps_its_start_until_told() {
     let third = p.take(R, "3").unwrap();
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -1947,6 +1986,7 @@ fn an_editor_s_sequence_on_the_cut_page() {
     let p = film(tmp.path());
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -2164,6 +2204,7 @@ fn on_main_edit_picking(
 ) -> (Harness<'static, App>, impl Fn() -> Vec<EditParams>) {
     let mut app = App::new(p.clone(), tmp.join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .picking(picks)
         .silent();
     let local = Description {
@@ -2472,7 +2513,7 @@ fn lays_a_sound_over_a_take_in_the_editors_sequence() {
     let mut laid = editor_clip("9", copied, 0.0);
     laid.from = 0.0;
     write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![laid]);
-    wait(&mut h, 1.5);
+    wait(&mut h, 0.3);
     // A file brought in can't be made again.
     assert!(h.query_by_label("Remake Door.wav").is_none());
     h.get_by_label("Remove Door.wav").click();
@@ -2571,7 +2612,7 @@ fn one_of_the_cast_says_something_over_a_take() {
     let mut laid = editor_clip("9", said, 0.0);
     laid.from = 0.0;
     write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![laid]);
-    wait(&mut h, 1.5);
+    wait(&mut h, 0.3);
     h.get_by_label("Remake @paka: Over here!").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Go · 0.02 USD")
@@ -2904,7 +2945,54 @@ fn renders_an_editor_sequence() {
 }
 
 #[test]
-fn the_editor_renders_the_preview_once_it_stays_the_same() {
+fn pinches_and_scrolls_the_timeline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (one, two) = another_take(&p);
+    write_edits(
+        &p,
+        vec![editor_clip("7", &one, 0.0), editor_clip("8", &two, 7.0)],
+        vec![],
+    );
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    let shown =
+        |h: &Harness<App>, take: &str| h.query_by_role_and_label(Role::Button, take).is_some();
+    assert!(
+        shown(&h, "01-010#1") && shown(&h, "01-010#3"),
+        "the whole of it"
+    );
+    assert!(h.query_by_label("Scroll the timeline").is_none());
+
+    // Pinched in on the first clip, the last is out of sight, with a bar to get to it.
+    let first = h
+        .get_by_role_and_label(Role::Button, "01-010#1")
+        .rect()
+        .center();
+    h.hover_at(first);
+    h.run_ok();
+    h.event(egui::Event::Zoom(6.0));
+    wait(&mut h, 0.1);
+    assert!(shown(&h, "01-010#1") && !shown(&h, "01-010#3"));
+    let bar = h.get_by_label("Scroll the timeline").rect();
+    let end = egui::pos2(bar.right() - 2.0, bar.center().y);
+    h.hover_at(end);
+    h.drag_at(end);
+    h.step();
+    h.drop_at(end);
+    wait(&mut h, 0.1);
+    assert!(!shown(&h, "01-010#1") && shown(&h, "01-010#3"));
+
+    // Pinched all the way out, it's whole again.
+    h.hover_at(first);
+    h.run_ok();
+    h.event(egui::Event::Zoom(0.01));
+    wait(&mut h, 0.1);
+    assert!(shown(&h, "01-010#1") && shown(&h, "01-010#3"));
+    assert!(h.query_by_label("Scroll the timeline").is_none());
+}
+
+#[test]
+fn the_editor_renders_the_preview_when_asked() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     let (video, _) = another_take(&p);
@@ -2917,13 +3005,85 @@ fn the_editor_renders_the_preview_once_it_stays_the_same() {
             .flatten()
             .any(|e| e.file_name().to_string_lossy().ends_with("-full.mp4"))
     };
-    wait(&mut h, 2.0);
-    assert!(!full(), "not straight away");
-    wait(&mut h, 3.0);
+    wait(&mut h, 0.3);
+    h.get_by_label_contains("Preview not updated");
+    assert!(!full(), "not by itself");
+    h.get_by_label("Update preview").click();
     assert!(wait_for(&mut h, |_| full()));
     assert!(wait_for(&mut h, |h| h
         .query_by_label_contains("Preview rendered by")
         .is_some()));
+    assert!(h.query_by_label("Update preview").is_none());
+}
+
+#[test]
+fn a_picked_sound_clip_has_its_tools_above() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    let video = p.job_dir(first.output().unwrap().id).join("out.mp4");
+    let door = tmp.path().join("Door.wav");
+    std::fs::write(&door, "wav").unwrap();
+    p.add_sound((&first).into(), &door, 0.5).unwrap();
+    let (_, _, laid) = p.take_sounds(&first).unwrap().remove(0);
+    let mut own = editor_clip("8", &video, 0.0);
+    own.name = "own".into();
+    let mut door_clip = editor_clip("9", &laid, 0.0);
+    door_clip.from = 0.0;
+    write_edits(&p, vec![editor_clip("7", &video, 0.0)], vec![]);
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![own]);
+    wait(&mut h, 0.3);
+
+    // The take's own sound: picked, with its tools above, not its shot.
+    let clips = h
+        .get_all_by_role_and_label(Role::Button, "01-010#1")
+        .count();
+    assert_eq!(clips, 2, "the picture and its sound");
+    h.get_all_by_role_and_label(Role::Button, "01-010#1")
+        .last()
+        .unwrap()
+        .click();
+    wait(&mut h, 0.1);
+    h.get_by_label("01-010#1's own sound");
+    h.get_by_label("Open the shot");
+    assert!(
+        h.query_by_label("Swap take").is_none(),
+        "not the picture's tools"
+    );
+    h.get_by_label("Sounds (1)…").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds over 01-010#1");
+    h.get_by_label("Door.wav");
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
+
+    // A sound laid over it says what it is and what it's over.
+    door_clip.name = "Door.wav".into();
+    write_edits_with(
+        &p,
+        vec![editor_clip("7", &video, 0.0)],
+        vec![],
+        vec![door_clip],
+    );
+    wait(&mut h, 0.3);
+    h.get_by_role_and_label(Role::Button, "Door.wav").click();
+    wait(&mut h, 0.1);
+    assert_eq!(
+        h.get_all_by_label("Door.wav").count(),
+        2,
+        "the clip and its name above"
+    );
+    h.get_by_label("over 01-010#1");
+    h.get_by_label("Sounds over 01-010#1…").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Sounds over 01-010#1");
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
+    // Clicked again, it's let go.
+    h.get_by_role_and_label(Role::Button, "Door.wav").click();
+    wait(&mut h, 0.1);
+    assert!(h.query_by_label("over 01-010#1").is_none());
 }
 
 #[test]
@@ -3044,6 +3204,7 @@ fn shows_the_editor_cut_shotline_made_first() {
     write();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -3060,7 +3221,7 @@ fn shows_the_editor_cut_shotline_made_first() {
     h.run();
     h.get_by_label("shared/other.fcproj");
     write();
-    wait(&mut h, 1.5);
+    wait(&mut h, 0.3);
     h.get_by_label("shared/other.fcproj");
 }
 
@@ -3075,6 +3236,7 @@ fn shows_an_editor_warning_whole() {
     std::fs::write(p.root.join("editor-warnings.txt"), says).unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -3084,6 +3246,37 @@ fn shows_an_editor_warning_whole() {
     h.run();
     h.get_by_label("Cut").click();
     assert!(wait_for(&mut h, |h| h.query_by_label(says).is_some()));
+    assert!(h.query_by_label("Update filmcraft-cli to 0.18.0").is_none());
+}
+
+#[test]
+fn updates_filmcraft_cli_from_its_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let says = "filmcraft: filmcraft-cli 0.17.2 doesn't match FilmCraft 0.18.0";
+    std::fs::write(p.root.join("editor-warnings.txt"), says).unwrap();
+    std::fs::write(
+        p.root.join("editor-fix.txt"),
+        "Update filmcraft-cli to 0.18.0",
+    )
+    .unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label(says).is_some()));
+    h.get_by_label("Update filmcraft-cli to 0.18.0").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("filmcraft-cli is now 0.18.0")
+        .is_some()));
+    assert!(wait_for(&mut h, |h| h.query_by_label(says).is_none()));
 }
 
 #[test]
@@ -3098,6 +3291,7 @@ fn starts_an_editor_project_from_the_cut() {
     p.select_take(R, "1").unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -3216,6 +3410,7 @@ fn plays_compares_and_plays_the_cut() {
 
     let app = App::new(p, tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     // Tall enough that the takes stay in view under the player.
     let mut h = Harness::builder()
@@ -3410,7 +3605,10 @@ fn release_what_a_dead_job_held() {
     };
     books.reserve(jiff::Timestamp::now(), &ctx, &quote).unwrap();
 
-    let app = App::new(p.clone(), home).with_viewer(None).silent();
+    let app = App::new(p.clone(), home)
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
         .with_size(egui::vec2(1000.0, 1800.0))
@@ -3485,7 +3683,10 @@ fn warn_about_stuck_jobs_on_open() {
     }
 
     let open = || {
-        let app = App::new(p.clone(), home.clone()).with_viewer(None).silent();
+        let app = App::new(p.clone(), home.clone())
+            .with_viewer(None)
+            .checking_edits_every(EDITS_EVERY)
+            .silent();
         let mut h = Harness::builder()
             .with_max_steps(16)
             .with_size(egui::vec2(1400.0, 1800.0))
@@ -3519,6 +3720,7 @@ fn set_the_format_on_the_story_tab() {
     p.select_take("01-010".parse().unwrap(), "1").unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(
         vec![Description {
@@ -3600,6 +3802,7 @@ fn a_shot_on_another_model() {
     let p = film(tmp.path());
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let video = |id: &str, res: &[&str]| ModelInfo {
         id: id.into(),
@@ -3687,6 +3890,7 @@ fn details_of_a_made_picture() {
 
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -3730,6 +3934,7 @@ fn opens_where_it_was_left() {
     let home = tmp.path().join("home");
     let app = App::new(p.clone(), home.clone())
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent()
         .remember_place();
     let mut h = Harness::builder()
@@ -3772,6 +3977,7 @@ fn a_take_in_its_popup() {
 
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -3814,6 +4020,7 @@ fn the_take_in_the_cut_opens_in_its_popup() {
 
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -3844,6 +4051,7 @@ fn remake_replaces_a_line_s_recording() {
 
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -3918,6 +4126,7 @@ fn a_line_recorded_and_picked() {
 
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
@@ -4026,6 +4235,7 @@ fn lines_dragged_into_order() {
     p.save_shot(R, &s).unwrap();
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -4283,6 +4493,7 @@ fn a_take_from_pieces() {
 
     let app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -4540,6 +4751,7 @@ fn no_more_lines_than_the_video_model_takes() {
     let show = |mix: bool| {
         let mut app = App::new(p.clone(), tmp.path().join("home"))
             .with_viewer(None)
+            .checking_edits_every(EDITS_EVERY)
             .silent();
         app.set_plugins(vec![video(mix)], None);
         let mut h = Harness::builder()
@@ -4592,6 +4804,7 @@ fn a_recorded_line_has_a_player_under_it() {
     }
     let app = App::new(p, tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -4711,6 +4924,7 @@ fn plays_an_editor_sequence() {
     .unwrap();
     let mut app = App::new(p.clone(), tmp.path().join("home"))
         .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
         .silent();
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()

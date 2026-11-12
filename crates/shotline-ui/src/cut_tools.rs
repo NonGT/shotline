@@ -78,14 +78,17 @@ impl App {
             return;
         };
         let busy = self.changing.as_ref().map(|c| c.what.clone());
-        let picked = self.clip_pick.as_ref().and_then(|id| {
-            seq.video
+        let find = |tracks: &[shotline_core::protocol::TrackInfo]| {
+            let id = self.clip_pick.as_ref()?;
+            tracks
                 .iter()
                 .flat_map(|t| &t.clips)
                 .find(|c| c.id == *id)
                 .cloned()
-        });
-        if picked.is_none() {
+        };
+        let picked = find(&seq.video);
+        let sound = find(&seq.audio);
+        if picked.is_none() && sound.is_none() {
             self.clip_pick = None;
         }
         let join = self.join_pick.as_ref().and_then(|id| {
@@ -105,6 +108,7 @@ impl App {
         }
         ui.horizontal_wrapped(|ui| match (&picked, &join) {
             (Some(c), _) => self.picked_tools(ui, &plugin, file, seq, c, busy.is_none()),
+            (None, _) if let Some(c) = &sound => self.sound_tools(ui, file, seq, c, busy.is_none()),
             (None, Some((a, b, fade))) => self.join_tools(
                 ui,
                 &plugin,
@@ -378,6 +382,51 @@ impl App {
                 .filter(|p| *p >= c.start && *p < c.start + c.length)
                 .map_or(c.from, |p| c.from + (p - c.start) * c.speed);
             self.open_sounds(under, name, at);
+        }
+    }
+
+    /// What a picked sound clip can do: what it's over, and that's sounds.
+    fn sound_tools(
+        &mut self,
+        ui: &mut egui::Ui,
+        file: &Path,
+        seq: &SequenceInfo,
+        c: &ClipInfo,
+        free: bool,
+    ) {
+        // Looked up once per pick: a laid sound means reading each take's sounds.
+        if self
+            .sound_pick
+            .as_ref()
+            .is_none_or(|(id, f, _)| *id != c.id || *f != c.file)
+        {
+            self.sound_pick = Some((c.id.clone(), c.file.clone(), self.sound_under(c)));
+        }
+        let m = self.sound_pick.as_ref().expect("set").2.clone();
+        ui.label(RichText::new(&m.clip).strong().color(theme::PAPER));
+        let Some((under, name, at)) = m.under else {
+            ui.weak("not over a take or bridge");
+            return;
+        };
+        if m.laid {
+            ui.weak(format!("over {name}"));
+        }
+        if let Some(s) = m.shot
+            && ui.button("Open the shot").clicked()
+        {
+            self.tab = crate::Tab::Shots;
+            self.open_shot(s);
+        }
+        if m.laid {
+            if ui
+                .add_enabled(free, egui::Button::new(format!("Sounds over {name}…")))
+                .on_hover_text("remake it, take it off, or lay others")
+                .clicked()
+            {
+                self.open_sounds(under, name, at);
+            }
+        } else {
+            self.sounds_button(ui, (under, name), (file, seq, c), free);
         }
     }
 

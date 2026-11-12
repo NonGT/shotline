@@ -247,6 +247,19 @@ A clip's `luts` lists the LUTs the editor puts on it, in order: .cube files, or 
 name for a built-in one (the preview leaves those out). A
 `warnings` list next to `edits` (strings) shows on the Cut page as is, for problems on the
 editor's side the user has to fix, like a filmcraft-cli that doesn't match the app's version.
+When the plugin can put one right itself, `fixes` offers it as a button under the warning:
+
+```json
+"fixes": [{"warning": 0, "id": "update-cli", "label": "Update filmcraft-cli to 0.19.0"}]
+```
+
+`warning` is the warning's place in the list.
+
+### fix (optional)
+
+For an editor plugin: makes a fix `sequences` offered. Params `{"film": "...", "id": "update-cli"}`.
+Returns `{"said": "filmcraft-cli is now 0.19.0"}`, shown under the warning; shotline then asks
+`sequences` again. It may download things but never spends.
 
 ### open (optional)
 

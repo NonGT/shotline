@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use shotline_protocol::rpc;
 use shotline_protocol::{
-    EditParams, ExportParams, FetchParams, ImportParams, JobRef, OpenParams, RunParams,
+    EditParams, ExportParams, FetchParams, FixParams, ImportParams, JobRef, OpenParams, RunParams,
     SequencesParams, UsageParams,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -85,6 +85,7 @@ async fn dispatch<P: Plugin>(p: &P, method: &str, v: Value) -> Result<Value> {
         "edit" => to_value(p.edit(&params::<EditParams>(v)?).await?),
         "import" => to_value(p.import(&params::<ImportParams>(v)?).await?),
         "export" => to_value(p.export(&params::<ExportParams>(v)?).await?),
+        "fix" => to_value(p.fix(&params::<FixParams>(v)?).await?),
         "open" => {
             p.open(&params::<OpenParams>(v)?).await?;
             json!({})

@@ -13,8 +13,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use shotline_plugin::protocol::{
     ClipInfo, Description, EditInfo, EditParams, Edited, ErrorKind, ExportParams, Exported,
-    ImportParams, Imported, OpenParams, Outputs, PROTOCOL_VERSION, PluginError, Quote, Request,
-    SequenceInfo, Sequences, Status, TakeFile, TrackInfo, TransitionInfo,
+    FixInfo, FixParams, Fixed, ImportParams, Imported, OpenParams, Outputs, PROTOCOL_VERSION,
+    PluginError, Quote, Request, SequenceInfo, Sequences, Status, TakeFile, TrackInfo,
+    TransitionInfo,
 };
 use shotline_plugin::{Error, Plugin, Result};
 
@@ -70,14 +71,45 @@ impl Plugin for FilmCraft {
     }
 
     async fn sequences(&self, film: &Path) -> Result<Sequences> {
-        let warnings = editor::cli_program()
-            .and_then(|cli| editor::mismatch(&cli))
+        let cli = editor::cli_program();
+        let warnings: Vec<String> = cli
+            .as_deref()
+            .and_then(editor::mismatch)
+            .into_iter()
+            .collect();
+        let fixes = cli
+            .as_deref()
+            .filter(|_| !warnings.is_empty())
+            .and_then(editor::can_update)
+            .map(|v| FixInfo {
+                warning: 0,
+                id: UPDATE_CLI.into(),
+                label: format!("Update filmcraft-cli to {v}"),
+            })
             .into_iter()
             .collect();
         Ok(Sequences {
             edits: shared_edits(film),
             warnings,
+            fixes,
         })
+    }
+
+    async fn fix(&self, ask: &FixParams) -> Result<Fixed> {
+        if ask.id != UPDATE_CLI {
+            return Err(fail(
+                ErrorKind::NotFound,
+                format!("no fix called {}", ask.id),
+            ));
+        }
+        let cli = editor::cli_program()
+            .ok_or_else(|| fail(ErrorKind::Other, "filmcraft-cli isn't installed".into()))?;
+        // A big download: off the runtime's thread.
+        let said = tokio::task::spawn_blocking(move || editor::update_cli(&cli))
+            .await
+            .map_err(|e| fail(ErrorKind::Other, e.to_string()))?
+            .map_err(|e| fail(ErrorKind::Other, e))?;
+        Ok(Fixed { said })
     }
 
     async fn open(&self, ask: &OpenParams) -> Result<()> {
@@ -96,6 +128,9 @@ impl Plugin for FilmCraft {
         send_takes(ask).map_err(|e| fail(ErrorKind::Other, e))
     }
 }
+
+/// The fix `sequences` offers for an old filmcraft-cli.
+const UPDATE_CLI: &str = "update-cli";
 
 fn waiting_file(film: &Path) -> PathBuf {
     film.join(".shotline/cache/filmcraft-waiting.json")

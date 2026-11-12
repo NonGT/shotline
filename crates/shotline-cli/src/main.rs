@@ -645,8 +645,18 @@ impl shotline_ui::Host for Plugins {
         plugins::balance_of(&plugins::load(), plugin)
     }
 
-    fn sequences(&self, film: &Path) -> (Vec<shotline_core::protocol::EditInfo>, Vec<String>) {
+    fn sequences(
+        &self,
+        film: &Path,
+    ) -> (
+        Vec<shotline_core::protocol::EditInfo>,
+        Vec<shotline_ui::EditWarning>,
+    ) {
         plugins::sequences(&plugins::load(), film)
+    }
+
+    fn fix_edit(&self, plugin: &str, film: &Path, id: &str) -> Result<String> {
+        plugins::fix_edit(&plugins::load(), plugin, film, id)
     }
 
     fn op_quote(

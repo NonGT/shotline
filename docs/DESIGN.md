@@ -473,10 +473,12 @@ starts one. `timeline.toml` stays as it was, so taking the project away brings i
 job folder is named by its take. The Cut page's player shows a preview ffmpeg makes into
 `.shotline/cache/sequences/` whenever the sequence changes: the top enabled clip at each moment
 with its LUT files and dissolves, the audio tracks mixed. Other effects, Lumetri's sliders and
-built-in LUTs are left out. Once the sequence has stayed the same for 4 seconds while shotline's
-window is in front (so not while it's being cut in the editor), the editor plugin's `export`
+built-in LUTs are left out. Above the tracks the page says when the editor hasn't rendered the
+sequence since it changed, with an Update preview button: the editor plugin's `export` then
 renders the saved file at half size into the same folder (`<key>-full.mp4`), through
 `filmcraft-cli` so an open FilmCraft is left alone, and the player swaps to that, keeping its place.
+It never renders by itself, since a render keeps the editor busy. The tracks pinch to zoom in and scroll
+sideways, or along the bar under them, turning a page when the playhead plays past the edge.
 The folder keeps the 16 newest quick previews and the 3 newest full ones. Render makes one into `renders/` to keep, through the open FilmCraft
 when there is one, so what isn't saved yet is in it. The page
 watches `shared/` and reads it again when the editor saves.
@@ -491,7 +493,9 @@ closed, or showing another project, wait in `.shotline/cache/filmcraft-waiting.j
 next time it's opened from shotline. The port and token are kept in
 `.shotline/cache/filmcraft-session.json` (mode 600), never in `shared/` or on a command line.
 
-Both edit the same timeline. On the Cut page a clip of an editor's sequence can be picked to open
+Both edit the same timeline. On the Cut page a sound clip can be picked to see what it is (a
+take's own sound, a bridge's, or a sound laid over one) and open that take's Sounds window or its
+shot. A clip of an editor's sequence can be picked to open
 its shot, swap in another take (all of it from the same point in, with what follows moved
 when it runs longer or shorter), match its colour to the clip before, give it a LUT, or run a video
 tool on it (interpolation, upscaling): the part in use plus half a second either side is cut out,
@@ -502,7 +506,9 @@ input LUT. The plugin's `edit` makes each change with
 FilmCraft's commands: through the control port when shotline opened it, through `filmcraft-cli`
 when it's closed (after copying the project into `.shotline/cache/filmcraft-backups/`, the last
 20), and not at all while a FilmCraft shotline didn't start is running or the CLI's version isn't
-the app's. Each change comes back with steps that undo just it, kept in
+the app's (on a Mac the Cut page's warning has a button that downloads the app's version of the
+CLI from FilmCraft's release and puts it in place of the old one). Each change comes back with
+steps that undo just it, kept in
 `.shotline/cache/editor-undo.json`, since FilmCraft keeps no undo history in the file.
 
 When the sequence uses a take that isn't the shot's selected one, the page says so and offers to
