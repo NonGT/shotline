@@ -138,15 +138,14 @@ fn edit_a_shot() {
             .is_disabled()
     );
 
-    // Lines show once they're to be spoken.
-    assert!(h.query_by_label("Add line").is_none());
+    // Lines show either way; they're recorded once they're to be spoken.
+    h.get_by_label("Add line").click();
+    h.run();
     h.get_by_role_and_label(Role::ComboBox, "Lines spoken")
         .click();
     h.run();
-    h.get_by_label("by the video model").click();
+    h.get_by_label("By the video model").click();
     h.run();
-    h.run();
-    h.get_by_label("Add line").click();
     h.run();
     // Nothing to record yet, or to bring in a recording of.
     assert!(h.get_by_label("Record…").accesskit_node().is_disabled());
@@ -177,8 +176,11 @@ fn edit_a_shot() {
             .is_none()
     );
     assert_eq!(field(&h, Role::TextInput, "Line 1"), "ไปกันเถอะ");
+    h.get_by_label("not recorded");
 
-    h.get_by_label("Remove").click();
+    h.get_by_label("More for line 1").click();
+    h.run();
+    h.get_by_label("Delete line").click();
     h.run();
     h.run();
     assert!(p.shot(R).unwrap().lines.is_empty());
@@ -407,7 +409,12 @@ impl Host for TestHost {
             name: name.into(),
             ..VoiceInfo::default()
         };
-        Ok(vec![v("abc", "Rachel"), v("def", "Somchai")])
+        // Only Rachel has a sample to hear; this one can't be fetched.
+        let rachel = VoiceInfo {
+            preview: Some("/nowhere/rachel.mp3".into()),
+            ..v("abc", "Rachel")
+        };
+        Ok(vec![rachel, v("def", "Somchai")])
     }
 
     fn balance(&self, plugin: &str) -> anyhow::Result<String> {
@@ -415,8 +422,15 @@ impl Host for TestHost {
         Ok("3.5 USD left".into())
     }
 
-    fn say_quote(&self, _film: &Path, shot: ShotRef, line: usize) -> anyhow::Result<String> {
-        assert_eq!((shot, line), (R, 0));
+    fn say_quote(&self, film: &Path, shot: ShotRef, line: usize) -> anyhow::Result<String> {
+        assert_eq!(shot, R);
+        let words = Project::open(film)?.shot(shot)?.lines[line].text.clone();
+        if words.contains("[fail]") {
+            anyhow::bail!(
+                "elevenlabs: the voice settings aren't valid for this model: stability must be \
+                 one of 0.0, 0.5 or 1.0"
+            );
+        }
         Ok("0.02 USD".into())
     }
 
@@ -445,7 +459,8 @@ impl Host for TestHost {
         who: &str,
         text: &str,
     ) -> anyhow::Result<String> {
-        assert_eq!((who, text), ("paka", "Over here!"));
+        assert_eq!(who, "paka");
+        assert!(!text.is_empty());
         Ok("0.02 USD".into())
     }
 
@@ -2664,7 +2679,7 @@ fn one_of_the_cast_says_something_over_a_take() {
         "paka",
         shotline_core::Voice {
             plugin: "elevenlabs".into(),
-            model: None,
+            model: Some("eleven_v3".into()),
             voice_id: Some("v1".into()),
             settings: Default::default(),
         },
@@ -2807,7 +2822,7 @@ fn a_bridge_in_the_cut_has_sounds_too() {
         "paka",
         shotline_core::Voice {
             plugin: "elevenlabs".into(),
-            model: None,
+            model: Some("eleven_v3".into()),
             voice_id: Some("v1".into()),
             settings: Default::default(),
         },
@@ -3941,15 +3956,27 @@ fn how_lines_are_spoken() {
     h.get_by_role_and_label(Role::ComboBox, "Lines spoken")
         .click();
     h.run();
-    assert!(h.query_by_label("lip synced after").is_none());
-    h.get_by_label("by the video model").click();
+    h.get_by_label("By the video model").click();
     h.run();
     h.run();
     assert_eq!(p.shot(R).unwrap().recipe.as_deref(), Some("spoken"));
+    // Said as what it does, with the model it lip syncs with and where that's changed.
     h.get_by_role_and_label(Role::ComboBox, "Lines spoken")
         .click();
     h.run();
-    h.get_by_label("no").click();
+    h.get_by_label("Lip sync after (wavespeed sync/lipsync-3)")
+        .click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().recipe.as_deref(), Some("lip-synced"));
+    h.get_by_label("The lip sync is priced along with each take.");
+    h.get_by_label("Change…").click();
+    h.run();
+    assert!(h.state().wants_prefs());
+    h.get_by_role_and_label(Role::ComboBox, "Lines spoken")
+        .click();
+    h.run();
+    h.get_by_label("No").click();
     h.run();
     h.run();
     assert_eq!(p.shot(R).unwrap().recipe, None);
@@ -4202,14 +4229,14 @@ fn the_take_in_the_cut_opens_in_its_popup() {
 }
 
 #[test]
-fn remake_replaces_a_line_s_recording() {
+fn record_again_keeps_the_old_recording() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     p.set_voice(
         "paka",
         shotline_core::Voice {
             plugin: "elevenlabs".into(),
-            model: None,
+            model: Some("eleven_v3".into()),
             voice_id: Some("v1".into()),
             settings: Default::default(),
         },
@@ -4235,35 +4262,35 @@ fn remake_replaces_a_line_s_recording() {
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();
 
-    // Back to the words, without ▼ to pick another; Cancel keeps what it had.
-    h.get_by_label("Remake…").click();
-    h.run();
-    assert_eq!(field(&h, Role::TextInput, "Line 1"), "ไปกันเถอะ");
-    assert!(h.query_by_label("Pick a recording for line 1").is_none());
-    h.get_by_label("Cancel").click();
-    h.run();
-    h.get_by_role_and_label(Role::ComboBox, "Line 1");
-
-    // Recorded again, the new one takes the old one's place.
-    h.get_by_label("Remake…").click();
-    h.run();
+    // The words stay editable; changed, the recording is out of date but still sent.
+    h.get_by_label("recorded");
     let words = h.get_by_role_and_label(Role::TextInput, "Line 1");
     words.focus();
     words.type_text(" [whispers]");
     h.run();
-    h.get_by_label("Record…").click();
+    h.get_by_label("out of date");
+    h.key_press(egui::Key::Enter);
+    wait(&mut h, 0.2);
+    assert_eq!(
+        p.shot(R).unwrap().lines[0].audio.as_deref(),
+        Some(old.as_str())
+    );
+
+    // Recorded again, the new one is sent and the old one stays to go back to.
+    h.get_by_label("Record again…").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Record for 0.02 USD")
         .is_some()));
     h.get_by_label("Record for 0.02 USD").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_by_role_and_label(Role::ComboBox, "Line 1")
-        .is_some()));
+    assert!(wait_for(&mut h, |_| p.shot(R).unwrap().lines[0]
+        .audio
+        .as_deref()
+        != Some(old.as_str())));
     h.run();
     let line = p.shot(R).unwrap().lines[0].clone();
     assert_eq!(line.text, "ไปกันเถอะ [whispers]");
-    assert_ne!(line.audio.as_deref(), Some(old.as_str()));
-    assert!(p.job(&old).is_err(), "the old recording is still there");
+    assert!(p.job(&old).is_ok());
+    h.get_by_label("recorded");
 }
 
 #[test]
@@ -4274,7 +4301,7 @@ fn a_line_recorded_and_picked() {
         "paka",
         shotline_core::Voice {
             plugin: "elevenlabs".into(),
-            model: None,
+            model: Some("eleven_v3".into()),
             voice_id: Some("v1".into()),
             settings: Default::default(),
         },
@@ -4324,16 +4351,16 @@ fn a_line_recorded_and_picked() {
         .query_by_label("Record for 0.02 USD")
         .is_some()));
     h.get_by_label("Record for 0.02 USD").click();
-    // Recorded, the words give way to the dropdown, on what was just made.
-    assert!(wait_for(&mut h, |h| h
-        .query_by_role_and_label(Role::ComboBox, "Line 1")
-        .is_some()));
+    // Recorded, the line says so and sends what was just made.
+    assert!(wait_for(&mut h, |h| h.query_by_label("recorded").is_some()));
     h.run();
     let first = p.shot(R).unwrap().lines[0].audio.clone();
     assert!(first.is_some());
 
     // The one said before is there to pick, words and all.
-    h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
+    h.get_by_label("More for line 1").click();
+    h.run();
+    h.get_by_label("Recordings by @paka…").click();
     h.run();
     h.get_by_label("ไปกันเถอะ [whispers]").click();
     h.run();
@@ -4343,7 +4370,9 @@ fn a_line_recorded_and_picked() {
     assert!(s.lines[0].audio.is_some() && s.lines[0].audio != first);
 
     // Both are there to go back to; the other shot's after Show all.
-    h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
+    h.get_by_label("More for line 1").click();
+    h.run();
+    h.get_by_label("Recordings by @paka…").click();
     h.run();
     h.get_by_label("Play ไปกันเถอะ");
     assert!(h.query_by_label("ใครน่ะ").is_none());
@@ -4360,7 +4389,9 @@ fn a_line_recorded_and_picked() {
     );
 
     // Deleted, it's gone, and the line goes back to its words once the list is closed.
-    h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
+    h.get_by_label("More for line 1").click();
+    h.run();
+    h.get_by_label("Recordings by @paka…").click();
     h.run();
     h.get_by_label("Delete ไปกันเถอะ").click();
     h.run();
@@ -4370,32 +4401,36 @@ fn a_line_recorded_and_picked() {
     h.run();
     h.run();
     assert_eq!(field(&h, Role::TextInput, "Line 1"), "ไปกันเถอะ");
+    h.get_by_label("not recorded");
     h.get_by_label("Undo").click();
     h.run();
     h.run();
     assert_eq!(p.shot(R).unwrap().lines[0].audio, first);
-    h.get_by_role_and_label(Role::ComboBox, "Line 1");
+    h.get_by_label("recorded");
 
     // Another shot's line sends that one, so it can't be deleted here; it's a way there.
-    h.get_by_role_and_label(Role::ComboBox, "Line 1").click();
+    h.get_by_label("More for line 1").click();
+    h.run();
+    h.get_by_label("Recordings by @paka…").click();
     h.run();
     h.get_by_label("Show all (1 from other shots)").click();
     h.run();
-    h.get_by_label("1 other line");
-    h.get_by_label("Delete ไปกันเถอะ");
-    assert!(h.query_by_label("Delete ใครน่ะ").is_none());
+    assert!(
+        h.get_by_label("Delete ใครน่ะ")
+            .accesskit_node()
+            .is_disabled()
+    );
     h.get_by_label(&format!("Go to {other}")).click();
     h.run();
     h.run();
     assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาหันกลับมา");
 
-    // A new line can take one recorded before, words and all, from ▼ beside Record….
+    // A new line can take one recorded before, words and all, from Pick one….
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();
     h.get_by_label("Add line").click();
     h.run();
-    h.get_by_role_and_label(Role::ComboBox, "Pick a recording")
-        .click();
+    h.get_by_label("Pick one…").click();
     h.run();
     h.get_by_label("ไปกันเถอะ [whispers]").click();
     h.run();
@@ -4404,7 +4439,7 @@ fn a_line_recorded_and_picked() {
     assert_eq!(s.lines.len(), 2);
     assert_eq!(s.lines[1].text, "ไปกันเถอะ [whispers]");
     assert!(s.lines[1].audio.is_some() && s.lines[1].audio != s.lines[0].audio);
-    h.get_by_role_and_label(Role::ComboBox, "Line 2");
+    assert_eq!(field(&h, Role::TextInput, "Line 2"), "ไปกันเถอะ [whispers]");
 }
 
 #[test]
@@ -5096,7 +5131,7 @@ fn a_recorded_line_has_a_player_under_it() {
     h.get_by_label("1.3 s in the shot");
     // Long words are cut short, not drawn over who says them.
     let who = h.get_all_by_label("Who says it").nth(1).unwrap().rect();
-    let words = h.get_by_role_and_label(Role::ComboBox, "Line 2").rect();
+    let words = h.get_by_role_and_label(Role::TextInput, "Line 2").rect();
     assert!(who.right() <= words.left(), "{who:?} {words:?}");
     assert!(words.width() > 150.0, "{words:?}");
 
@@ -5709,4 +5744,235 @@ fn shots_are_duplicated_moved_and_deleted_from_their_menu() {
     h.run();
     h.run();
     assert_eq!(order(&p), first);
+}
+
+#[test]
+fn lines_say_why_and_ask_before_adding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.add_element(Kind::Cast, "Nana", None, "").unwrap();
+    p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
+    let mut s = p.shot(R).unwrap();
+    s.recipe = Some("spoken".into());
+    p.save_shot(R, &s).unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 2400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+
+    // No voice: Record… can't, and says where to give one.
+    assert!(h.get_by_label("Record…").accesskit_node().is_disabled());
+    h.get_by_label("@paka has no voice yet");
+    h.get_by_label("Give @paka a voice…").click();
+    h.run();
+    assert_eq!(h.state().tab(), Tab::Elements);
+
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: Some("eleven_v3".into()),
+            voice_id: Some("abc".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    h.get_by_label("Shots").click();
+    wait(&mut h, 0.3);
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+
+    // What went wrong asking the price shows whole, under the line, until it's dismissed.
+    let words = h.get_by_role_and_label(Role::TextInput, "Line 1");
+    words.focus();
+    words.type_text(" [fail]");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    h.get_by_label("Record…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("stability must be one of 0.0, 0.5 or 1.0")
+        .is_some()));
+    h.get_by_label("Dismiss").click();
+    h.run();
+    assert!(h.query_by_label_contains("stability must be").is_none());
+
+    // A new line is priced from its words, and only added once it's paid for.
+    h.get_by_label("Add line").click();
+    h.run();
+    let draft = h.get_by_role_and_label(Role::TextInput, "Lines");
+    draft.focus();
+    draft.type_text("Over here!");
+    h.run();
+    h.get_all_by_label("Record…").last().unwrap().click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Record for 0.02 USD")
+        .is_some()));
+    assert_eq!(p.shot(R).unwrap().lines.len(), 1);
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().lines.len(), 1);
+    h.get_all_by_label("Record…").last().unwrap().click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Record for 0.02 USD")
+        .is_some()));
+    h.get_by_label("Record for 0.02 USD").click();
+    assert!(wait_for(&mut h, |_| p
+        .shot(R)
+        .unwrap()
+        .lines
+        .get(1)
+        .is_some_and(|l| l.audio.is_some())));
+    assert_eq!(p.shot(R).unwrap().lines[1].text, "Over here!");
+
+    // Unpicked from ⋯, it's recorded with each take again.
+    wait(&mut h, 0.2);
+    h.get_by_label("More for line 2").click();
+    h.run();
+    h.get_by_label("None: record with each take").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().lines[1].audio, None);
+    h.get_by_label("Undo").click();
+    h.run();
+    h.run();
+    assert!(p.shot(R).unwrap().lines[1].audio.is_some());
+
+    // Said by someone else, Paka's recording isn't sent; undo brings it back.
+    h.get_all_by_label("Who says it").nth(1).unwrap().click();
+    h.run();
+    h.get_by_label("@nana").click();
+    h.run();
+    wait(&mut h, 0.2);
+    h.get_by_label_contains("line 2 of 01-010 is @nana's now");
+    assert_eq!(p.shot(R).unwrap().lines[1].audio, None);
+}
+
+#[test]
+fn a_new_voice_flags_lines_recorded_with_the_old() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: Some("eleven_v3".into()),
+            voice_id: Some("abc".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
+    TestHost.say(&p.root, R, 0, "0.02 USD").unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(
+        vec![Description {
+            name: "elevenlabs".into(),
+            version: "1".into(),
+            protocol: 1,
+            editor: false,
+            app: String::new(),
+            env: vec![],
+            models: vec![ModelInfo {
+                id: "eleven_v3".into(),
+                op: Op::AudioTts,
+                ..ModelInfo::default()
+            }],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 2400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Elements").click();
+    h.run();
+    h.get_by_label_contains("@paka").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_role_and_label(Role::ComboBox, "Voice")
+        .is_some()));
+    // Rachel can be heard before she's picked; Somchai has no sample.
+    h.get_by_label("Hear Rachel");
+    h.get_by_role_and_label(Role::ComboBox, "Voice").click();
+    h.run();
+    assert!(h.query_by_label("Hear Somchai").is_none());
+    h.get_by_label("Somchai").click();
+    wait(&mut h, 0.3);
+    h.run();
+    assert_eq!(
+        p.element("paka")
+            .unwrap()
+            .voice
+            .unwrap()
+            .voice_id
+            .as_deref(),
+        Some("def")
+    );
+    h.get_by_label("1 line was recorded with the old voice.");
+    h.get_by_label("Show them").click();
+    h.run();
+    h.get_by_label_contains("01-010 line 1: ไปกันเถอะ").click();
+    h.run();
+    h.run();
+    assert_eq!(h.state().tab(), Tab::Shots);
+}
+
+/// The Lines panel and its recordings popup, like `shots`.
+#[test]
+#[ignore]
+fn lines_look() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.add_element(Kind::Cast, "Nana", None, "").unwrap();
+    p.set_voice(
+        "paka",
+        shotline_core::Voice {
+            plugin: "elevenlabs".into(),
+            model: Some("eleven_v3".into()),
+            voice_id: Some("abc".into()),
+            settings: Default::default(),
+        },
+    )
+    .unwrap();
+    p.add_line(R, "paka", "ไปกันเถอะ", None).unwrap();
+    p.add_line(R, "paka", "Over here!", Some(2.0)).unwrap();
+    p.add_line(R, "nana", "Wait for me", None).unwrap();
+    TestHost.say(&p.root, R, 0, "0.02 USD").unwrap();
+    TestHost.say(&p.root, R, 1, "0.02 USD").unwrap();
+    let mut s = p.shot(R).unwrap();
+    s.recipe = Some("spoken".into());
+    s.lines[1].text = "Over here, quick!".into();
+    p.save_shot(R, &s).unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(64)
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_steps(4);
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    wait(&mut h, 0.3);
+    h.get_by_label("Add line").scroll_to_me();
+    h.run_steps(4);
+    snap(&mut h, "lines");
+    h.get_by_label("More for line 1").click();
+    h.run_steps(4);
+    snap(&mut h, "line-menu");
+    h.get_by_label("Recordings by @paka…").click();
+    h.run_steps(6);
+    snap(&mut h, "recordings");
 }

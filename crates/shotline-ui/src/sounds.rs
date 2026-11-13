@@ -297,10 +297,8 @@ impl App {
             }
         });
         if add
-            && let Some(file) = self.pick_file(
-                rfd::FileDialog::new()
-                    .add_filter("Sound", &["wav", "mp3", "m4a", "aac", "flac", "ogg"]),
-            )
+            && let Some(file) =
+                self.pick_file(rfd::FileDialog::new().add_filter("Sound", &crate::SOUND_FILES))
         {
             let before = self.sound_jobs(w.under);
             self.flush();

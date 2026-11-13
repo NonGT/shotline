@@ -200,6 +200,8 @@ pub(crate) enum Action {
     AddLine(ShotRef, LineForm),
     /// A line added with a recording made somewhere else, copied in as what it sends.
     ImportLine(ShotRef, LineForm, PathBuf),
+    /// A recording made somewhere else of line `i`'s words, picked for it.
+    ImportRecording(ShotRef, usize, PathBuf),
     /// A sound from a file over a take in the cut, starting that many seconds into it.
     AddSound(Under, PathBuf, f64),
     /// A sound already made, like a recording, over a take; by job id.
@@ -271,6 +273,7 @@ impl Action {
             Action::Set(r, _)
             | Action::AddLine(r, _)
             | Action::ImportLine(r, ..)
+            | Action::ImportRecording(r, ..)
             | Action::SetLine(r, ..)
             | Action::RemoveLine(r, _)
             | Action::PickRecording(r, ..)
@@ -316,6 +319,7 @@ impl Action {
             Action::Set(r, _)
             | Action::AddLine(r, _)
             | Action::ImportLine(r, ..)
+            | Action::ImportRecording(r, ..)
             | Action::SetLine(r, ..)
             | Action::RemoveLine(r, _)
             | Action::PickRecording(r, ..)
@@ -819,6 +823,24 @@ impl App {
                     made: vec![p.job_dir(job.id)],
                 }
             }
+            Action::ImportRecording(r, i, file) => {
+                let l = p
+                    .shot(r)?
+                    .lines
+                    .get(i)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("{r} has no line {}", i + 1))?;
+                let job = p.import_recording(r, &l.who, &l.text, &file)?;
+                p.set_line_audio(r, i, Some(&job))?;
+                Done {
+                    msg: format!(
+                        "line {} of {r} sends {}",
+                        i + 1,
+                        file.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    made: vec![p.job_dir(job.id)],
+                }
+            }
             Action::AddSound(u, file, at) => {
                 let job = p.add_sound(u, &file, at)?;
                 Done {
@@ -839,8 +861,19 @@ impl App {
                 format!("a sound off {}", under_name(u)).into()
             }
             Action::SetLine(r, i, l) => {
-                p.set_line(r, i, &l.who, &l.text, l.at()?)?;
-                format!("{r} saved").into()
+                let had = p.shot(r)?.lines.get(i).and_then(|x| x.audio.clone());
+                let s = p.set_line(r, i, &l.who, &l.text, l.at()?)?;
+                if had.is_some() && s.lines[i].audio.is_none() {
+                    format!(
+                        "line {} of {r} is @{}'s now; the recording it had isn't used (undo \
+                         brings it back)",
+                        i + 1,
+                        l.who
+                    )
+                    .into()
+                } else {
+                    format!("{r} saved").into()
+                }
             }
             Action::PickRecording(r, i, id) => {
                 let job = match id {
@@ -990,7 +1023,20 @@ impl App {
                 }
             }
             Action::SaveElement(el) => {
+                let was = p.element(&el.handle)?.voice;
                 p.save_element(&el)?;
+                // Lines recorded before keep the voice they were made with.
+                if was.is_some() && was != el.voice {
+                    let mut old = vec![];
+                    for (r, s) in p.shots(None)? {
+                        for (i, l) in s.lines.iter().enumerate() {
+                            if l.who == el.handle && l.audio.is_some() {
+                                old.push((r, i, l.text.clone()));
+                            }
+                        }
+                    }
+                    self.old_voice = (!old.is_empty()).then(|| (el.handle.clone(), old, false));
+                }
                 format!("@{} saved", el.handle).into()
             }
             Action::AddElement(n) => {

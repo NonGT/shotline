@@ -232,6 +232,18 @@ fn lines_are_edited_and_removed() {
     assert!(p.set_line(r, 0, "paka", " ", None).is_err());
     assert!(p.set_line(r, 5, "paka", "hi", None).is_err());
 
+    // Other words keep the recording; another speaker drops it.
+    p.add_element(Kind::Cast, "Nana", None, "").unwrap();
+    let file = _dir.path().join("hi.mp3");
+    fs::write(&file, "mp3").unwrap();
+    let j = p.import_recording(r, "paka", "hello", &file).unwrap();
+    p.set_line_audio(r, 0, Some(&j)).unwrap();
+    let s = p.set_line(r, 0, "paka", "hello there", Some(0.5)).unwrap();
+    assert_eq!(s.lines[0].audio, Some(j.id.to_string()));
+    let s = p.set_line(r, 0, "nana", "hello there", Some(0.5)).unwrap();
+    assert_eq!(s.lines[0].audio, None);
+    p.set_line(r, 0, "paka", "hello", Some(0.5)).unwrap();
+
     let s = p.remove_line(r, 0).unwrap();
     assert_eq!(s.lines.len(), 1);
     assert_eq!(p.shot(r).unwrap().lines[0].text, "bye");
@@ -455,4 +467,30 @@ fn a_replaced_picture_keeps_its_place_and_note() {
     assert_eq!(s.images[1].note, "the street");
     assert!(!old.exists());
     assert!(p.replace_shot_image(r, 5, &new).is_err());
+}
+
+#[test]
+fn a_voice_over_isnt_a_line_recording() {
+    let (dir, p) = new_project();
+    p.add_chapter("Into the forest").unwrap();
+    p.add_element(shotline_core::Kind::Cast, "Paka", None, "")
+        .unwrap();
+    let r = p.add_shot("1", None, Shot::default()).unwrap();
+    let video = dir.path().join("brought.mp4");
+    fs::write(&video, "mp4").unwrap();
+    let take = p.import_take(r, &video).unwrap();
+    let file = dir.path().join("vo.mp3");
+    fs::write(&file, "mp3").unwrap();
+    let line = p.import_recording(r, "paka", "hi", &file).unwrap();
+    let over = p.import_recording(r, "paka", "far away", &file).unwrap();
+    p.add_sound_job((&take).into(), &over.id.to_string(), 0.0)
+        .unwrap();
+
+    let all = p.recordings_by("paka", Some(r)).unwrap();
+    assert_eq!(all.iter().map(|x| x.id).collect::<Vec<_>>(), vec![line.id]);
+    let e = p
+        .discard_recording(&over.id.to_string())
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains(&format!("laid over a take of {r}")), "{e}");
 }

@@ -439,8 +439,9 @@ impl Project {
         let line = self.line(who, text, at)?;
         let mut shot = self.shot(r)?;
         match shot.lines.get_mut(i) {
-            // The same words by the same speaker: the recording still fits.
-            Some(l) if l.text == line.text && l.who == line.who => {
+            // The same speaker keeps the recording, even with other words: it's shown out of
+            // date until it's recorded again. Another speaker can't send it.
+            Some(l) if l.who == line.who => {
                 *l = Line {
                     audio: l.audio.take(),
                     ..line
@@ -599,11 +600,14 @@ impl Project {
         let who = who.trim_start_matches('@');
         let mut shots: HashMap<ShotRef, Option<Shot>> = HashMap::new();
         let mut out = vec![];
+        // A voice-over laid over a take isn't a line's recording.
+        let laid = self.laid_sounds()?;
         for j in self.jobs()? {
             if j.op != Op::AudioTts
                 || j.status != JobStatus::Done
                 || j.discarded
                 || j.outputs.is_empty()
+                || laid.contains_key(&j.id.to_string())
             {
                 continue;
             }
@@ -810,12 +814,33 @@ impl Project {
         if j.op != Op::AudioTts {
             return invalid(format!("{} isn't a recording", j.id));
         }
+        if let Some(over) = self.laid_sounds()?.get(&j.id.to_string()) {
+            return invalid(format!("it's laid over {over}; take it off there first"));
+        }
         if j.take.is_none() {
             fsx::remove_dir(&self.job_dir(j.id))?;
         } else {
             self.set_discarded(j.id, true)?;
         }
         Ok(())
+    }
+
+    /// Sounds laid over takes and bridges in the cut, by job id, with what each is laid over.
+    pub fn laid_sounds(&self) -> Result<HashMap<String, String>> {
+        let mut out = HashMap::new();
+        for (r, s) in self.shots(None)? {
+            for t in &s.sounds {
+                out.entry(t.job.clone())
+                    .or_insert_with(|| format!("a take of {r}"));
+            }
+        }
+        for (_, b) in self.bridges()? {
+            for t in &b.sounds {
+                out.entry(t.job.clone())
+                    .or_insert_with(|| format!("the bridge in {}", b.sequence));
+            }
+        }
+        Ok(out)
     }
 
     /// The shot before `r` in film order, crossing chapter boundaries.
