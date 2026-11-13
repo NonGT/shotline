@@ -293,6 +293,24 @@ fn renders_clips_and_tracks() {
         "{quiet_until} {loud_after}"
     );
 
+    // Asked to stop, it does, and leaves nothing behind.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let gone = dir.path().join("gone.mp4");
+    let stopped = render(
+        &ff,
+        &over,
+        &[],
+        &Options {
+            stop: Some(stop),
+            ..Options::default()
+        },
+        &dir.path().join("w6"),
+        &gone,
+        |_| {},
+    );
+    assert!(matches!(stopped, Err(shotline_media::Error::Stopped)));
+    assert!(!gone.exists());
+
     // Trimmed, it stops early.
     over[1].sounds[0].length = Some(0.3);
     let short = dir.path().join("short.mp4");

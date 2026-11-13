@@ -781,6 +781,18 @@ colour matching, music tracks with start and volume; a track from outside the fi
 `renders/`. Past renders play in the app. With an editor plugin, the top of the Cut tab switches
 to the editor's sequences and opens the film in the editor (see Editors).
 
+The top of the Cut page is one row: project / sequence (a menu when there are several), its size,
+then one chip for everything out of sync with the editor (other takes than the selected ones,
+shots not in the sequence with Put in and Put all in, plugin warnings, projects that can't be
+read), Open in the editor, Renders (each plays in the monitor until Back to the cut) and Render.
+shotline's own render can be stopped; an editor's can't, so it shows how long it has run.
+Clicking a clip or a join puts its tools in one row above the lanes: Open the shot, Sounds…,
+Swap take (Keep length or Ripple in an editor), Colour match, Bridge… and the dissolve, whose
+length starts from the dissolve already there. The tools are off while something renders.
+The preview under the monitor is quick: shotline's own cut is joined with its crossfades, music
+and sounds but no colour match, and an editor's sequence is shown as plain clips until the editor
+renders it with Update preview. Until the new one is made the old one plays with a badge on it.
+
 The Cost tab charts spending per day as stacked bars, one colour per model (last 7 or 30 days,
 or all of it), with a table of models under it (usage, jobs, money) and the spend per shot. Under
 that, the Ledger row does what `cost verify`, `cost rates`, `cost reconcile`, `cost adjust`,

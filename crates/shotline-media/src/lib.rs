@@ -20,6 +20,8 @@ pub enum Error {
     Failed { what: String, stderr: String },
     #[error("{0}")]
     Invalid(String),
+    #[error("stopped")]
+    Stopped,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
