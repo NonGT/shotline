@@ -584,7 +584,20 @@ impl Host for TestHost {
         Ok("$0.04".into())
     }
 
-    fn render(&self, film: &Path, on: &mut dyn FnMut(String)) -> anyhow::Result<(PathBuf, String)> {
+    fn render(
+        &self,
+        film: &Path,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        on: &mut dyn FnMut(String),
+    ) -> anyhow::Result<(PathBuf, String)> {
+        // Runs until it's stopped.
+        if film.join("slow-render").exists() {
+            on("1/1 01-010#1".into());
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            anyhow::bail!("stopped");
+        }
         let t = Project::open(film)?.timeline()?;
         assert_eq!(t.colormatch.at, shotline_core::MatchAt::All);
         on("1/1 01-010#1".into());
@@ -847,7 +860,11 @@ fn edit_the_cut_and_render() {
     h.get_by_label("Cut").click();
     h.run();
     // Nothing selected yet, so there's nothing to render.
-    h.get_by_label("1 shot without a take: they're left out of Play and stop a render.");
+    h.get_by_label("1 shot without a take").click();
+    h.run();
+    h.get_by_label("They're left out of Play and stop a render.");
+    h.key_press(egui::Key::Escape);
+    h.run();
     h.get_by_label("Render").click();
     h.run();
     assert!(!tmp.path().join("film/renders").exists());
@@ -870,7 +887,15 @@ fn edit_the_cut_and_render() {
     assert!(wait_for(&mut h, |h| h
         .query_by_label_contains("renders/cut.mp4 · 8s")
         .is_some()));
-    h.get_by_label("renders/cut.mp4");
+    // Listed, and played here in the monitor.
+    h.get_by_label("Renders").click();
+    h.run();
+    h.get_by_label("Play renders/cut.mp4").click();
+    h.run();
+    h.get_by_label("Playing renders/cut.mp4");
+    h.get_by_label("Back to the cut").click();
+    h.run();
+    assert!(h.query_by_label("Playing renders/cut.mp4").is_none());
 
     h.get_by_label("Undo").click();
     h.run();
@@ -2195,9 +2220,15 @@ fn an_editor_s_sequence_on_the_cut_page() {
     .unwrap();
     h.get_by_label("Reload").click();
     // Read on another thread, which can take a while on a slow machine.
+    // What's wrong with a project is in the one chip at the top.
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("broken.fcproj can't be read")
+        .query_by_label_contains("things to sync")
         .is_some()));
+    h.get_by_label_contains("things to sync").click();
+    h.run();
+    h.get_by_label("broken.fcproj can't be read");
+    h.key_press(egui::Key::Escape);
+    h.run();
     // The editor's cut is the film's cut now: shown in place of shotline's, with nothing to
     // switch to while it's the only sequence.
     assert!(wait_for(&mut h, |h| h
@@ -2227,7 +2258,8 @@ fn an_editor_s_sequence_on_the_cut_page() {
     assert_eq!(ask.file, Some(p.root.join("shared/edit.fcproj")));
     assert_eq!(ask.sequence.as_deref(), Some("Main edit"));
     assert!(ask.cut.is_none());
-    // The take goes by its name and opens its shot.
+    // The take goes by its name. Without the editor's id there's nothing to change it by, so
+    // it opens its shot.
     h.get_by_role_and_label(Role::Button, "01-010#1").click();
     h.run();
     assert_eq!(h.state().tab(), Tab::Shots);
@@ -2440,13 +2472,9 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
     wait(&mut h, 0.1);
     assert_eq!(h.state().tab(), Tab::Cut);
     h.get_by_label("Open the shot");
-    assert!(
-        h.query_by_label("Match colour to the clip before")
-            .is_some()
-    );
     h.get_by_label("Swap take").click();
     wait(&mut h, 0.1);
-    h.get_by_label("01-010#3").click();
+    h.get_by_label("Ripple with 01-010#3").click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let ask = &lines()[0];
     assert_eq!(
@@ -2476,6 +2504,16 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
         }
     );
     assert!(wait_for(&mut h, |h| h.query_by_label(undo).is_none()));
+
+    // Keep length fills the same time, so nothing after it moves.
+    h.get_by_label("Swap take").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Keep length with 01-010#3").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 3));
+    let Change::Replace { length, .. } = &lines()[2].change else {
+        panic!("{:?}", lines()[2].change)
+    };
+    assert_eq!(*length, None);
 }
 
 #[test]
@@ -2488,7 +2526,12 @@ fn dissolves_a_join_in_an_editor() {
     let (mut h, lines) = on_main_edit(tmp.path(), &p);
     h.get_by_label("Join 01-010#1 to 01-010#3").click();
     wait(&mut h, 0.1);
+    h.get_by_label("Colour match").click();
+    h.run();
     h.get_by_label("Match colour to 01-010#1");
+    h.get_by_label("Match with shotline's LUT");
+    h.key_press(egui::Key::Escape);
+    h.run();
     assert!(h.query_by_label("Straight cut").is_none());
     h.get_by_label("Dissolve").click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
@@ -2503,14 +2546,21 @@ fn dissolves_a_join_in_an_editor() {
         name: "cross_dissolve".into(),
         from: "7".into(),
         to: "8".into(),
-        start: 0.75,
-        length: 0.5,
+        start: 0.875,
+        length: 0.25,
     };
     write_edits(&p, clips, vec![fade]);
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Straight cut")
         .is_some()));
     h.get_by_label("Change dissolve");
+    // The field starts from the dissolve there: 0.25 s at 24 fps.
+    assert_eq!(
+        h.get_by_label("Dissolve frames")
+            .accesskit_node()
+            .numeric_value(),
+        Some(6.0)
+    );
     // The tools wrap onto a second line, and the panel grows a frame later to fit them.
     wait(&mut h, 0.1);
     h.get_by_label("Straight cut").click();
@@ -2543,7 +2593,9 @@ fn puts_a_shot_added_later_into_the_editors_sequence() {
     let t = p.import_take(r, &file).unwrap();
     let (mut h, lines) = on_main_edit(tmp.path(), &p);
     let put = format!("Put {t} in");
-    assert!(wait_for(&mut h, |h| h.query_by_label(&put).is_some()));
+    open_sync(&mut h);
+    // It says it selects the take too.
+    h.get_by_label("and selects it");
     h.get_by_label(&put).click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let made = p.job_dir(t.output().unwrap().id).join("take.mp4");
@@ -3110,9 +3162,12 @@ fn selects_the_takes_an_editor_uses() {
     write_edits(&p, vec![editor_clip("7", &third, 0.0)], vec![]);
     let (mut h, _) = on_main_edit_with(tmp.path(), &p, "01-010#3");
     let says = "FilmCraft uses 01-010#3 (selected: 01-010#1).";
+    open_sync(&mut h);
     h.get_by_label(says);
     h.get_by_label("Select these takes").click();
-    assert!(wait_for(&mut h, |h| h.query_by_label(says).is_none()));
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("to sync")
+        .is_none()));
     assert_eq!(p.selected_take(R).unwrap().unwrap().number, 3);
 }
 
@@ -3203,7 +3258,6 @@ fn the_editor_renders_the_preview_when_asked() {
             .any(|e| e.file_name().to_string_lossy().ends_with("-full.mp4"))
     };
     wait(&mut h, 0.3);
-    h.get_by_label_contains("Preview not updated");
     assert!(!full(), "not by itself");
     h.get_by_label("Update preview").click();
     assert!(wait_for(&mut h, |_| full()));
@@ -3351,6 +3405,8 @@ fn matches_a_join_with_shotlines_lut() {
     let (mut h, lines) = on_main_edit(tmp.path(), &p);
     h.get_by_label("Join 01-010#1 to 01-010#3").click();
     wait(&mut h, 0.1);
+    h.get_by_label("Colour match").click();
+    h.run();
     h.get_by_label("Match with shotline's LUT").click();
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     let ask = &lines()[0];
@@ -3412,16 +3468,18 @@ fn shows_the_editor_cut_shotline_made_first() {
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
-    let shown = "shared/filmcraft/Rain.fcproj";
+    let shown = "Rain.fcproj";
     assert!(wait_for(&mut h, |h| h.query_by_label(shown).is_some()));
-    assert!(h.query_by_label("This film's cut").is_none());
+    assert!(h.query_by_label("shotline's cut").is_none());
     // Two sequences to pick from; the pick stays when the editor saves again.
+    h.get_by_role_and_label(Role::ComboBox, "Sequence").click();
+    h.run();
     h.get_by_label("other.fcproj · Someone's").click();
     h.run();
-    h.get_by_label("shared/other.fcproj");
+    h.get_by_label("other.fcproj");
     write();
     wait(&mut h, 0.3);
-    h.get_by_label("shared/other.fcproj");
+    h.get_by_label("other.fcproj");
 }
 
 #[test]
@@ -3444,6 +3502,7 @@ fn shows_an_editor_warning_whole() {
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
+    open_sync(&mut h);
     assert!(wait_for(&mut h, |h| h.query_by_label(says).is_some()));
     assert!(h.query_by_label("Update filmcraft-cli to 0.18.0").is_none());
 }
@@ -3470,6 +3529,7 @@ fn updates_filmcraft_cli_from_its_warning() {
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
+    open_sync(&mut h);
     assert!(wait_for(&mut h, |h| h.query_by_label(says).is_some()));
     h.get_by_label("Update filmcraft-cli to 0.18.0").click();
     assert!(wait_for(&mut h, |h| h
@@ -3501,7 +3561,6 @@ fn starts_an_editor_project_from_the_cut() {
     h.get_by_label("Cut").click();
     wait(&mut h, 0.1);
     // No project yet: the button is there anyway, and makes one from this cut.
-    h.get_by_label_contains("the editor's cut is the film's cut");
     h.get_by_label("Open in FilmCraft").click();
     let opened = p.root.join("opened-by-filmcraft.json");
     assert!(wait_for(&mut h, |_| opened.is_file()));
@@ -3565,6 +3624,15 @@ fn wait_for(h: &mut Harness<App>, done: impl Fn(&Harness<App>) -> bool) -> bool 
 /// Steps the app for a while in real time, as playback needs.
 /// At least a few frames too: a panel takes its new size a frame later, and a slow machine may
 /// draw only one in the time.
+/// Opens the Cut page's chip of what's out of sync, once it's there.
+fn open_sync(h: &mut Harness<App>) {
+    assert!(wait_for(h, |h| h
+        .query_by_label_contains("to sync")
+        .is_some()));
+    h.get_by_label_contains("to sync").click();
+    h.run();
+}
+
 fn wait<S>(h: &mut Harness<S>, secs: f64) {
     let until = Instant::now() + Duration::from_secs_f64(secs);
     let mut frames = 0;
@@ -3703,11 +3771,15 @@ fn plays_compares_and_plays_the_cut() {
     wait(&mut h, 1.0);
     assert!(wait_for(&mut h, |h| !h.state().is_playing()));
 
-    // Clicked on the ruler, the playhead moves there without playing; the take opens its shot.
+    // Clicked on the ruler, the playhead moves there without playing; a take is picked, and its
+    // tools open its shot.
     h.get_by_role_and_label(Role::Slider, "Playhead").click();
     wait(&mut h, 0.2);
     assert!(!h.state().is_playing());
     h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.1);
+    assert_eq!(h.state().tab(), Tab::Cut);
+    h.get_by_label("Open the shot").click();
     wait(&mut h, 0.1);
     assert_eq!(h.state().tab(), Tab::Shots);
 }
@@ -5299,7 +5371,7 @@ fn plays_an_editor_sequence() {
     assert!(!h.state().is_playing());
     h.get_by_label("Play").click();
     assert!(wait_for(&mut h, |h| h.state().is_playing()));
-    h.get_by_label_contains("Left out of the preview: Title: made in the editor");
+    h.get_by_label("1 left out of the preview");
     let made: Vec<_> = std::fs::read_dir(p.root.join(".shotline/cache/sequences"))
         .unwrap()
         .collect();
@@ -6065,4 +6137,93 @@ fn a_sound_that_cant_be_remade_says_why() {
     assert!(h.query_by_label("render only").is_none());
     // No plugin to make effects with: says so instead of leaving the section out.
     h.get_by_label_contains("No installed plugin makes sound effects");
+}
+
+/// The Cut page in both modes, like `shots`.
+#[test]
+#[ignore]
+fn cut_look() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    if !real_video(&video) || !real_video(&third) {
+        return;
+    }
+    let r = p.add_shot("1", None, Shot::default()).unwrap();
+    let file = tmp.path().join("brought.mp4");
+    real_video(&file);
+    p.import_take(r, &file).unwrap();
+    let clips = vec![editor_clip("7", &video, 0.0), editor_clip("8", &third, 1.0)];
+    write_edits(&p, clips, vec![]);
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    h.set_size(egui::vec2(1280.0, 800.0));
+    wait(&mut h, 2.0);
+    h.get_by_label("Join 01-010#1 to 01-010#3").click();
+    wait(&mut h, 0.3);
+    snap(&mut h, "cut-join");
+    h.get_by_label("Colour match").click();
+    wait(&mut h, 0.2);
+    snap(&mut h, "cut-colour");
+    h.key_press(egui::Key::Escape);
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.2);
+    h.get_by_label("Swap take").click();
+    wait(&mut h, 0.5);
+    snap(&mut h, "cut-swap");
+    h.key_press(egui::Key::Escape);
+    wait(&mut h, 0.1);
+    open_sync(&mut h);
+    wait(&mut h, 0.2);
+    snap(&mut h, "cut-sync");
+
+    // shotline's own cut.
+    let own = tempfile::tempdir().unwrap();
+    let q = film(own.path());
+    let v = q
+        .job_dir(q.take(R, "1").unwrap().output().unwrap().id)
+        .join("out.mp4");
+    real_video(&v);
+    q.select_take(R, "1").unwrap();
+    let app = App::new(q.clone(), own.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(64)
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_steps(4);
+    h.get_by_label("Cut").click();
+    wait(&mut h, 0.2);
+    snap(&mut h, "cut-own-making");
+    wait(&mut h, 3.0);
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.2);
+    snap(&mut h, "cut-own");
+}
+
+#[test]
+fn stops_a_render() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    p.select_take(R, "1").unwrap();
+    std::fs::write(p.root.join("slow-render"), "").unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(vec![], Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cut").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Render").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label("Stop").is_some()));
+    h.get_by_label("Stop").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("render stopped")
+        .is_some()));
+    assert!(h.query_by_label("Stop").is_none());
 }

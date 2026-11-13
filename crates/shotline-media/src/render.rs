@@ -4,6 +4,8 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::colour::{Transform, stats};
 use crate::{Error, Ffmpeg, Result};
@@ -39,6 +41,8 @@ pub struct Options {
     /// 0..1, how much of the colour correction to apply.
     pub strength: f64,
     pub crf: u32,
+    /// Set from elsewhere to stop the render; it then ends with Error::Stopped.
+    pub stop: Option<Arc<AtomicBool>>,
 }
 
 impl Default for Options {
@@ -48,7 +52,16 @@ impl Default for Options {
             match_frames: 5,
             strength: 1.0,
             crf: 18,
+            stop: None,
         }
+    }
+}
+
+impl Options {
+    fn stopped(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::Relaxed))
     }
 }
 
@@ -105,6 +118,9 @@ pub fn render(
     let mut durations = vec![];
     let mut tail: VecDeque<Vec<u8>> = VecDeque::new();
     for (i, clip) in clips.iter().enumerate() {
+        if opts.stopped() {
+            return Err(Error::Stopped);
+        }
         let matched = clip.colormatch && i > 0 && !tail.is_empty();
         on(Progress::Clip {
             index: i,
@@ -135,6 +151,9 @@ pub fn render(
             }
             tail.push_back(f);
             count += 1;
+            if count.is_multiple_of(24) && opts.stopped() {
+                return Err(Error::Stopped);
+            }
         }
         wr.finish()?;
         if count == 0 {
@@ -260,11 +279,31 @@ pub fn render(
     cmd.args(["-c:v", "libx264", "-crf", &opts.crf.to_string()])
         .args(["-preset", "medium", "-movflags", "+faststart"])
         .arg(out);
-    let o = cmd.output()?;
-    if !o.status.success() {
+    // Waited on bit by bit, so a stop can kill it.
+    let log = work.join("encode.log");
+    let mut child = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log)?)
+        .spawn()?;
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break s;
+        }
+        if opts.stopped() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(out);
+            return Err(Error::Stopped);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    if !status.success() {
         return Err(Error::Failed {
             what: format!("encoding {}", out.display()),
-            stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
+            stderr: std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
         });
     }
     let total: f64 = durations.iter().sum::<f64>() - x * (k as f64 - 1.0).max(0.0);

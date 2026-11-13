@@ -53,7 +53,7 @@ pub fn render(
     colormatch: bool,
     xfade: Option<f64>,
 ) -> Result<()> {
-    let (out, r) = render_with(p, output, colormatch, xfade, |pr| match pr {
+    let (out, r) = render_with(p, output, colormatch, xfade, None, |pr| match pr {
         Progress::Clip {
             index,
             of,
@@ -81,6 +81,7 @@ pub fn render_with(
     output: Option<&Path>,
     colormatch: bool,
     xfade: Option<f64>,
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     on: impl FnMut(Progress),
 ) -> Result<(std::path::PathBuf, render::Rendered)> {
     let tl = p.timeline()?;
@@ -142,6 +143,7 @@ pub fn render_with(
         xfade: xfade.unwrap_or(tl.xfade),
         match_frames: tl.colormatch.frames,
         strength: tl.colormatch.strength,
+        stop,
         ..Options::default()
     };
     let out = match output {

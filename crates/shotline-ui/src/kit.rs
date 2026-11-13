@@ -255,3 +255,31 @@ pub(crate) fn modal_width(ctx: &egui::Context, share: f32, min: f32, max: f32) -
     let room = window - 2.0 * 20.0 - 2.0 * 24.0;
     (window * share).clamp(min, max).min(room).max(200.0)
 }
+
+/// A button that opens a menu: its words and a small down triangle.
+pub(crate) fn drop_button(
+    ui: &mut egui::Ui,
+    text: impl Into<egui::WidgetText>,
+    enabled: bool,
+) -> Response {
+    let text: egui::WidgetText = text.into();
+    let name = text.text().to_string();
+    let r = ui.add_enabled(enabled, egui::Button::new(text).right_text("   "));
+    let c = egui::pos2(r.rect.right() - 13.0, r.rect.center().y);
+    let color = if enabled {
+        ui.visuals().widgets.inactive.fg_stroke.color
+    } else {
+        ui.visuals().widgets.noninteractive.fg_stroke.color
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            c + egui::vec2(-4.0, -2.0),
+            c + egui::vec2(4.0, -2.0),
+            c + egui::vec2(0.0, 3.0),
+        ],
+        color,
+        egui::Stroke::NONE,
+    ));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &name));
+    r
+}

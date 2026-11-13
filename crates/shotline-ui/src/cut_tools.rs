@@ -8,8 +8,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui::{self, RichText};
 use serde::{Deserialize, Serialize};
 use shotline_core::protocol::{
-    Change, ClipInfo, EditParams, Edited, ExportParams, Op, Request, SequenceInfo, TrackInfo,
-    TransitionInfo,
+    Change, ClipInfo, EditParams, Edited, Op, Request, SequenceInfo, TrackInfo, TransitionInfo,
 };
 use shotline_core::{ShotRef, Take};
 
@@ -78,7 +77,9 @@ impl App {
         else {
             return;
         };
-        let busy = self.changing.as_ref().map(|c| c.what.clone());
+        // Nothing changes while the editor renders, or while one change is on its way.
+        let free =
+            self.changing.is_none() && self.edit_rendering.is_none() && self.full_making.is_none();
         let find = |tracks: &[shotline_core::protocol::TrackInfo]| {
             let id = self.clip_pick.as_ref()?;
             tracks
@@ -107,30 +108,37 @@ impl App {
         if join.is_none() {
             self.join_pick = None;
         }
+        self.bridge_window(ui, &plugin, file, seq);
+        // A price to agree to takes the tools' place until it's answered.
+        if self.process.is_some() {
+            self.process_row(ui, file, seq);
+            return;
+        }
         ui.horizontal_wrapped(|ui| match (&picked, &join) {
-            (Some(c), _) => self.picked_tools(ui, &plugin, file, seq, c, busy.is_none()),
-            (None, _) if let Some(c) = &sound => self.sound_tools(ui, file, seq, c, busy.is_none()),
-            (None, Some((a, b, fade))) => self.join_tools(
-                ui,
-                &plugin,
-                file,
-                seq,
-                (a, b),
-                fade.as_ref(),
-                busy.is_none(),
-            ),
+            (Some(c), _) => self.picked_tools(ui, &plugin, file, seq, c, free),
+            (None, _) if let Some(c) = &sound => self.sound_tools(ui, file, seq, c, free),
+            (None, Some((a, b, fade))) => {
+                self.join_tools(ui, &plugin, file, seq, (a, b), fade.as_ref(), free)
+            }
             (None, None) => {
                 ui.weak("Click a clip, or the mark where two meet, to change it from here.");
             }
         });
-        self.process_row(ui, file, seq);
-        self.bridge_window(ui, &plugin, file, seq);
-        if let Some(what) = &busy {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.weak(what);
-            });
-        }
+    }
+
+    /// The line under the tools: which preview plays, what's being done, and Undo.
+    pub(crate) fn edit_status(&mut self, ui: &mut egui::Ui, file: &Path, seq: &SequenceInfo) {
+        self.preview_state(ui, file, seq);
+        let Some(plugin) = self
+            .edits
+            .0
+            .iter()
+            .find(|e| e.file == file)
+            .map(|e| e.plugin.clone())
+        else {
+            return;
+        };
+        let busy = self.changing.as_ref().map(|c| c.what.clone());
         let undo = self
             .undo
             .get_or_insert_with(|| load_undo(&self.project.root))
@@ -138,28 +146,37 @@ impl App {
             .rev()
             .find(|u| u.file == file && u.sequence == seq.name)
             .cloned();
-        if let Some(u) = undo {
-            let label = format!("Undo {}", u.what);
-            if ui
-                .add_enabled(busy.is_none(), egui::Button::new(label))
-                .on_hover_text(
-                    "takes back the last change made from here; what was done in the editor \
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(u) = undo {
+                let label = format!("Undo {}", u.what);
+                if ui
+                    .add_enabled(
+                        busy.is_none() && self.edit_rendering.is_none(),
+                        egui::Button::new(label),
+                    )
+                    .on_hover_text(
+                        "takes back the last change made from here; what was done in the editor \
                      since stays",
-                )
-                .clicked()
-            {
-                let ask = EditParams {
-                    film: self.project.root.clone(),
-                    file: file.to_path_buf(),
-                    sequence: seq.name.clone(),
-                    clip: String::new(),
-                    change: Change::Undo {
-                        steps: u.steps.clone(),
-                    },
-                };
-                self.start_change(ui.ctx(), &plugin, format!("undoing {}", u.what), ask, None);
+                    )
+                    .clicked()
+                {
+                    let ask = EditParams {
+                        film: self.project.root.clone(),
+                        file: file.to_path_buf(),
+                        sequence: seq.name.clone(),
+                        clip: String::new(),
+                        change: Change::Undo {
+                            steps: u.steps.clone(),
+                        },
+                    };
+                    self.start_change(ui.ctx(), &plugin, format!("undoing {}", u.what), ask, None);
+                }
             }
-        }
+            if let Some(what) = &busy {
+                ui.weak(short(what, 60));
+                ui.spinner();
+            }
+        });
     }
 
     /// The places on a video track where two clips the editor can change meet.
@@ -236,36 +253,72 @@ impl App {
         };
         let mut start = None;
         let frame = 1.0 / seq.fps.max(1.0);
-        if ui
-            .add_enabled(free, egui::Button::new(format!("Match colour to {na}")))
-            .on_hover_text(format!(
-                "the editor's colour match on {nb}, to the last frame of {na}"
-            ))
-            .clicked()
-        {
-            let change = Change::Match {
-                to: b.start - frame,
-            };
-            start = Some((format!("colour match of {nb}"), ask(change)));
-        }
         let files = a
             .file
             .clone()
             .zip(b.file.clone())
             .filter(|(x, y)| x.is_file() && y.is_file());
-        let lut = ui
-            .add_enabled(
-                free && files.is_some() && self.ff.is_some(),
-                egui::Button::new("Match with shotline's LUT"),
-            )
-            .on_hover_text(
-                "shotline's own colour match (as in its renders, with the Joins settings) as an \
-                 input LUT on the clip",
-            )
-            .on_disabled_hover_text("needs both clips' files, and ffmpeg");
-        if lut.clicked()
-            && let Some((fa, fb)) = files.clone()
-        {
+        let app = self
+            .edits
+            .0
+            .iter()
+            .find(|e| e.file == file)
+            .map(|e| e.app.clone())
+            .unwrap_or_default();
+        let r = crate::kit::drop_button(ui, "Colour match", free);
+        let mut lut = false;
+        egui::Popup::menu(&r)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(300.0);
+                if ui
+                    .button(format!("Match colour to {na}"))
+                    .on_hover_text(format!(
+                        "{app}'s own colour match on {nb}, to the last frame of {na}"
+                    ))
+                    .clicked()
+                {
+                    start = Some((
+                        format!("colour match of {nb}"),
+                        ask(Change::Match {
+                            to: b.start - frame,
+                        }),
+                    ));
+                    ui.close();
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("shotline's match (MKL), as an input LUT").color(theme::DUST),
+                );
+                let m = &mut self.timeline_form.colormatch;
+                ui.horizontal(|ui| {
+                    ui.weak("strength");
+                    ui.add(
+                        egui::DragValue::new(&mut m.strength)
+                            .range(0.0..=1.0)
+                            .speed(0.01)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text("how much of the correction is applied, 0 to 1");
+                    ui.weak("frames");
+                    ui.add(egui::DragValue::new(&mut m.frames).range(1..=60).speed(0.2))
+                        .on_hover_text("frames each side of the join the colours are measured on");
+                });
+                let ok = files.is_some() && self.ff.is_some();
+                if ui
+                    .add_enabled(ok, egui::Button::new("Match with shotline's LUT"))
+                    .on_hover_text(
+                        "as shotline's own renders match colour, put on the clip as a LUT",
+                    )
+                    .on_disabled_hover_text("needs both clips' files, and ffmpeg")
+                    .clicked()
+                {
+                    lut = true;
+                    ui.close();
+                }
+            });
+        if lut && let Some((fa, fb)) = files.clone() {
+            self.flush();
             let m = &self.timeline_form.colormatch;
             let (frames, strength) = (m.frames, m.strength);
             let cube = self.project.root.join(".shotline/cache/luts").join(format!(
@@ -312,12 +365,21 @@ impl App {
             self.open_bridge(ui.ctx(), seq, a, b);
         }
         ui.separator();
-        ui.add(
-            egui::DragValue::new(&mut self.fade_frames)
-                .range(1..=240)
-                .suffix(" frames"),
-        )
-        .on_hover_text(format!("{:.2} s", self.fade_frames as f64 * frame));
+        // Starts from the dissolve that's there.
+        let key = format!("{}:{:?}", b.id, fade.map(|f| f.length));
+        if self.cut_ui.fade_for.as_ref() != Some(&key) {
+            self.cut_ui.fade_for = Some(key);
+            self.fade_frames = fade.map_or(12, |f| ((f.length / frame).round() as u32).max(1));
+        }
+        let r = ui
+            .add(
+                egui::DragValue::new(&mut self.fade_frames)
+                    .range(1..=240)
+                    .suffix(" frames"),
+            )
+            .on_hover_text(format!("{:.2} s", self.fade_frames as f64 * frame));
+        let n = self.fade_frames as f64;
+        r.widget_info(move || egui::WidgetInfo::slider(true, n, "Dissolve frames"));
         let label = if fade.is_some() {
             "Change dissolve"
         } else {
@@ -483,62 +545,39 @@ impl App {
                 self.open_shot(t.shot);
             }
             self.sounds_button(ui, (t.into(), t.to_string()), (file, seq, c), free);
-            let others: Vec<(String, PathBuf)> = self
-                .project
-                .takes(t.shot)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|o| o.id != t.id)
-                .filter_map(|o| {
-                    let video = self.project.take_video(o.id).ok()?;
-                    Some((o.to_string(), std::path::absolute(&video).unwrap_or(video)))
-                })
-                .collect();
-            ui.add_enabled_ui(free && !others.is_empty(), |ui| {
-                ui.menu_button("Swap take", |ui| {
-                    for (o, video) in &others {
-                        if ui.button(o).clicked() {
-                            // All of the new take from the same point, however long it is.
-                            let length = self
-                                .ff
-                                .as_ref()
-                                .and_then(|ff| ff.probe(video).ok())
-                                .map(|i| i.duration - c.from)
-                                .filter(|l| *l > 0.0);
-                            let change = Change::Replace {
-                                file: video.clone(),
-                                from: c.from,
-                                length,
-                            };
-                            start = Some((format!("swap {name} for {o}"), ask(change)));
-                            ui.close();
-                        }
-                    }
-                })
-                .response
-                .on_hover_text("puts another take of the shot in its place; what follows moves when it's longer or shorter")
-                .on_disabled_hover_text("the shot has no other take with a video");
-            });
+            if let Some((o, ripple)) = ui
+                .add_enabled_ui(free, |ui| self.take_menu(ui, t, true))
+                .inner
+                && let Ok(video) = self.project.take_video(o.id)
+            {
+                let video = std::path::absolute(&video).unwrap_or(video);
+                // Ripple: all of the new take from the same point, however long it is.
+                let length = ripple
+                    .then(|| {
+                        self.ff
+                            .as_ref()
+                            .and_then(|ff| ff.probe(&video).ok())
+                            .map(|i| i.duration - c.from)
+                            .filter(|l| *l > 0.0)
+                    })
+                    .flatten();
+                let change = Change::Replace {
+                    file: video,
+                    from: c.from,
+                    length,
+                };
+                start = Some((format!("swap {name} for {o}"), ask(change)));
+            }
         }
-        let frame = 1.0 / seq.fps.max(1.0);
-        let before = c.start >= frame;
+        let has_file = c.file.as_ref().is_some_and(|f| f.is_file());
         if ui
-            .add_enabled(
-                free && before,
-                egui::Button::new("Match colour to the clip before"),
-            )
-            .on_hover_text("the editor's colour match, to the last frame before this clip")
-            .on_disabled_hover_text("nothing comes before it")
-            .clicked()
-        {
-            let change = Change::Match {
-                to: c.start - frame,
-            };
-            start = Some((format!("colour match of {name}"), ask(change)));
-        }
-        if ui
-            .add_enabled(free, egui::Button::new("Input LUT…"))
+            .add_enabled(free && has_file, egui::Button::new("Input LUT…"))
             .on_hover_text("a .cube LUT on the clip, before the rest of its colour")
+            .on_disabled_hover_text(if has_file {
+                "wait for the editor"
+            } else {
+                "made in the editor, so there's no file to put it on"
+            })
             .clicked()
             && let Some(lut) = rfd::FileDialog::new()
                 .add_filter("LUT", &["cube"])
@@ -585,6 +624,10 @@ impl App {
         let Some(host) = self.host.clone() else {
             return;
         };
+        if self.edit_rendering.is_some() {
+            self.error(format!("{what} waits: the editor is rendering"));
+            return;
+        }
         let slot: Arc<Mutex<Option<_>>> = Arc::default();
         let (s, p, a, ctx) = (slot.clone(), plugin.to_string(), ask.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -705,9 +748,109 @@ pub(crate) type Rendering = (PathBuf, Arc<Mutex<Option<Result<PathBuf, String>>>
 const HANDLE: f64 = 0.5;
 
 impl App {
+    /// Another take of `t`'s shot to use instead, picked from its poster and length. In the
+    /// editor, Keep length or Ripple; on shotline's own cut, Use. Gives the take and whether
+    /// what follows moves.
+    pub(crate) fn take_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &Take,
+        editor: bool,
+    ) -> Option<(Take, bool)> {
+        let others: Vec<(Take, PathBuf)> = self
+            .project
+            .takes(t.shot)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|o| o.id != t.id && !o.removed())
+            .filter_map(|o| {
+                let v = self.project.take_video(o.id).ok()?;
+                Some((o, v))
+            })
+            .collect();
+        let r = crate::kit::drop_button(ui, "Swap take", !others.is_empty())
+            .on_hover_text("another take of the shot in its place")
+            .on_disabled_hover_text("the shot has no other take with a video");
+        let mut got = None;
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_min_width(300.0);
+            for (o, video) in &others {
+                ui.horizontal(|ui| {
+                    let png = o.output().map(|j| {
+                        self.project
+                            .root
+                            .join(".shotline/cache/posters")
+                            .join(format!("{}.png", j.id))
+                    });
+                    if let Some(png) = png {
+                        let make = (self.ff.as_ref(), &self.posters);
+                        crate::poster(
+                            ui,
+                            &mut self.thumbs,
+                            make,
+                            video,
+                            &png,
+                            &format!("{o} poster"),
+                        );
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(o.to_string()).color(theme::PAPER));
+                        let long = self.clip_length(ui.ctx(), video);
+                        ui.weak(long.map_or("…".into(), |l| format!("{l:.1} s")));
+                        ui.horizontal(|ui| {
+                            if editor {
+                                let r = ui.small_button("Keep length");
+                                r.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::Button,
+                                        true,
+                                        format!("Keep length with {o}"),
+                                    )
+                                });
+                                if r.on_hover_text(
+                                    "fills the same time in the sequence; nothing moves",
+                                )
+                                .clicked()
+                                {
+                                    got = Some((o.clone(), false));
+                                }
+                                let r = ui.small_button("Ripple");
+                                r.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::Button,
+                                        true,
+                                        format!("Ripple with {o}"),
+                                    )
+                                });
+                                if r.on_hover_text(
+                                    "all of it from the same point; what follows moves when \
+                                         it's longer or shorter",
+                                )
+                                .clicked()
+                                {
+                                    got = Some((o.clone(), true));
+                                }
+                            } else if ui
+                                .small_button(format!("Use {o}"))
+                                .on_hover_text("selects it")
+                                .clicked()
+                            {
+                                got = Some((o.clone(), true));
+                            }
+                        });
+                    });
+                });
+            }
+            if got.is_some() {
+                ui.close();
+            }
+        });
+        got
+    }
+
     /// Shots whose take in the sequence isn't their selected one: the take it uses, and the
     /// selected one's name.
-    fn other_takes(&self, seq: &SequenceInfo) -> Vec<(Take, String)> {
+    pub(crate) fn other_takes(&self, seq: &SequenceInfo) -> Vec<(Take, String)> {
         let mut by_shot: Vec<(ShotRef, Vec<&Take>)> = vec![];
         for c in seq.video.iter().flat_map(|t| &t.clips) {
             let Some(t) = c.file.as_ref().and_then(|f| self.edit_takes.get(f)) else {
@@ -736,7 +879,7 @@ impl App {
 
     /// Shots of the film with a take but none of them in the sequence, e.g. one added after the
     /// editor's project was made, and where each would go: (take, video, clip, after it).
-    fn missing(&mut self, seq: &SequenceInfo) -> Vec<(Take, PathBuf, String, bool)> {
+    pub(crate) fn missing(&mut self, seq: &SequenceInfo) -> Vec<(Take, PathBuf, String, bool)> {
         if self.cut_takes.is_none() {
             let mut all = vec![];
             for c in &self.film.cut {
@@ -811,7 +954,7 @@ impl App {
     /// shot's clip, or next to the shots around it when the sequence hasn't got the shot.
     pub(crate) fn follow_cut(&mut self, ctx: &egui::Context) {
         self.change_done();
-        if self.cut_follow.is_none() || self.changing.is_some() {
+        if self.cut_follow.is_none() || self.changing.is_some() || self.edit_rendering.is_some() {
             return;
         }
         if self.host.is_none() {
@@ -918,177 +1061,6 @@ impl App {
             steps: serde_json::Value::Null,
         };
         self.start_change(ctx, &plugin, what, ask, Some(undo));
-    }
-
-    /// Offers to put shots the sequence hasn't got into it, sound and all.
-    pub(crate) fn missing_shots(
-        &mut self,
-        ui: &mut egui::Ui,
-        plugin: &str,
-        app: &str,
-        file: &Path,
-        seq: &SequenceInfo,
-    ) {
-        let missing = self.missing(seq);
-        let mut put = None;
-        for (t, video, clip, after) in missing {
-            ui.horizontal_wrapped(|ui| {
-                ui.weak(format!("{} isn't in {app}'s sequence.", t.shot));
-                let next_to = seq
-                    .video
-                    .iter()
-                    .flat_map(|t| &t.clips)
-                    .find(|c| c.id == clip)
-                    .map(|c| c.name.clone())
-                    .unwrap_or_default();
-                let tip = format!(
-                    "{t} {} {next_to}, moving what follows later",
-                    if after { "after" } else { "before" }
-                );
-                if ui
-                    .add_enabled(
-                        self.changing.is_none(),
-                        egui::Button::new(format!("Put {t} in")),
-                    )
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    put = Some((t, video, clip, after));
-                }
-            });
-        }
-        let Some((t, video, clip, after)) = put else {
-            return;
-        };
-        let video = std::path::absolute(&video).unwrap_or(video);
-        let what = format!("{t} in");
-        let ask = EditParams {
-            film: self.project.root.clone(),
-            file: file.to_path_buf(),
-            sequence: seq.name.clone(),
-            clip,
-            change: Change::Insert {
-                file: video,
-                after,
-                sound: true,
-            },
-        };
-        let undo = Undo {
-            plugin: plugin.to_string(),
-            file: file.to_path_buf(),
-            sequence: seq.name.clone(),
-            what: what.clone(),
-            steps: serde_json::Value::Null,
-        };
-        let selected = self
-            .film
-            .cut
-            .iter()
-            .any(|c| c.take.as_ref().is_some_and(|s| s.id == t.id));
-        if !selected {
-            self.flush();
-            self.apply(vec![crate::edit::Action::Select(t)]);
-        }
-        self.start_change(ui.ctx(), plugin, what, ask, Some(undo));
-    }
-
-    /// Offers to select the takes the editor's sequence uses.
-    pub(crate) fn take_sync(&mut self, ui: &mut egui::Ui, app: &str, seq: &SequenceInfo) {
-        let other = self.other_takes(seq);
-        if other.is_empty() {
-            return;
-        }
-        let said: Vec<String> = other
-            .iter()
-            .map(|(t, s)| format!("{t} (selected: {s})"))
-            .collect();
-        ui.horizontal_wrapped(|ui| {
-            ui.weak(format!("{app} uses {}.", said.join(", ")));
-            if ui
-                .button("Select these takes")
-                .on_hover_text("so the film's own cut and the Shots page use them too")
-                .clicked()
-            {
-                let acts = other
-                    .iter()
-                    .map(|(t, _)| crate::edit::Action::Select(t.clone()))
-                    .collect();
-                self.flush();
-                self.apply(acts);
-            }
-        });
-    }
-
-    /// Render, through the editor, into renders/.
-    pub(crate) fn edit_render(
-        &mut self,
-        ui: &mut egui::Ui,
-        plugin: &str,
-        file: &Path,
-        seq: &SequenceInfo,
-    ) {
-        let got = self
-            .edit_rendering
-            .as_ref()
-            .and_then(|(out, slot)| Some((out.clone(), slot.lock().unwrap().take()?)));
-        if let Some((out, got)) = got {
-            self.edit_rendering = None;
-            match got {
-                Ok(f) => {
-                    self.status = Some((format!("Rendered {}", self.project.rel(&f)), false));
-                    self.reload();
-                }
-                Err(e) => self.error(format!("can't render {}: {e}", self.project.rel(&out))),
-            }
-        }
-        let busy = self.edit_rendering.is_some();
-        if ui
-            .add_enabled(!busy && self.host.is_some(), egui::Button::new("Render"))
-            .on_hover_text("the sequence as the editor renders it, into renders/; free")
-            .clicked()
-        {
-            let safe: String = seq
-                .name
-                .chars()
-                .map(|c| {
-                    if c.is_alphanumeric() || c == '-' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let at = jiff::Zoned::now().strftime("%Y%m%d-%H%M%S");
-            let out = self
-                .project
-                .root
-                .join("renders")
-                .join(format!("{safe}-{at}.mp4"));
-            let ask = ExportParams {
-                film: self.project.root.clone(),
-                file: file.to_path_buf(),
-                sequence: seq.name.clone(),
-                out: out.clone(),
-                saved: false,
-                scale: None,
-            };
-            let slot: Arc<Mutex<Option<_>>> = Arc::default();
-            let (s, host, p, ctx) = (
-                slot.clone(),
-                self.host.clone().unwrap(),
-                plugin.to_string(),
-                ui.ctx().clone(),
-            );
-            std::thread::spawn(move || {
-                *s.lock().unwrap() = Some(host.export_edit(&p, &ask).map_err(|e| format!("{e:#}")));
-                ctx.request_repaint();
-            });
-            self.edit_rendering = Some((out, slot));
-        }
-        if busy {
-            ui.spinner();
-            ui.weak("rendering…");
-        }
     }
 
     /// The video tools of installed plugins, by plugin: upscale and interpolation.

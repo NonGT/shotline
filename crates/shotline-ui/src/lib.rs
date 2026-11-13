@@ -7,6 +7,7 @@ mod bridge;
 mod browse;
 mod cost;
 mod cut;
+mod cut_head;
 mod cut_tools;
 mod edit;
 mod git;
@@ -29,7 +30,6 @@ mod voice;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
@@ -215,7 +215,13 @@ pub trait Host: Send + Sync {
     fn fetch_image(&self, film: &Path, url: &str) -> anyhow::Result<PathBuf>;
     /// Renders the cut as timeline.toml says, telling `on` each step. Returns the file and a
     /// line about it. Free: ffmpeg runs here.
-    fn render(&self, film: &Path, on: &mut dyn FnMut(String)) -> anyhow::Result<(PathBuf, String)>;
+    /// Stops early, with an error, once `stop` is set.
+    fn render(
+        &self,
+        film: &Path,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        on: &mut dyn FnMut(String),
+    ) -> anyhow::Result<(PathBuf, String)>;
     /// Every rate for each unit and where it comes from. Free, but asks each plugin.
     fn rates(&self, film: &Path) -> anyhow::Result<Vec<shotline_core::ledger::RateLine>>;
     /// The ledger against what providers say they charged. Free reads.
@@ -376,6 +382,7 @@ pub struct App {
     tab: Tab,
     /// The Cut page shows this editor sequence, by file and name, instead of the film's cut.
     cut_view: Option<(PathBuf, String)>,
+    cut_ui: cut_head::CutUi,
     /// The film's projects in video editors as the editor plugins last read them, and problems
     /// asking them.
     edits: Edits,
@@ -818,6 +825,7 @@ impl App {
             film: Film::default(),
             tab: Tab::Shots,
             cut_view: None,
+            cut_ui: cut_head::CutUi::default(),
             edits: (vec![], vec![]),
             edit_takes: HashMap::new(),
             edit_bridges: HashMap::new(),
@@ -1821,20 +1829,6 @@ impl App {
         }
     }
 
-    fn open_file(&mut self, file: &Path) {
-        let Some(viewer) = &self.viewer else {
-            return;
-        };
-        let mut cmd = Command::new(viewer);
-        if viewer.file_stem().is_some_and(|s| s == "ffplay") {
-            cmd.args(["-autoexit", "-loglevel", "error"]);
-        }
-        match cmd.arg(file).spawn() {
-            Ok(_) => self.info(format!("opened {}", self.project.rel(file))),
-            Err(e) => self.error(format!("can't run {}: {e}", viewer.display())),
-        }
-    }
-
     fn player(&mut self, label: &str, files: &[PathBuf]) -> Option<Player> {
         if self.ff.is_none() {
             self.error("can't play without ffmpeg; install it or set SHOTLINE_FFMPEG".into());
@@ -1848,16 +1842,6 @@ impl App {
                 self.error(format!("can't play {label}: {e}"));
                 None
             }
-        }
-    }
-
-    fn play(&mut self, label: &str, files: &[PathBuf], looping: bool) {
-        if let Some(d) = &mut self.deck {
-            d.pause(self.audio.as_ref());
-        }
-        self.deck = None;
-        if let Some(p) = self.player(label, files) {
-            self.deck = Some(Deck::new(label, p, looping));
         }
     }
 
@@ -4159,7 +4143,7 @@ pub(crate) fn make_still(
 }
 
 /// A take's still, taken from its video the first time it's shown. Clicking it opens the take.
-fn poster(
+pub(crate) fn poster(
     ui: &mut egui::Ui,
     thumbs: &mut Thumbs,
     (ff, making): (Option<&Ffmpeg>, &Arc<Mutex<HashSet<PathBuf>>>),

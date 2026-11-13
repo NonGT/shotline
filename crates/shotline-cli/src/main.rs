@@ -730,10 +730,15 @@ impl shotline_ui::Host for Plugins {
         image::quote(&p, target(ask), &anchor_make(ask, None))
     }
 
-    fn render(&self, film: &Path, on: &mut dyn FnMut(String)) -> Result<(PathBuf, String)> {
+    fn render(
+        &self,
+        film: &Path,
+        stop: Arc<AtomicBool>,
+        on: &mut dyn FnMut(String),
+    ) -> Result<(PathBuf, String)> {
         use shotline_media::render::Progress;
         let p = Project::open(film)?;
-        let (out, r) = timeline::render_with(&p, None, true, None, |pr| match pr {
+        let (out, r) = timeline::render_with(&p, None, true, None, Some(stop), |pr| match pr {
             Progress::Clip {
                 index, of, label, ..
             } => on(format!("{}/{of} {label}", index + 1)),
