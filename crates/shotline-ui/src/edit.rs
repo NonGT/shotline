@@ -241,6 +241,8 @@ pub(crate) enum Action {
     /// An image file copied in as the shot's next picture.
     AddShotImage(ShotRef, PathBuf),
     RemoveShotImage(ShotRef, usize),
+    /// Picture `i` swapped for a new one, e.g. one made again.
+    ReplaceShotImage(ShotRef, usize, PathBuf),
     /// A made image off the Browse existing list, by job id; its file stays.
     ForgetImage(String),
     ShotImageNote(ShotRef, usize, String),
@@ -272,6 +274,7 @@ impl Action {
             | Action::MoveLine(r, ..)
             | Action::AddShotImage(r, _)
             | Action::RemoveShotImage(r, _)
+            | Action::ReplaceShotImage(r, ..)
             | Action::ShotImageNote(r, ..)
             | Action::AnchorNote(r, ..)
             | Action::SetFrame(r, _)
@@ -324,7 +327,7 @@ impl Action {
                 }
                 out
             }
-            Action::RemoveShotImage(r, i) => {
+            Action::RemoveShotImage(r, i) | Action::ReplaceShotImage(r, i, _) => {
                 let mut out: Vec<PathBuf> = p.shot_path(*r).into_iter().collect();
                 if let Ok(s) = p.shot(*r)
                     && let Some(img) = s.images.get(*i)
@@ -975,6 +978,16 @@ impl App {
                 let j = p.job(&id)?;
                 p.set_discarded(j.id, true)?;
                 "image thrown out; undo brings it back".to_string().into()
+            }
+            Action::ReplaceShotImage(r, i, file) => {
+                let dest = p.replace_shot_image(r, i, &file)?;
+                Done {
+                    msg: format!(
+                        "picture {} of {r} replaced; undo brings the old one back",
+                        i + 1
+                    ),
+                    made: vec![dest],
+                }
             }
             Action::RemoveShotImage(r, i) => {
                 let img = p.remove_shot_image(r, i)?;

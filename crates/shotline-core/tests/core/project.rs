@@ -429,3 +429,30 @@ fn a_model_s_options_for_the_whole_film() {
     let text = fs::read_to_string(dir.path().join("shotline.toml")).unwrap();
     assert!(!text.contains("params"), "{text}");
 }
+
+#[test]
+fn a_replaced_picture_keeps_its_place_and_note() {
+    let (dir, p) = new_project();
+    p.add_chapter("Night").unwrap();
+    let r = p.add_shot("1", None, Shot::default()).unwrap();
+    let png = |name: &str, bytes: &[u8]| {
+        let f = dir.path().join(name);
+        fs::write(&f, bytes).unwrap();
+        f
+    };
+    p.add_shot_image(r, &png("a.png", b"a"), "the door")
+        .unwrap();
+    p.add_shot_image(r, &png("b.png", b"b"), "the street")
+        .unwrap();
+    let old = p.root.join(&p.shot(r).unwrap().images[0].file);
+
+    let new = p.replace_shot_image(r, 0, &png("c.png", b"c")).unwrap();
+    let s = p.shot(r).unwrap();
+    assert_eq!(s.images.len(), 2);
+    assert_eq!(s.images[0].note, "the door");
+    assert_eq!(p.root.join(&s.images[0].file), new);
+    assert_eq!(fs::read(&new).unwrap(), b"c");
+    assert_eq!(s.images[1].note, "the street");
+    assert!(!old.exists());
+    assert!(p.replace_shot_image(r, 5, &new).is_err());
+}

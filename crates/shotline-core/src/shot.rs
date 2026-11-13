@@ -536,6 +536,24 @@ impl Project {
         Ok(img)
     }
 
+    /// Puts `file` where picture `i` (from 0) is, keeping its note and place in the list.
+    pub fn replace_shot_image(&self, r: ShotRef, i: usize, file: &Path) -> Result<PathBuf> {
+        let old = self.shot(r)?;
+        let Some(was) = old.images.get(i).cloned() else {
+            return invalid(format!("{r} has no image {}", i + 1));
+        };
+        let dest = self.add_shot_image(r, file, &was.note)?;
+        let mut shot = self.shot(r)?;
+        let new = shot.images.pop().expect("just added");
+        shot.images[i] = new;
+        self.save_shot(r, &shot)?;
+        let path = self.root.join(&was.file);
+        if path.starts_with(self.shot_image_dir(r)?) {
+            let _ = std::fs::remove_file(&path);
+        }
+        Ok(dest)
+    }
+
     pub fn set_shot_image_note(&self, r: ShotRef, i: usize, note: &str) -> Result<()> {
         let mut shot = self.shot(r)?;
         let Some(img) = shot.images.get_mut(i) else {

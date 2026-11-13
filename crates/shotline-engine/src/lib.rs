@@ -1054,6 +1054,8 @@ pub struct Once<'a> {
     pub brief: Option<Brief<'a>>,
     /// Who speaks, for a line's recording.
     pub who: Option<&'a str>,
+    /// A shot's storyboard frame.
+    pub frame: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1079,12 +1081,14 @@ pub async fn run_once(
         bridge,
         brief,
         who,
+        frame,
     } = once;
     let mut job = Job::new(request.op.clone(), name, &request.model);
     job.id = project.clock.ulid();
     job.shot = shot;
     job.bridge = bridge;
     job.who = who.map(Into::into);
+    job.frame = frame;
     if let Some(b) = brief.filter(|b| !b.text.trim().is_empty()) {
         job.brief = Some(b.text.trim().into());
         job.english = b.english.map(Into::into);

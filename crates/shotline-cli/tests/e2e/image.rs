@@ -182,6 +182,11 @@ fn storyboard_frame() {
         ));
     // The frame job belongs to the shot but isn't a take.
     shotline(&tmp).args(["takes", "01-010"]).assert().stdout("");
+    // It says it's a frame, so the app lists it with frames and not with pictures.
+    let p = shotline_core::Project::open(&tmp.path().join("film")).unwrap();
+    let made = p.made_images().unwrap();
+    assert_eq!(made.len(), 1);
+    assert!(made[0].job.frame);
 
     shotline(&tmp)
         .args(["take", "01-010", "--yes"])
@@ -452,4 +457,35 @@ fn pictures_of_a_shot() {
         .assert()
         .success()
         .stdout(predicate::str::contains("01-010").count(1));
+}
+
+/// What the app starts to make an image out of its way: the run's record says what to make, and
+/// gets what was made written back, for the app to keep or not.
+#[test]
+fn an_image_made_in_the_background() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    let run = tmp.child("film/.shotline/cache/running/1.json");
+    run.write_str(
+        r#"{"title": "Make a frame for 01-010", "started": "2026-11-13T00:00:00Z",
+            "target": {"frame": ["01-010", null]}, "cost": "0.04 USD", "aspect": "9:16",
+            "ask": {"handle": "", "shot": "01-010", "frame": true, "prompt": "at the edge",
+                    "plugin": "fake", "model": "fake/image", "refs": [], "aspect": null,
+                    "resolution": null, "translate": false, "outfit": true}}"#,
+    )
+    .unwrap();
+    tmp.child("film/.shotline/cache/running/1.beat")
+        .touch()
+        .unwrap();
+    shotline(&tmp).args(["__run", ".", "1"]).assert().success();
+    run.assert(predicate::str::contains("\"out\": "));
+    tmp.child("film/.shotline/cache/running/1.beat")
+        .assert(predicate::path::missing());
+    let p = shotline_core::Project::open(&tmp.path().join("film")).unwrap();
+    let made = p.made_images().unwrap();
+    assert_eq!(made.len(), 1);
+    assert!(made[0].job.frame);
+    // Not the shot's frame until it's kept.
+    assert_eq!(p.shot("01-010".parse().unwrap()).unwrap().frame, None);
+    assert_eq!(ledger(&tmp), 2);
 }

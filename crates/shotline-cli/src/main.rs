@@ -203,6 +203,9 @@ enum Cmd {
     /// Serves a fake editor plugin over stdio, for tests
     #[command(name = "__fake-editor", hide = true)]
     FakeEditor,
+    /// Makes an image the app started, out of its way
+    #[command(name = "__run", hide = true)]
+    Background { film: PathBuf, id: String },
 }
 
 #[derive(clap::Args)]
@@ -829,6 +832,31 @@ impl shotline_ui::Host for Plugins {
         on: &mut dyn FnMut(String),
     ) -> Result<String> {
         shoot::take_at(&Project::open(film)?, shot, at, translate, on)
+    }
+
+    fn start_run(&self, film: &Path, id: &str) -> Result<bool> {
+        let log = std::fs::File::create(film.join(format!(".shotline/cache/running/{id}.log")))?;
+        let mut cmd = std::process::Command::new(std::env::current_exe()?);
+        cmd.arg("__run")
+            .arg(film)
+            .arg(id)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log);
+        // Its own group, so closing or restarting the app doesn't take it along.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        #[cfg(windows)]
+        {
+            const DETACHED_PROCESS: u32 = 0x8;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+            std::os::windows::process::CommandExt::creation_flags(
+                &mut cmd,
+                DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            );
+        }
+        cmd.spawn()?;
+        Ok(true)
     }
 
     fn make_anchor(&self, film: &Path, ask: &shotline_ui::AnchorAsk, at: &str) -> Result<PathBuf> {
@@ -1551,6 +1579,10 @@ fn run(cli: Cli) -> Result<()> {
             plugins::runtime()
                 .block_on(shotline_plugin::serve(shotline_plugin::fake::FakeEditor))?;
         }
+        #[cfg(feature = "ui")]
+        Cmd::Background { ref film, ref id } => shotline_ui::running::work(&Plugins, film, id)?,
+        #[cfg(not(feature = "ui"))]
+        Cmd::Background { .. } => bail!("this shotline was built without the ui feature"),
     }
     Ok(())
 }

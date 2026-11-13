@@ -88,7 +88,7 @@ fn harness(dir: &Path) -> Harness<'static, App> {
     // Tall enough for a shot's takes, under its references.
     Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 1600.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app)
 }
 
@@ -300,6 +300,11 @@ fn edit_the_story_and_add_shots() {
 
 /// Plugins as the app sees them: elevenlabs has two voices and 3.5 USD left.
 struct TestHost;
+
+/// Holds the café picture back while set, to see it being made.
+static HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The same for a picture made again.
+static HOLD_AGAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What TestHost was asked to pin.
 static PINNED: std::sync::Mutex<Vec<(String, PathBuf)>> = std::sync::Mutex::new(vec![]);
@@ -726,16 +731,29 @@ impl Host for TestHost {
         if ask.frame {
             assert_eq!((ask.shot, ask.prompt.as_str()), (Some(R), "at the edge"));
             assert!(ask.outfit);
+            // The shot's own stays as it was until the frame is kept.
             let saved = Project::open(film)?.shot(R)?.frame_prompt;
-            assert_eq!(saved.as_deref(), Some("at the edge"));
-            // No pictures unless some are added.
-            assert!(ask.refs.is_empty(), "{:?}", ask.refs);
+            assert_eq!(saved, None);
+            // What the video gets, to start with.
+            let own = film.join("chapters/01-into-the-forest/shots/010/01.png");
+            assert_eq!(ask.refs, [film.join("elements/cast/paka/01.png"), own]);
             let out = film.join(".shotline").join("frame.png");
             image::RgbImage::new(8, 8).save(&out)?;
             return Ok(out);
         }
+        if ask.prompt == "ผกายืนริมป่า" {
+            while HOLD_AGAIN.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let out = film.join(".shotline").join("again.png");
+            std::fs::write(&out, "made again")?;
+            return Ok(out);
+        }
         if ask.shot.is_some() {
             assert_eq!((ask.handle.as_str(), ask.prompt.as_str()), ("", "the café"));
+            while HOLD.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             assert!(ask.refs.is_empty());
             let out = film.join(".shotline").join("cafe.png");
             image::RgbImage::new(8, 8).save(&out)?;
@@ -746,7 +764,6 @@ impl Host for TestHost {
             ("paka", "side view", "$0.04")
         );
         assert_eq!(ask.refs, [film.join(".shotline").join("dress.png")]);
-        assert!(!ask.outfit, "unticked, so the clothes can change");
         assert_eq!(
             (ask.aspect.as_deref(), ask.resolution.as_deref()),
             (Some("1:1"), Some("2K"))
@@ -898,6 +915,14 @@ fn make_an_anchor_image() {
     h.run();
     // Paka has no anchors yet, so a picture from the web goes along instead.
     h.get_by_label("None: the image comes from the words alone.");
+    assert!(
+        h.query_by_role_and_label(Role::TextInput, "Image address")
+            .is_none()
+    );
+    h.get_by_label("Add a reference…").click();
+    h.run();
+    h.get_by_label("From a web address…").click();
+    h.run();
     let url = h.get_by_role_and_label(Role::TextInput, "Image address");
     url.focus();
     url.type_text("https://example.com/dress.png");
@@ -907,16 +932,24 @@ fn make_an_anchor_image() {
         .query_all_by_label("Image 1")
         .count()
         > 0));
-    h.get_by_label("Outfit exactly as in their reference images")
-        .click();
     h.run();
+    // Nobody's clothes to keep: it's not one of the cast's anchors.
+    assert!(
+        h.query_by_label("Outfit exactly as in their reference images")
+            .is_none()
+    );
     h.get_by_label("Make…").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Make for $0.04")
         .is_some()));
     assert!(anchors(&p).is_empty());
     h.get_by_label("Make for $0.04").click();
-    assert!(wait_for(&mut h, |_| !anchors(&p).is_empty()));
+    // Shown first, used on Keep.
+    assert!(wait_for(&mut h, |h| h.query_by_label("Keep").is_some()));
+    assert!(anchors(&p).is_empty());
+    wait(&mut h, 0.3);
+    h.run_steps(4);
+    h.get_by_label("Keep").click();
     h.run();
     assert_eq!(anchors(&p).len(), 1);
     // Done with, so it closes.
@@ -991,8 +1024,8 @@ fn a_shot_s_pictures_and_a_take() {
     // A picture of the shot's own, made with a prompt.
     h.get_by_label("Make image…").click();
     h.run();
-    // The panel pushes what follows down rather than lying over it.
-    assert!(h.get_by_label("Shoot a take…").rect().top() > h.get_by_label("Make…").rect().bottom());
+    // A popup of its own, over the page.
+    h.get_by_label("New picture for 01-010");
     let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
     prompt.focus();
     prompt.type_text("the café");
@@ -1001,9 +1034,28 @@ fn a_shot_s_pictures_and_a_take() {
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Make for $0.04")
         .is_some()));
+    HOLD.store(true, std::sync::atomic::Ordering::Relaxed);
     h.get_by_label("Make for $0.04").click();
+    h.run_steps(4);
+    // Closed while it's made, it carries on, on the jobs list by Reload.
+    h.get_by_label("Close").click();
+    h.run_steps(4);
+    assert!(h.query_by_label("New picture for 01-010").is_none());
+    h.get_by_label("Jobs: 1 running").click();
+    h.run_steps(4);
+    h.get_by_label_contains("New picture for 01-010 · making · 0:")
+        .click();
+    h.run_steps(4);
+    h.get_by_label("New picture for 01-010");
+    h.get_by_label_contains("making the image");
+    h.get_by_label("Close").click();
+    HOLD.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Made out of sight, it goes in place by itself, and off the list.
     assert!(wait_for(&mut h, |_| !p.shot(R).unwrap().images.is_empty()));
     h.run();
+    assert!(h.query_by_label_contains("Jobs:").is_none());
+    let running = p.root.join(".shotline/cache/running");
+    assert_eq!(std::fs::read_dir(running).unwrap().count(), 0);
     let img = &p.shot(R).unwrap().images[0];
     assert_eq!(img.file, "chapters/01-into-the-forest/shots/010/01.png");
     h.get_by_label("Image 2");
@@ -1143,10 +1195,26 @@ fn a_shot_s_pictures_and_a_take() {
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Make for $0.04")
         .is_some()));
-    h.get_by_label("Make for $0.04").click();
-    assert!(wait_for(&mut h, |_| p.shot(R).unwrap().frame.is_some()));
+    // The popup centres again as it grows.
+    wait(&mut h, 0.3);
     h.run();
-    let frame = p.shot(R).unwrap().frame.unwrap();
+    h.get_by_label("Make for $0.04").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label("Keep").is_some()));
+    assert!(p.shot(R).unwrap().frame.is_none());
+    wait(&mut h, 0.3);
+    h.run_steps(4);
+    h.get_by_label("Keep").click();
+    h.run();
+    let s = p.shot(R).unwrap();
+    assert_eq!(s.frame_prompt.as_deref(), Some("at the edge"));
+    let frame = s.frame.unwrap();
+    // The test host makes no job, so it and the shot's picture read as files: nothing to make
+    // again from.
+    assert_eq!(h.query_all_by_label("from a file").count(), 2);
+    assert!(h.query_by_label("Remake…").is_none());
+    // With a frame, a new one is under Replace.
+    assert!(h.query_by_label("Make frame…").is_none());
+    h.get_by_label("Replace…");
     assert_eq!(frame, "chapters/01-into-the-forest/shots/010.png");
     h.get_by_label("Remove storyboard frame").click();
     h.run();
@@ -1156,6 +1224,37 @@ fn a_shot_s_pictures_and_a_take() {
     h.run();
     assert_eq!(p.shot(R).unwrap().frame.as_deref(), Some(frame.as_str()));
     assert!(p.root.join(&frame).exists());
+
+    // An anchor left out stays listed, muted, to put back.
+    h.get_by_label("Leave out Image 1").click();
+    h.run();
+    h.run();
+    assert_eq!(p.shot(R).unwrap().leave_out, ["elements/cast/paka/01.png"]);
+    h.get_by_label("Left out (1)").click();
+    h.run();
+    h.get_by_label("Put back elements/cast/paka/01.png").click();
+    h.run();
+    h.run();
+    assert!(p.shot(R).unwrap().leave_out.is_empty());
+    assert!(h.query_by_label("Left out (1)").is_none());
+}
+
+#[test]
+fn image_buttons_say_what_they_need() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let app = App::new(p, tmp.path().join("home")).silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 1800.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.step();
+    h.get_by_label_contains("01-010").click();
+    h.run();
+    // No image model: shown, but off.
+    for b in ["Make image…", "Make frame…"] {
+        assert!(h.get_by_label(b).accesskit_node().is_disabled(), "{b}");
+    }
 }
 
 #[test]
@@ -1224,6 +1323,8 @@ fn translate_only_when_it_helps() {
     typed(&mut h, " มุมข้าง");
     assert!(offered(&h));
     h.get_by_label("Translate to English first").click();
+    h.run();
+    h.key_press(egui::Key::Escape);
     h.run();
 
     // A shot's prompt too, and the take's price takes the translation in.
@@ -2270,7 +2371,7 @@ fn on_main_edit_picking(
     );
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 1600.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -4626,6 +4727,8 @@ fn made_images_stay_to_pick_again() {
         j.shot = shot;
         j.who = who.map(Into::into);
         j.brief = Some(brief.into());
+        // The shot's made as frames, the anchor not.
+        j.frame = shot.is_some();
         let mut j = p.create_job(j).unwrap();
         std::fs::write(p.job_dir(j.id).join("out.png"), brief).unwrap();
         j.outputs = vec!["out.png".into()];
@@ -4651,7 +4754,10 @@ fn made_images_stay_to_pick_again() {
         .click();
     h.run();
     h.run();
-    // Other things' too, after this shot's.
+    // Only frames, until asked for the rest.
+    assert_eq!(h.query_all_by_label_contains("paka side view").count(), 0);
+    h.get_by_label("Show all (1 more)").click();
+    h.run();
     assert_eq!(h.query_all_by_label_contains("paka side view").count(), 2);
     // Its Throw out, then the row.
     h.get_all_by_label_contains("first try")
@@ -4716,7 +4822,7 @@ fn remake_starts_from_what_a_picture_was_made_with() {
     shot.frame_prompt = Some("wide, dusk".into());
     p.save_shot(R, &shot).unwrap();
 
-    let mut app = App::new(p, tmp.path().join("home")).silent();
+    let mut app = App::new(p.clone(), tmp.path().join("home")).silent();
     app.set_plugins(
         vec![Description {
             name: "fal".into(),
@@ -4741,10 +4847,12 @@ fn remake_starts_from_what_a_picture_was_made_with() {
     h.step();
     h.get_by_label_contains("01-010").click();
     h.run();
-    // Make frame starts from the shot's frame prompt, with no pictures.
-    h.get_by_label("Make frame…").click();
+    // A new frame starts from the shot's frame prompt and what the video gets.
+    h.get_by_label("Replace…").click();
     h.run();
-    h.get_by_label("None: the image comes from the words alone.");
+    h.get_by_label("With a new one…").click();
+    h.run();
+    h.get_by_label("Make a frame for 01-010");
     let fp = h.get_by_role_and_label(Role::MultilineTextInput, "Frame prompt");
     assert_eq!(fp.value().as_deref(), Some("wide, dusk"));
     h.get_by_label("Close").click();
@@ -4767,6 +4875,59 @@ fn remake_starts_from_what_a_picture_was_made_with() {
     h.get_by_label("Image 3");
     let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
     assert_eq!(prompt.value().as_deref(), Some("ผกายืนริมป่า"));
+    h.get_by_label("Remake picture 1 of 01-010");
+
+    // Kept, it takes the old one's place and note; undo brings the old one back.
+    h.get_by_label("Make…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("Make for")
+        .is_some()));
+    h.get_by_label_contains("Make for").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label("Keep").is_some()));
+    wait(&mut h, 0.3);
+    h.run_steps(4);
+    h.get_by_label("Keep").click();
+    h.run();
+    let shot = p.shot(R).unwrap();
+    assert_eq!(shot.images.len(), 1);
+    assert_eq!(shot.images[0].note, "the forest");
+    let file = p.root.join(&shot.images[0].file);
+    assert_eq!(std::fs::read(&file).unwrap(), b"made again");
+    h.get_by_label("Undo").click();
+    h.run();
+    let shot = p.shot(R).unwrap();
+    assert_eq!(shot.images.len(), 1);
+    let file = p.root.join(&shot.images[0].file);
+    assert_eq!(std::fs::read(&file).unwrap(), b"the frame");
+
+    // Made out of sight while another picture went in before it, it still takes the place of
+    // the one it was made again for.
+    HOLD_AGAIN.store(true, std::sync::atomic::Ordering::Relaxed);
+    h.get_by_label_contains("Remake ").click();
+    h.run();
+    h.get_by_label("Make…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("Make for")
+        .is_some()));
+    h.get_by_label_contains("Make for").click();
+    h.run_steps(4);
+    h.get_by_label("Close").click();
+    h.run_steps(4);
+    let mut shot = p.shot(R).unwrap();
+    let mut before = shot.images[0].clone();
+    before.file = "refs/a.png".into();
+    before.note = "put in first".into();
+    shot.images.insert(0, before);
+    p.save_shot(R, &shot).unwrap();
+    HOLD_AGAIN.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(wait_for(&mut h, |_| {
+        let s = p.shot(R).unwrap();
+        std::fs::read(p.root.join(&s.images[1].file)).is_ok_and(|b| b == b"made again")
+    }));
+    let shot = p.shot(R).unwrap();
+    assert_eq!(shot.images.len(), 2);
+    assert_eq!(shot.images[0].file, "refs/a.png");
+    assert_eq!(shot.images[1].note, "the forest");
 }
 
 #[test]

@@ -783,10 +783,24 @@ The UI only goes through shotline-core, same as the CLI and MCP, so all three al
 in the project folder. Every paid action looks the same: "Make…" (or Shoot a take…, Record…)
 asks the price for free, then "Make for $0.04" spends it and Cancel or Esc backs out. Nothing is
 priced on its own, a price goes away when what it was for is edited, and a plugin missing a key
-says so with a Set key… button instead. The CLI refuses the job if the price has changed since. The image becomes an anchor like one added from a file, so it can be undone.
-Models that take reference images start with none, so a new look isn't pulled toward the old
-anchors; they can be added from any element, a shot's storyboard frame or own pictures, a file, or a
-web address (downloaded into `.shotline/cache/refs`). Browse existing lists them under headers
+says so with a Set key… button instead. The CLI refuses the job if the price has changed since.
+
+Images are made in a popup ("Make an image of @paka", "Make a frame for 01-010", "Remake picture
+2 of 01-010"). Once made, the image shows there with Keep and Try again; nothing changes until
+Keep, and Keep is one undo step; Discard drops it. Make starts a `shotline __run` process of its
+own (its own process group, detached on Windows), so closing the popup or the whole app doesn't
+stop it. Each run has a record in `.shotline/cache/running/<id>.json` with the popup's settings,
+which the run fills in with the image or the error, and a `<id>.beat` file it touches every 5s; a
+run with no beat for 30s is shown as stopped. While any are listed, an icon beside Reload turns
+while something is being made and has the count on a badge; its list opens a run's popup again, as
+it was. An image made with its popup closed (or the app) is put in place by itself, as one undo
+step; the popup watching one shows it with Keep, Try again and Discard instead. A remade picture goes in
+place of the file it was made again for, wherever it is by then (added as a new one if it's gone);
+a frame made out of sight isn't put in if the shot's frame changed meanwhile. A failed one stays
+on the list until its popup has said why.
+A new anchor starts with no references, so a new look isn't pulled toward the old anchors; they
+can be added from any element, a shot's storyboard frame or own pictures, a file, or a web
+address (Add a reference…, downloaded into `.shotline/cache/refs`). Browse existing lists them under headers
 like the recordings: the shot it's for first, then the elements, then images made before, then
 other shots behind Show all. The prompt names them Image 1, Image 2… in that order. Size picks the
 shape (and the resolution, for models that offer a choice) when it shouldn't be the film's: a
@@ -805,14 +819,21 @@ A shot's page lists what goes to the video model under References: the anchors o
 it names, then its own pictures (Add image… or Make image…, the same panel as for anchors), one a
 row, each with a note of what it shows here; its tooltip shows the sentence the prompt gets. Browse
 existing sends one anchor of any element (the element goes into the shot's `elements` with its
-other anchors left out), including one left out before; Remove under an element's anchor leaves it
-out of this shot only, or adds an image made before as one of the shot's pictures. Continue from
-previous shot sits under the plot, and can only be ticked once the shot before has a selected
-take; left off, the storyboard frame comes before the prompt with Browse existing, Add image…,
-Make frame… and Remove. Make frame… starts from the frame prompt, with no pictures. The
-frame and each of the shot's own pictures also have Remake…, which opens the same panel filled
-from the job that made that picture: what was typed, the pictures sent along that are still
-there, the model, and the translate tick. Nothing is spent until it's priced and made again.
+other anchors left out), including one left out before, or adds an image made before as one of the
+shot's pictures. Leave out beside an element's anchor leaves it out of this shot only; those
+are listed under Left out (n), each with Put back. The red ✕ is only for the shot's own pictures,
+which it deletes.
+The Start card, in the right column above References, holds Continue from previous shot (only
+once the shot before has a selected take) or, left off, the storyboard frame. With no frame it
+offers Browse existing, Add image… and Make frame…; with one, Replace… (a file or a new one),
+Remake… and Remove. Make frame… starts from the frame prompt and what the video gets. What's
+typed for a frame stays in the popup and becomes the shot's frame prompt on Keep.
+Remake… shows only on pictures a job here made (found by matching the file to a job's output);
+others say where they came from ("from a file", "last frame of 01-010#3"). It opens the popup
+filled from that job: what was typed, the pictures sent along that are still there, the model
+(or a note that it isn't installed and which one is used instead), and the translate tick. Kept,
+the new picture takes the old one's place, note and all. Image buttons with no image model
+installed are shown greyed out, saying so.
 
 An element's page shows its anchors as cards of one size, the picture letterboxed on black with
 a label beside it (up to 40 letters, kept in the element's `[labels]` by file name, e.g.
@@ -820,16 +841,16 @@ a label beside it (up to 40 letters, kept in the element's `[labels]` by file na
 list ("@paka 2  side view") and goes when the anchor is removed.
 
 Every image a model makes stays in its job folder, so making a frame or an anchor again doesn't
-lose the one before. Each job records what it was for (`shot`, or the element in `who`), and every
-Browse existing (frame, References, an element's anchors, the image panel) lists them, the ones
-made for what's open first, newest first, then under Takes the last frame of each take that has
+lose the one before. Each job records what it was for (`shot`, `frame = true` for a storyboard
+frame, or the element in `who`), and every Browse existing (frame, References, an element's
+anchors, the image panel) lists them, the ones made for what's open first, newest first. The
+frame's lists frames and the previous shot's last frames; References and anchors list pictures;
+the rest wait behind Show all. Under Takes is the last frame of each take that has
 been selected (taken once, when it's first selected, into its job folder as `last.png`, the file
 a shot continuing from it sends). Picking one copies it in. Remove beside one throws it
 out (its job is marked `discarded`, the file and the ledger line stay) and can be undone. Every box typed for a model (Prompt, Frame
 prompt, Make image) offers "Translate to English first" when what's in it isn't English and the
-film's translating model has its key; the price then includes the translation. Make frame… opens the image panel with the frame
-prompt, the size and the references, starting from what the video gets; it closes once the
-picture is made, or with its ✕. Lines start with Add line; a line is its start (dragged like the
+film's translating model has its key; the price then includes the translation. Lines start with Add line; a line is its start (dragged like the
 length, or left as "after" to follow the line before), who says it, and its words with Record…,
 which prices first. Once recorded, the words give way to a dropdown of everything that speaker
 has recorded: this shot's first, other shots behind Show all, under chapter and shot headers

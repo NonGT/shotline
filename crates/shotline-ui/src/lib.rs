@@ -18,6 +18,7 @@ mod pieces;
 mod player;
 mod prefs;
 mod price;
+pub mod running;
 mod shoot;
 mod sounds;
 mod start;
@@ -38,7 +39,7 @@ use shotline_core::{
 };
 use shotline_media::Ffmpeg;
 
-use edit::{Action, ElementForm, Form, History, NewElement, Texts};
+use edit::{Action, ElementForm, Field, Form, History, NewElement, Texts};
 use git::{Dialog, Repo};
 use player::{Audio, Deck, Player};
 pub use start::{MenuCommand, Shell};
@@ -211,6 +212,11 @@ pub trait Host: Send + Sync {
     ) -> anyhow::Result<Vec<shotline_core::ledger::reconcile::Check>>;
     /// Spends, if the price is still `at`, and returns the image, not yet an anchor.
     fn make_anchor(&self, film: &Path, ask: &AnchorAsk, at: &str) -> anyhow::Result<PathBuf>;
+    /// Starts making run `id` of `running` in a process that outlives the app; false to have
+    /// it made on a thread of the app instead.
+    fn start_run(&self, _film: &Path, _id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
     /// What recording line `line` (from 0) on its own would cost. Free.
     fn say_quote(&self, film: &Path, shot: ShotRef, line: usize) -> anyhow::Result<String>;
     /// Records the line, if the price is still `at`, and picks it for the shot's takes.
@@ -302,7 +308,7 @@ pub enum Runs {
 }
 
 /// A new image made by an image model: an element's anchor, or a picture for a shot.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AnchorAsk {
     pub handle: String,
     /// Set for a shot's picture; `handle` is empty then.
@@ -422,6 +428,8 @@ pub struct App {
     status: Option<(String, bool)>,
     /// The job that made the zoomed picture, once Details is asked for.
     zoom_details: Option<(PathBuf, Option<shotline_core::Job>)>,
+    /// Where pictures came from, worked out once per load: it reads every image job.
+    origins: HashMap<PathBuf, Origin>,
     /// How far the zoomed picture is pinched in, and the middle of what shows, 0-1 across it.
     zoom_view: (f32, egui::Pos2),
     /// Jobs found holding money with nothing running them when the film was opened.
@@ -449,6 +457,9 @@ pub struct App {
     /// Keys each plugin needs that aren't set, by plugin, worked out off the UI thread.
     missing_keys: Arc<Mutex<HashMap<String, Vec<String>>>>,
     maker: Option<anchor::Maker>,
+    /// Images being made, or made and waiting to be kept, as the film's cache has them.
+    runs: Vec<(running::Run, running::State)>,
+    runs_read: Option<std::time::Instant>,
     /// The open shot as it would be sent; None once anything is read again.
     built: Option<(ShotRef, Result<shotline_core::Built, String>)>,
     /// What the shot was when its take was priced.
@@ -702,6 +713,41 @@ impl Thumbs {
     }
 
     /// A thumbnail; clicking it asks for the picture full size.
+    /// The picture whole and centred on a dark stage as wide as there's room for.
+    pub(crate) fn stage(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &Path,
+        height: f32,
+        name: &str,
+    ) -> bool {
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
+        ui.painter().rect_filled(rect, 6.0, theme::STAGE);
+        let Some(t) = self.texture(ui, path, BIG, name) else {
+            ui.put(
+                rect,
+                egui::Label::new(RichText::new(format!("can't show {name}")).weak()),
+            );
+            return false;
+        };
+        let size = t.size_vec2();
+        let fit = (rect.width() / size.x).min(rect.height() / size.y);
+        let shown = egui::Rect::from_center_size(rect.center(), size * fit);
+        ui.put(
+            shown,
+            egui::Image::new(&t)
+                .fit_to_exact_size(shown.size())
+                .alt_text(name)
+                .sense(egui::Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::ZoomIn)
+        .on_hover_text("click to see it bigger")
+        .clicked()
+    }
+
     fn show(&mut self, ui: &mut egui::Ui, path: &Path, height: f32, name: &str) -> bool {
         match self.texture(ui, path, THUMB, name) {
             Some(t) => ui
@@ -789,6 +835,7 @@ impl App {
             picks: Default::default(),
             status: None,
             zoom_details: None,
+            origins: HashMap::new(),
             zoom_view: FIT,
             stuck: vec![],
             thumbs: Thumbs::default(),
@@ -807,6 +854,8 @@ impl App {
             wants_keys: None,
             missing_keys: Arc::default(),
             maker: None,
+            runs: vec![],
+            runs_read: None,
             built: None,
             shoot_for: None,
             translate_prompt: false,
@@ -905,32 +954,191 @@ impl App {
         Some(format!("{plugin} needs {}", keys.join(", ")))
     }
 
-    /// A paid-for image is kept whichever element is showing now.
-    fn add_made_anchor(&mut self) {
-        let Some(m) = &mut self.maker else { return };
-        let Some(out) = m.take_made() else { return };
-        let act = match &m.target {
-            anchor::For::Element(h) => self
-                .project
-                .element(h)
-                .map(|el| Action::AddAnchor(el, out.clone())),
-            anchor::For::Shot(r) => self
-                .project
-                .shot(*r)
-                .map(|_| Action::AddShotImage(*r, out.clone())),
-            anchor::For::Frame(r) => self
-                .project
-                .shot(*r)
-                .map(|_| Action::SetFrame(*r, Some(out.clone()))),
-        };
-        match act {
-            Ok(a) => {
-                self.maker = None;
-                self.flush();
-                self.apply(vec![a]);
-            }
-            Err(e) => self.status = Some((format!("made {}, but {e}", out.display()), true)),
+    /// Reads the jobs list again now and then, and brings the popup up to date with its run.
+    fn follow_runs(&mut self, ctx: &egui::Context) {
+        let bound = self.maker.as_ref().is_some_and(|m| m.run.is_some());
+        let every = std::time::Duration::from_secs(1);
+        if bound || self.runs_read.is_none_or(|t| t.elapsed() >= every) {
+            self.runs = running::list(&self.project.root);
+            self.runs_read = Some(std::time::Instant::now());
         }
+        if self.runs.iter().any(|(_, s)| *s == running::State::Running) {
+            ctx.request_repaint_after(every);
+        }
+        // Made out of sight: used as soon as it's there. The popup watching one asks first.
+        let watched = self.maker.as_ref().and_then(|m| m.run.clone());
+        let made: Vec<(running::Run, PathBuf)> = self
+            .runs
+            .iter()
+            .filter(|(r, _)| Some(&r.id) != watched.as_ref())
+            .filter_map(|(r, s)| match s {
+                running::State::Made(out) => Some((r.clone(), out.clone())),
+                _ => None,
+            })
+            .collect();
+        for (run, out) in made {
+            self.flush();
+            self.status = Some((format!("{}: made and put in place", run.title), false));
+            self.keep(&run.target, out, &run.ask.prompt, true);
+            self.drop_run(&run.id);
+        }
+        let Some(m) = &mut self.maker else { return };
+        let Some(id) = m.run.clone() else { return };
+        let s = self
+            .runs
+            .iter()
+            .find(|(r, _)| r.id == id)
+            .map(|(_, s)| s.clone());
+        // Said in the popup now, so there's nothing to come back to it for.
+        if matches!(s, Some(running::State::Failed(_) | running::State::Stopped)) {
+            running::remove(&self.project.root, &id);
+            self.runs.retain(|(r, _)| r.id != id);
+        }
+        m.follow(s.as_ref());
+    }
+
+    /// Takes a run off the jobs list.
+    fn drop_run(&mut self, id: &str) {
+        running::remove(&self.project.root, id);
+        self.runs.retain(|(r, _)| r.id != id);
+    }
+
+    /// The popup a run was made from, as it was, following the run.
+    pub(crate) fn open_run(&mut self, id: &str) {
+        let Some((run, _)) = self.runs.iter().find(|(r, _)| r.id == id).cloned() else {
+            return;
+        };
+        let from = (run.ask.plugin.as_str(), run.ask.model.as_str());
+        let defaults = (run.aspect.clone(), run.resolution.clone());
+        let refs = run.ask.refs.clone();
+        let m = self.open_maker(
+            run.target.clone(),
+            run.title.clone(),
+            refs,
+            Some(from),
+            defaults,
+        );
+        m.restore(&run.ask);
+        m.run = Some(run.id.clone());
+    }
+
+    /// Makes the image in the background, from the popup's settings.
+    fn start_run(&mut self, host: Arc<dyn Host>, ask: AnchorAsk, cost: String) {
+        let root = self.project.root.clone();
+        let Some(m) = self.maker.as_mut() else { return };
+        if let Some(old) = m.run.take() {
+            running::remove(&root, &old);
+        }
+        let mut run = running::Run {
+            id: String::new(),
+            title: m.title.clone(),
+            started: jiff::Timestamp::now(),
+            target: m.target.clone(),
+            ask,
+            cost,
+            aspect: m.defaults.0.clone(),
+            resolution: m.defaults.1.clone(),
+            out: None,
+            error: None,
+        };
+        match running::create(&root, &mut run) {
+            Ok(()) => {
+                m.making(run.id.clone());
+                running::start(host, &root, &run.id);
+                self.runs = running::list(&root);
+                self.runs_read = Some(std::time::Instant::now());
+            }
+            Err(e) => self.error(format!("couldn't start making it: {e:#}")),
+        }
+    }
+
+    /// Puts the image the popup is showing to use.
+    fn keep_made(&mut self) {
+        let Some(m) = &mut self.maker else { return };
+        let Some((out, prompt)) = m.take_made() else {
+            return;
+        };
+        let (target, run) = (m.target.clone(), m.run.clone());
+        self.maker = None;
+        self.flush();
+        self.keep(&target, out, &prompt, false);
+        if let Some(id) = run {
+            self.drop_run(&id);
+        }
+    }
+
+    /// Puts an image made to use, in place of what it was made again for, as one undo step.
+    /// `prompt` is what was typed for it; `unseen` when nobody looked at it before it went in.
+    fn keep(&mut self, target: &anchor::For, out: PathBuf, prompt: &str, unseen: bool) {
+        let p = &self.project;
+        let root = p.root.clone();
+        let mut note = None;
+        let acts = match target {
+            anchor::For::Element(h) => p
+                .element(h)
+                .map(|el| vec![Action::AddAnchor(el, out.clone())]),
+            anchor::For::Shot(r) => p
+                .shot(*r)
+                .map(|_| vec![Action::AddShotImage(*r, out.clone())]),
+            anchor::For::Picture(r, f) => p.shot(*r).map(|s| {
+                match s.images.iter().position(|i| root.join(&i.file) == *f) {
+                    Some(i) => vec![Action::ReplaceShotImage(*r, i, out.clone())],
+                    None => {
+                        note = Some(format!(
+                            "the picture of {r} it was made again for is gone, so it's added as \
+                             a new one"
+                        ));
+                        vec![Action::AddShotImage(*r, out.clone())]
+                    }
+                }
+            }),
+            anchor::For::Frame(r, was) => p.shot(*r).map(|s| {
+                let now = s.frame.as_ref().map(|f| root.join(f));
+                if unseen && now != *was {
+                    note = Some(format!(
+                        "{r}'s frame was changed while the new one was made, so it was left \
+                         as it is; the new one is under Browse existing frames"
+                    ));
+                    return vec![];
+                }
+                let mut acts = vec![Action::SetFrame(*r, Some(out.clone()))];
+                if s.frame_prompt.as_deref().unwrap_or_default() != prompt {
+                    acts.push(Action::Set(*r, Field::FramePrompt(prompt.to_string())));
+                }
+                acts
+            }),
+        };
+        match acts {
+            Ok(acts) if acts.is_empty() => {}
+            Ok(acts) => self.apply(acts),
+            Err(e) => self.error(format!("made {}, but {e}", self.project.rel(&out))),
+        }
+        if let Some(n) = note {
+            self.error(n);
+        }
+    }
+
+    /// Opens the Make image popup. `from` is the model to start on, else the film's.
+    pub(crate) fn open_maker(
+        &mut self,
+        target: anchor::For,
+        title: String,
+        refs: Vec<PathBuf>,
+        from: Option<(&str, &str)>,
+        defaults: (String, Option<String>),
+    ) -> &mut anchor::Maker {
+        let models = self.image_models();
+        let cfg = &self.project.config.image;
+        let from = from.unwrap_or((&cfg.plugin, &cfg.model));
+        let mut m = anchor::Maker::new(target, title, refs, &models, from, defaults);
+        m.cast = self
+            .film
+            .elements
+            .iter()
+            .filter(|(e, _)| e.kind == Kind::Cast)
+            .flat_map(|(_, a)| a.iter().cloned())
+            .collect();
+        self.maker.insert(m)
     }
 
     fn image_models(&self) -> Vec<anchor::ImageModel> {
@@ -952,42 +1160,55 @@ impl App {
             .collect()
     }
 
-    /// The Make image panel, open for whatever it's making.
-    fn show_maker(&mut self, ui: &mut egui::Ui, models: &[anchor::ImageModel]) {
+    /// The Make image popup, while it's open.
+    fn maker_popup(&mut self, ctx: &egui::Context) {
+        if self.maker.is_none() {
+            return;
+        }
+        let models = self.image_models();
         let pool = self.anchor_pool();
         let translator = self.translator();
         let missing = self.missing_keys.lock().unwrap().clone();
         self.maker.as_mut().unwrap().missing = missing;
-        let wants = self.maker.as_mut().unwrap().show(
-            ui,
-            models,
-            &pool,
-            &mut self.thumbs,
-            self.host.clone(),
-            &self.project.root,
-            translator,
-        );
+        let wide = (ctx.content_rect().width() * 0.6).clamp(480.0, 640.0);
+        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let modal = modal(ctx, "make image", |ui| {
+            ui.set_width(wide);
+            self.maker.as_mut().unwrap().show(
+                ui,
+                &models,
+                &pool,
+                &mut self.thumbs,
+                self.host.clone(),
+                &self.project.root,
+                translator,
+                esc,
+            )
+        });
         let host = self.host.clone();
-        // A frame is made from the shot's frame prompt, so what's typed is saved first.
-        if let anchor::Wants::Price(ask) | anchor::Wants::Make(ask, _) = &wants
-            && ask.frame
-            && ask.shot == self.form.shot
-        {
-            self.form.frame_prompt = ask.prompt.clone();
-        }
-        match (wants, host) {
+        match (modal.inner, host) {
             (anchor::Wants::Price(ask), Some(host)) => {
                 self.flush();
                 let m = self.maker.as_ref().unwrap();
-                m.price(ui.ctx(), host, &self.project.root, ask);
+                m.price(ctx, host, &self.project.root, ask);
             }
             (anchor::Wants::Make(ask, cost), Some(host)) => {
                 self.flush();
-                let m = self.maker.as_ref().unwrap();
-                m.make(ui.ctx(), host, &self.project.root, ask, cost);
+                self.start_run(host, ask, cost);
             }
             (anchor::Wants::Zoom(p), _) => self.zoom = Some(p),
-            (anchor::Wants::Close, _) => self.maker = None,
+            (anchor::Wants::Close | anchor::Wants::Hide, _) => self.maker = None,
+            (anchor::Wants::Keep, _) => self.keep_made(),
+            (anchor::Wants::Again, _) => {
+                if let Some(id) = self.maker.as_mut().unwrap().run.take() {
+                    self.drop_run(&id);
+                }
+            }
+            (anchor::Wants::Discard, _) => {
+                if let Some(id) = self.maker.take().and_then(|m| m.run) {
+                    self.drop_run(&id);
+                }
+            }
             (anchor::Wants::Keys(plugin), _) => self.wants_keys = Some(plugin),
             _ => {}
         }
@@ -1008,18 +1229,32 @@ impl App {
             ));
             return;
         };
-        let models = self.image_models();
         let refs = job
             .inputs
             .iter()
             .map(|i| self.project.root.join(i))
             .filter(|p| p.is_file())
             .collect();
-        self.maker = Some(
-            anchor::Maker::new(target, refs, &models, (&job.plugin, &job.model), defaults)
-                .with_prompt(job.brief.as_deref().unwrap_or_default())
-                .translating(job.english.is_some()),
-        );
+        let title = match &target {
+            anchor::For::Element(h) => format!("Remake an image of @{h}"),
+            anchor::For::Shot(r) => format!("New picture for {r}"),
+            anchor::For::Picture(r, f) => {
+                let n = self.project.shot(*r).ok().and_then(|s| {
+                    s.images
+                        .iter()
+                        .position(|i| self.project.root.join(&i.file) == *f)
+                });
+                match n {
+                    Some(i) => format!("Remake picture {} of {r}", i + 1),
+                    None => format!("Remake a picture of {r}"),
+                }
+            }
+            anchor::For::Frame(r, _) => format!("Remake the frame of {r}"),
+        };
+        let from = (job.plugin.as_str(), job.model.as_str());
+        let m = self.open_maker(target, title, refs, Some(from), defaults);
+        m.set_prompt(job.brief.as_deref().unwrap_or_default());
+        m.set_translate(job.english.is_some());
     }
 
     /// A shot's picture's shape and resolution, unless picked: the shot's model's, else the film's.
@@ -1033,13 +1268,117 @@ impl App {
         (aspect, film.image.resolution.clone())
     }
 
-    /// What an image is being made or priced for, e.g. "@paka" or "01-010".
-    fn making_for(&self) -> Option<String> {
-        let m = self.maker.as_ref().filter(|m| m.busy())?;
-        Some(match &m.target {
-            anchor::For::Element(h) => format!("@{h}"),
-            anchor::For::Shot(r) | anchor::For::Frame(r) => r.to_string(),
-        })
+    /// Beside Reload while anything is on the jobs list: a ring that turns while something is
+    /// being made, how many on a badge, and the list to open one from.
+    fn jobs_button(&mut self, ui: &mut egui::Ui) {
+        if self.runs.is_empty() {
+            return;
+        }
+        let going = self
+            .runs
+            .iter()
+            .filter(|(_, s)| *s == running::State::Running)
+            .count();
+        let failed = self.runs.len() - going;
+        let mut said = vec![];
+        if going > 0 {
+            said.push(format!("{going} running"));
+        }
+        if failed > 0 {
+            said.push(format!("{failed} failed"));
+        }
+        let label = format!("Jobs: {}", said.join(", "));
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::click());
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+        let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&r));
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter();
+            if r.hovered() || open {
+                p.rect_filled(rect, 6.0, theme::RAISED);
+            }
+            let (c, radius) = (rect.center(), 8.0);
+            let accent = if failed > 0 && going == 0 {
+                theme::FLAG
+            } else {
+                theme::TUNGSTEN
+            };
+            p.circle_stroke(c, radius, egui::Stroke::new(2.0, theme::LINE));
+            if going > 0 {
+                let t = ui.input(|i| i.time) as f32;
+                let start = t * 5.0;
+                let pts: Vec<egui::Pos2> = (0..=16)
+                    .map(|i| {
+                        let a = start + i as f32 / 16.0 * std::f32::consts::PI * 1.2;
+                        c + radius * egui::vec2(a.cos(), a.sin())
+                    })
+                    .collect();
+                p.add(egui::Shape::line(pts, egui::Stroke::new(2.0, accent)));
+                ui.ctx().request_repaint();
+            } else {
+                p.circle_stroke(c, radius, egui::Stroke::new(2.0, accent));
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    "!",
+                    egui::FontId::proportional(11.0),
+                    accent,
+                );
+            }
+            let n = self.runs.len().to_string();
+            let font = egui::FontId::new(10.0, egui::FontFamily::Name(theme::SEMIBOLD.into()));
+            let text = p.layout_no_wrap(n, font, theme::RACK);
+            let w = (text.size().x + 8.0).max(16.0);
+            let badge = egui::Rect::from_center_size(
+                rect.right_top() + egui::vec2(-7.0, 7.0),
+                egui::vec2(w, 16.0),
+            );
+            p.rect(
+                badge,
+                8.0,
+                accent,
+                egui::Stroke::new(2.0, theme::RACK),
+                egui::StrokeKind::Outside,
+            );
+            p.galley(badge.center() - text.size() / 2.0, text, theme::RACK);
+        }
+        let r = r.on_hover_text("images being made; they carry on with the app closed");
+        let now = jiff::Timestamp::now();
+        let mut pick = None;
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_width(320.0);
+            ui.label(RichText::new("Jobs").small().color(theme::DUST));
+            ui.add_space(4.0);
+            for (run, s) in &self.runs {
+                let how = match s {
+                    running::State::Running => {
+                        let secs = now.duration_since(run.started).as_secs().max(0);
+                        format!("making · {}:{:02}", secs / 60, secs % 60)
+                    }
+                    running::State::Made(_) => "made".into(),
+                    running::State::Failed(e) => format!("failed · {}", short(e, 60)),
+                    running::State::Stopped => "stopped before it was done".into(),
+                };
+                if job_row(ui, &run.title, &how, s).clicked() {
+                    pick = Some(run.id.clone());
+                    ui.close();
+                }
+            }
+        });
+        if let Some(id) = pick {
+            self.open_run(&id);
+        }
+    }
+
+    /// A Make… button for images: off while another is being made, or with no image model.
+    /// True when clicked.
+    pub(crate) fn make_button(&self, ui: &mut egui::Ui, text: &str) -> bool {
+        let none = self.image_models().is_empty();
+        ui.add_enabled(!none, egui::Button::new(text))
+            .on_disabled_hover_text(
+                "needs an image model; install an image plugin, e.g. fal or venice, in \
+                 Preferences",
+            )
+            .clicked()
     }
 
     /// The film's translating model as "plugin · model", when it's installed and its keys are
@@ -1078,10 +1417,7 @@ impl App {
     /// What the image panel can send along: the elements' anchors, and the pictures made for
     /// shots, the panel's own shot's first.
     fn anchor_pool(&self) -> Vec<anchor::Pooled> {
-        let here = self.maker.as_ref().and_then(|m| match m.target {
-            anchor::For::Shot(r) | anchor::For::Frame(r) => Some(r),
-            anchor::For::Element(_) => None,
-        });
+        let here = self.maker.as_ref().and_then(|m| m.target.shot());
         let names = self.shot_names();
         let mut shots = vec![];
         for (_, list) in &self.film.chapters {
@@ -1249,11 +1585,33 @@ impl App {
     fn reload(&mut self) {
         self.thumbs.forget_changed();
         self.built = None;
+        self.origins.clear();
+        self.runs_read = None;
         self.refresh_repo();
         if let Err(e) = self.load() {
             self.error(e.to_string());
         }
         self.fill_form();
+    }
+
+    /// Where a picture of the film came from: Remake is only for those made here.
+    pub(crate) fn origin(&mut self, path: &Path) -> Origin {
+        if let Some(o) = self.origins.get(path) {
+            return o.clone();
+        }
+        let same = |a: &Path, b: &Path| {
+            let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).ok();
+            len(a).is_some() && len(a) == len(b) && std::fs::read(a).ok() == std::fs::read(b).ok()
+        };
+        let o = if self.project.job_that_made(path).ok().flatten().is_some() {
+            Origin::Made
+        } else if let Some((t, _)) = self.film.last_frames.iter().find(|(_, f)| same(f, path)) {
+            Origin::LastFrame(t.to_string())
+        } else {
+            Origin::File
+        };
+        self.origins.insert(path.to_path_buf(), o.clone());
+        o
     }
 
     /// The open shot as last read from disk.
@@ -1425,11 +1783,12 @@ impl App {
             self.themed = true;
             theme::apply(ui.ctx());
         }
-        self.add_made_anchor();
+        self.follow_runs(ui.ctx());
         self.shoot_finished();
         self.said();
         self.follow_cut(ui.ctx());
         self.sounds_window(ui.ctx());
+        self.maker_popup(ui.ctx());
         let tab = self.tab;
         egui::Panel::top("bar")
             .frame(
@@ -1462,6 +1821,7 @@ impl App {
                             self.status = None;
                             self.reload();
                         }
+                        self.jobs_button(ui);
                     });
                 });
             });
@@ -1869,9 +2229,6 @@ impl App {
             if let Some(a) = remove {
                 acts.push(Action::RemoveAnchor(el.clone(), a));
             }
-            let models = self.image_models();
-            let me = anchor::For::Element(el.handle.clone());
-            let making = self.maker.as_ref().is_some_and(|m| m.target == me);
             let rows = self.made_rows(&browse::Near::Element(el.handle.clone()));
             ui.horizontal(|ui| {
                 match browse::dropdown(
@@ -1893,35 +2250,18 @@ impl App {
                 {
                     acts.push(Action::AddAnchor(el.clone(), file));
                 }
-                let busy = self.making_for();
-                if !models.is_empty()
-                    && !making
-                    && ui
-                        .add_enabled(busy.is_none(), egui::Button::new("Make image…"))
-                        .on_disabled_hover_text(format!(
-                            "still making one for {}",
-                            busy.unwrap_or_default()
-                        ))
-                        .clicked()
-                {
+                if self.make_button(ui, "Make image…") {
                     let film = &self.project.config;
                     let cfg = &film.image;
-                    self.maker = Some(anchor::Maker::new(
-                        me.clone(),
-                        vec![],
-                        &models,
-                        (&cfg.plugin, &cfg.model),
-                        (
-                            cfg.aspect.clone().unwrap_or_else(|| film.aspect.clone()),
-                            cfg.resolution.clone(),
-                        ),
-                    ));
+                    let defaults = (
+                        cfg.aspect.clone().unwrap_or_else(|| film.aspect.clone()),
+                        cfg.resolution.clone(),
+                    );
+                    let me = anchor::For::Element(el.handle.clone());
+                    let title = format!("Make an image of @{}", el.handle);
+                    self.open_maker(me, title, vec![], None, defaults);
                 }
             });
-            if making {
-                ui.add_space(6.0);
-                self.show_maker(ui, &models);
-            }
             if el.kind == Kind::Cast {
                 ui.add_space(20.0);
                 self.voice(ui, el);
@@ -2246,6 +2586,10 @@ impl App {
                 ui.set_width(side);
                 self.facts(ui, s);
                 ui.add_space(20.0);
+                section(ui, "Start");
+                ui.add_space(6.0);
+                self.start(ui, r, s);
+                ui.add_space(20.0);
                 self.references(ui, r, s, &mut acts);
             });
         });
@@ -2297,8 +2641,6 @@ impl App {
             &mut f.plot,
             "What happens in the shot, in any language",
         );
-        ui.add_space(14.0);
-        self.start(ui, r, s);
         ui.add_space(14.0);
         let f = &mut self.form;
         explained_field(
@@ -2575,17 +2917,21 @@ impl App {
         );
         ui.add_space(8.0);
         let mut acts = vec![];
+        let mut made = false;
         if let Some(f) = &s.frame {
             let path = self.project.root.join(f);
             if self.thumbs.show(ui, &path, 150.0, f) {
-                self.zoom = Some(path);
+                self.zoom = Some(path.clone());
             }
+            let origin = self.origin(&path);
+            made = origin == Origin::Made;
+            if let Some(tag) = origin.tag() {
+                ui.label(RichText::new(tag).small().color(theme::DUST));
+            }
+            ui.add_space(4.0);
         }
-        let models = self.image_models();
-        let me = anchor::For::Frame(r);
-        let making = self.maker.as_ref().is_some_and(|m| m.target == me);
-        let rows = self.made_rows(&browse::Near::Shot(r));
-        let mut remake = None;
+        let rows = self.made_rows(&browse::Near::Frame(r));
+        let (mut make, mut remake) = (false, false);
         ui.horizontal_wrapped(|ui| {
             match browse::dropdown(
                 ui,
@@ -2593,75 +2939,72 @@ impl App {
                 ("frame", r.to_string()),
                 &rows,
                 &mut self.thumbs,
-                "an image made before, for this shot or another",
+                "a frame made before, or the last frame of a take",
             ) {
                 Some(browse::Browsed::Pick(f)) => acts.push(Action::SetFrame(r, Some(f))),
                 Some(browse::Browsed::Forget(id)) => acts.push(Action::ForgetImage(id)),
                 None => {}
             }
-            if ui.button("Add image…").clicked()
-                && let Some(file) = rfd::FileDialog::new()
+            let file = || {
+                rfd::FileDialog::new()
                     .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
                     .pick_file()
-            {
-                acts.push(Action::SetFrame(r, Some(file)));
-            }
-            let busy = self.making_for();
-            if !models.is_empty()
-                && !making
-                && ui
-                    .add_enabled(busy.is_none(), egui::Button::new("Make frame…"))
-                    .on_disabled_hover_text(format!(
-                        "still making one for {}",
-                        busy.clone().unwrap_or_default()
-                    ))
-                    .clicked()
-            {
-                // The frame prompt and no pictures; Remake starts from the frame there.
-                let prompt = self.form.frame_prompt.clone();
-                let cfg = &self.project.config.image;
-                let aspect = s
-                    .model
-                    .as_ref()
-                    .and_then(|m| m.aspect.clone())
-                    .unwrap_or_else(|| self.project.config.aspect.clone());
-                self.maker = Some(
-                    anchor::Maker::new(
-                        me.clone(),
-                        vec![],
-                        &models,
-                        (&cfg.plugin, &cfg.model),
-                        (aspect, cfg.resolution.clone()),
-                    )
-                    .with_prompt(&prompt),
-                );
-            }
-            if let Some(f) = &s.frame {
-                if !models.is_empty()
-                    && !making
-                    && ui
-                        .add_enabled(busy.is_none(), egui::Button::new("Remake…"))
-                        .on_hover_text("make it again from what it was made with, to change first")
-                        .clicked()
+            };
+            if s.frame.is_none() {
+                if ui.button("Add image…").clicked()
+                    && let Some(f) = file()
                 {
-                    remake = Some(self.project.root.join(f));
+                    acts.push(Action::SetFrame(r, Some(f)));
                 }
-                let rm = remove_button(ui);
-                rm.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::Role::Button, true, "Remove storyboard frame")
-                });
-                if rm.clicked() {
-                    acts.push(Action::SetFrame(r, None));
+                make = self.make_button(ui, "Make frame…");
+                return;
+            }
+            let mut from_file = false;
+            ui.menu_button("Replace…", |ui| {
+                if ui.button("With a file…").clicked() {
+                    from_file = true;
+                    ui.close();
                 }
+                if self.make_button(ui, "With a new one…") {
+                    make = true;
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text("another frame in its place; undo brings this one back");
+            if from_file && let Some(f) = file() {
+                acts.push(Action::SetFrame(r, Some(f)));
+            }
+            if made {
+                remake = self.make_button(ui, "Remake…");
+            }
+            let rm = remove_button(ui)
+                .on_hover_text("no storyboard frame; the video starts as it likes");
+            rm.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, "Remove storyboard frame")
+            });
+            if rm.clicked() {
+                acts.push(Action::SetFrame(r, None));
             }
         });
-        if let Some(f) = remake {
-            let defaults = self.image_defaults(s);
-            self.remake(me, &f, defaults);
-        }
-        if making {
-            ui.add_space(6.0);
-            self.show_maker(ui, &models);
+        let defaults = self.image_defaults(s);
+        if remake && let Some(f) = &s.frame {
+            let f = self.project.root.join(f);
+            self.remake(anchor::For::Frame(r, Some(f.clone())), &f, defaults);
+        } else if make {
+            // What the video gets, but not the frame itself.
+            let frame = s.frame.as_ref().map(|f| self.project.root.join(f));
+            let refs = self
+                .built(r)
+                .map(|b| b.references)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|x| self.project.root.join(&x.path))
+                .filter(|p| p.is_file() && Some(p) != frame.as_ref())
+                .collect();
+            let title = format!("Make a frame for {r}");
+            let m = self.open_maker(anchor::For::Frame(r, frame), title, refs, None, defaults);
+            m.set_prompt(s.frame_prompt.as_deref().unwrap_or_default());
         }
         if !acts.is_empty() {
             self.flush();
@@ -3792,6 +4135,58 @@ fn copy_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
     p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
 }
 
+/// One job in the jobs list: what for on top, how it's going under it.
+fn job_row(ui: &mut egui::Ui, title: &str, how: &str, s: &running::State) -> egui::Response {
+    let failed = matches!(s, running::State::Failed(_) | running::State::Stopped);
+    let (rect, r) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::click());
+    r.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{title} · {how}"))
+    });
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if r.hovered() {
+            p.rect_filled(rect, 6.0, theme::RAISED);
+        }
+        let dot = egui::pos2(rect.left() + 14.0, rect.center().y);
+        if failed {
+            p.circle_filled(dot, 4.0, theme::FLAG);
+        } else if *s != running::State::Running {
+            p.circle_filled(dot, 4.0, theme::TUNGSTEN);
+        } else {
+            let t = ui.input(|i| i.time) as f32 * 5.0;
+            let pts: Vec<egui::Pos2> = (0..=10)
+                .map(|i| {
+                    let a = t + i as f32 / 10.0 * std::f32::consts::PI * 1.2;
+                    dot + 5.0 * egui::vec2(a.cos(), a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(
+                pts,
+                egui::Stroke::new(1.5, theme::TUNGSTEN),
+            ));
+            ui.ctx().request_repaint();
+        }
+        let x = rect.left() + 30.0;
+        let w = rect.right() - x - 8.0;
+        let top = p.layout(
+            title.to_string(),
+            egui::FontId::proportional(13.0),
+            theme::PAPER,
+            w,
+        );
+        let under = p.layout(
+            how.to_string(),
+            egui::FontId::proportional(11.0),
+            if failed { theme::FLAG } else { theme::DUST },
+            w,
+        );
+        p.galley(egui::pos2(x, rect.top() + 6.0), top, theme::PAPER);
+        p.galley(egui::pos2(x, rect.top() + 25.0), under, theme::DUST);
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// The title of a part of a page, like Takes.
 fn section(ui: &mut egui::Ui, text: &str) {
     ui.label(
@@ -4179,6 +4574,27 @@ pub fn run(
         }),
     )
     .map_err(|e| anyhow::anyhow!("can't open the window: {e}"))
+}
+
+/// Where a picture came from.
+#[derive(Clone, PartialEq)]
+pub(crate) enum Origin {
+    /// An image job here made it, so it can be made again.
+    Made,
+    /// A take's last frame, e.g. "01-010#3".
+    LastFrame(String),
+    File,
+}
+
+impl Origin {
+    /// Said under the picture when it can't be made again.
+    pub(crate) fn tag(&self) -> Option<String> {
+        match self {
+            Origin::Made => None,
+            Origin::LastFrame(t) => Some(format!("last frame of {t}")),
+            Origin::File => Some("from a file".into()),
+        }
+    }
 }
 
 /// Videos in `dir`, newest first.

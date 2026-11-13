@@ -725,18 +725,38 @@ pub fn spend_once(
     brief: Option<shotline_engine::Brief>,
     go: Go,
 ) -> Result<Option<Job>> {
-    spend(p, plugin_name, req, (shot, None), what, brief, None, go)
+    spend(
+        p,
+        plugin_name,
+        req,
+        For {
+            shot,
+            ..For::default()
+        },
+        what,
+        brief,
+        go,
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a paid job is for, as its job.toml records it.
+#[derive(Default, Clone, Copy)]
+pub struct For<'a> {
+    pub shot: Option<ShotRef>,
+    pub bridge: Option<shotline_core::Ulid>,
+    /// Who speaks it, or whose anchor it is.
+    pub who: Option<&'a str>,
+    /// A shot's storyboard frame rather than a picture it sends along.
+    pub frame: bool,
+}
+
 pub fn spend(
     p: &Project,
     plugin_name: &str,
     req: &Request,
-    (shot, bridge): (Option<ShotRef>, Option<shotline_core::Ulid>),
+    to: For,
     what: &str,
     brief: Option<shotline_engine::Brief>,
-    who: Option<&str>,
     go: Go,
 ) -> Result<Option<Job>> {
     // rt bound first so it drops last, after the plugins.
@@ -772,10 +792,11 @@ pub fn spend(
             shotline_engine::Once {
                 request: req,
                 quote: &quote,
-                shot,
-                bridge,
+                shot: to.shot,
+                bridge: to.bridge,
                 brief,
-                who,
+                who: to.who,
+                frame: to.frame,
             },
             &opts,
             printer(name.clone()),
@@ -837,7 +858,19 @@ pub fn effect(
 ) -> Result<Option<Job>> {
     let req = effect_request(model, text, length)?;
     let what = format!("sound for {}", over(r));
-    let Some(job) = spend(p, plugin, &req, (r, None), &what, None, None, go)? else {
+    let Some(job) = spend(
+        p,
+        plugin,
+        &req,
+        For {
+            shot: r,
+            ..For::default()
+        },
+        &what,
+        None,
+        go,
+    )?
+    else {
         return Ok(None);
     };
     if job.status != JobStatus::Done {
@@ -894,7 +927,20 @@ pub fn speech(
     let (plugin, req) = speech_request(p, r, who, text)?;
     let what = format!("speech for {}", over(r));
     let who = who.trim_start_matches('@');
-    let Some(job) = spend(p, &plugin, &req, (r, None), &what, None, Some(who), go)? else {
+    let Some(job) = spend(
+        p,
+        &plugin,
+        &req,
+        For {
+            shot: r,
+            who: Some(who),
+            ..For::default()
+        },
+        &what,
+        None,
+        go,
+    )?
+    else {
         return Ok(None);
     };
     if job.status != JobStatus::Done {
@@ -920,10 +966,13 @@ pub fn say(p: &Project, r: ShotRef, i: usize, go: Go) -> Result<Option<Job>> {
         p,
         &plugin,
         &req,
-        (Some(r), None),
+        For {
+            shot: Some(r),
+            who: Some(&who),
+            ..For::default()
+        },
         &what,
         None,
-        Some(&who),
         go,
     )?
     else {

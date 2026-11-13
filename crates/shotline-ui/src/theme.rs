@@ -9,6 +9,8 @@ use eframe::egui::{
 pub const BAY: Color32 = Color32::from_rgb(0x23, 0x24, 0x27);
 pub const RACK: Color32 = Color32::from_rgb(0x1b, 0x1c, 0x1f);
 pub const RAISED: Color32 = Color32::from_rgb(0x2c, 0x2d, 0x31);
+/// Behind a picture shown on its own.
+pub const STAGE: Color32 = Color32::from_rgb(0x0e, 0x0e, 0x10);
 pub const LINE: Color32 = Color32::from_rgb(0x36, 0x37, 0x3c);
 pub const PAPER: Color32 = Color32::from_rgb(0xec, 0xe8, 0xdf);
 pub const GRAPHITE: Color32 = Color32::from_rgb(0xc4, 0xc1, 0xb9);

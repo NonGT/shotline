@@ -78,6 +78,7 @@ fn make(
     english: Option<&str>,
     go: Go,
 ) -> Result<Option<(Job, std::path::PathBuf)>> {
+    let frame = matches!(what, ImageFor::Frame { .. });
     let (plugin, req) = request(p, what, m)?;
     let brief = Brief {
         text: m.prompt,
@@ -87,10 +88,14 @@ fn make(
         p,
         &plugin,
         &req,
-        (shot, None),
+        crate::shoot::For {
+            shot,
+            who: element,
+            frame,
+            ..Default::default()
+        },
         label,
         Some(brief),
-        element,
         go,
     )?
     else {
@@ -156,7 +161,7 @@ fn image_for(
             format!("storyboard frame for {r}"),
             ImageFor::Frame {
                 shot: r,
-                prompt: english.map(Into::into),
+                prompt: english.map(Into::into).or_else(|| typed(p, r, m.prompt)),
                 refs: m.refs.clone(),
                 aspect: m.aspect.map(Into::into),
                 resolution: m.resolution.map(Into::into),
@@ -164,6 +169,14 @@ fn image_for(
             Some(r),
         ),
     })
+}
+
+/// A frame's prompt when it isn't what the shot would send anyway: typed for this frame alone.
+fn typed(p: &Project, r: ShotRef, prompt: &str) -> Option<String> {
+    let s = p.shot(r).ok()?;
+    let own = s.frame_prompt.as_deref().unwrap_or(&s.prompt);
+    let t = prompt.trim();
+    (!t.is_empty() && t != own.trim() && t != s.prompt.trim()).then(|| t.to_string())
 }
 
 /// The images an anchor is made from, when it isn't just the element's own: those (unless left
