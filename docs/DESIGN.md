@@ -793,6 +793,15 @@ The preview under the monitor is quick: shotline's own cut is joined with its cr
 and sounds but no colour match, and an editor's sequence is shown as plain clips until the editor
 renders it with Update preview. Until the new one is made the old one plays with a badge on it.
 
+Under the monitor: edit before, frame back, Play, frame on, edit after, the timecode, and Save
+frame (into `stills/`). Keys: Space, K stops, L plays, J goes back a second (no reverse play),
+Left and Right step a frame, Up and Down jump between edits. Every time on the page is timecode.
+On the timeline a join shows how it's made: a diamond for a cut, a round tungsten mark for a shot
+that continues, a green dot when it's colour matched. Picking a join moves the playhead there.
+Past a few tracks the lanes scroll, and an audio lane folds to a strip when its name is clicked.
+Zoom with a pinch, the - and + buttons or Shift+Z to fit; ticks go down to single frames and the
+playhead snaps to edits (Alt stops it). Esc or a click on empty space lets go of what's picked.
+
 The Cost tab charts spending per day as stacked bars, one colour per model (last 7 or 30 days,
 or all of it), with a table of models under it (usage, jobs, money) and the spend per shot. Under
 that, the Ledger row does what `cost verify`, `cost rates`, `cost reconcile`, `cost adjust`,

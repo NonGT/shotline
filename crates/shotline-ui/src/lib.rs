@@ -1652,6 +1652,14 @@ impl App {
         self
     }
 
+    /// Where the Cut page's monitor is, in seconds.
+    pub fn cut_position(&self) -> Option<f64> {
+        self.cut_deck
+            .as_ref()
+            .and_then(|(_, d)| d.as_ref().ok())
+            .map(Deck::position)
+    }
+
     pub fn is_playing(&self) -> bool {
         self.deck.as_ref().is_some_and(Deck::is_playing)
             || self

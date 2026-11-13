@@ -462,12 +462,128 @@ pub struct Deck {
     saved: Option<Result<PathBuf, String>>,
 }
 
+fn short_err(e: &str) -> String {
+    match e.char_indices().nth(60) {
+        Some((i, _)) => format!("{}…", &e[..i]),
+        None => e.to_string(),
+    }
+}
+
+fn frame_back_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let c = s.center();
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(s.right() - 1.0, s.top()),
+            egui::pos2(s.right() - 1.0, s.bottom()),
+            egui::pos2(c.x - 1.0, c.y),
+        ],
+        stroke.color,
+        egui::Stroke::NONE,
+    ));
+    p.line_segment(
+        [
+            egui::pos2(c.x - 3.5, s.top()),
+            egui::pos2(c.x - 3.5, s.bottom()),
+        ],
+        stroke,
+    );
+}
+
+fn frame_fwd_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let c = s.center();
+    p.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(s.left() + 1.0, s.top()),
+            egui::pos2(c.x + 1.0, c.y),
+            egui::pos2(s.left() + 1.0, s.bottom()),
+        ],
+        stroke.color,
+        egui::Stroke::NONE,
+    ));
+    p.line_segment(
+        [
+            egui::pos2(c.x + 3.5, s.top()),
+            egui::pos2(c.x + 3.5, s.bottom()),
+        ],
+        stroke,
+    );
+}
+
+fn edit_back_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let c = s.center();
+    for x in [c.x + 4.5, c.x] {
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(x, s.top()),
+                egui::pos2(x, s.bottom()),
+                egui::pos2(x - 4.5, c.y),
+            ],
+            stroke.color,
+            egui::Stroke::NONE,
+        ));
+    }
+    p.line_segment(
+        [
+            egui::pos2(s.left(), s.top()),
+            egui::pos2(s.left(), s.bottom()),
+        ],
+        stroke,
+    );
+}
+
+fn edit_fwd_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
+    let c = s.center();
+    for x in [c.x - 4.5, c.x] {
+        p.add(egui::Shape::convex_polygon(
+            vec![
+                egui::pos2(x, s.top()),
+                egui::pos2(x + 4.5, c.y),
+                egui::pos2(x, s.bottom()),
+            ],
+            stroke.color,
+            egui::Stroke::NONE,
+        ));
+    }
+    p.line_segment(
+        [
+            egui::pos2(s.right(), s.top()),
+            egui::pos2(s.right(), s.bottom()),
+        ],
+        stroke,
+    );
+}
+
 /// `HH:MM:SS:FF`, as editors write it.
 pub(crate) fn timecode(t: f64, fps: f64) -> String {
     let fps = fps.round().max(1.0) as u64;
     let frames = (t.max(0.0) * fps as f64).round() as u64;
     let (f, s) = (frames % fps, frames / fps);
     format!("{:02}:{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60, f)
+}
+
+/// Timecode read back: `HH:MM:SS:FF`, fewer fields from the right (`SS:FF`), or plain seconds.
+pub(crate) fn parse_timecode(s: &str, fps: f64) -> Option<f64> {
+    let s = s.trim();
+    if !s.contains(':') {
+        return s.parse().ok();
+    }
+    let parts: Vec<f64> = s
+        .split(':')
+        .map(|p| p.trim().parse::<f64>().ok())
+        .collect::<Option<_>>()?;
+    let (frames, rest) = parts.split_last()?;
+    let secs = rest.iter().fold(0.0, |a, p| a * 60.0 + p);
+    (parts.len() <= 4).then(|| secs + frames / fps.round().max(1.0))
+}
+
+/// A seconds field shown and typed as timecode.
+pub(crate) fn timecode_field(v: &mut f64, fps: f64, most: f64) -> egui::DragValue<'_> {
+    let fps = if fps > 0.0 { fps } else { 24.0 };
+    egui::DragValue::new(v)
+        .range(0.0..=most)
+        .speed(1.0 / fps)
+        .custom_formatter(move |v, _| timecode(v, fps))
+        .custom_parser(move |s| parse_timecode(s, fps))
 }
 
 pub(crate) fn clock(t: f64) -> String {
@@ -594,9 +710,23 @@ impl Deck {
         open
     }
 
+    pub fn fps(&self) -> f64 {
+        self.players[0].fps()
+    }
+
     /// The Cut page's monitor: the picture on black in a `height` tall screen, and under it
-    /// Play and the timecode. No slider: the timeline's playhead does that.
-    pub fn monitor(&mut self, ui: &mut egui::Ui, audio: Option<&Audio>, height: f32) {
+    /// the transport and the timecode. No slider: the timeline's playhead does that. `edits`
+    /// are where clips meet, for the jumps. Returns true when Save frame was asked for.
+    ///
+    /// Keys: Space plays, K stops, L plays, J goes back a second (there's no playing
+    /// backwards), Left and Right step a frame, Up and Down jump to the edit before or after.
+    pub fn monitor(
+        &mut self,
+        ui: &mut egui::Ui,
+        audio: Option<&Audio>,
+        height: f32,
+        edits: &[f64],
+    ) -> bool {
         self.advance(ui.ctx(), audio);
         let width = ui.available_width();
         let (screen, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
@@ -628,9 +758,67 @@ impl Deck {
                 .max_rect(bar)
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        // Centred: the button and the two timecodes, about 300 px.
-        row.add_space(((width - 300.0) / 2.0).max(0.0));
+        // Centred: the transport and the two timecodes, about 420 px; the length goes when
+        // there's no room for it.
+        let roomy = width >= 470.0;
+        let used = if roomy { 420.0 } else { 300.0 };
+        row.add_space(((width - used) / 2.0).max(0.0));
+        let frame = 1.0 / if fps > 0.0 { fps } else { 24.0 };
+        let keys = self.keys && ui.memory(|m| m.focused().is_none());
+        let key = |k: egui::Key| keys && ui.input(|i| i.key_pressed(k) && i.modifiers.is_none());
+        let before = edits.iter().rev().copied().find(|e| *e < t - frame / 2.0);
+        let after = edits.iter().copied().find(|e| *e > t + frame / 2.0);
+        let mut go = None;
+        let mut stop = false;
+        if crate::icon_button(&mut row, "Previous edit", edit_back_icon)
+            .on_hover_text("to the edit before (Up)")
+            .clicked()
+            || key(egui::Key::ArrowUp)
+        {
+            go = Some(before.unwrap_or(0.0));
+        }
+        if crate::icon_button(&mut row, "Previous frame", frame_back_icon)
+            .on_hover_text("a frame back (Left)")
+            .clicked()
+            || key(egui::Key::ArrowLeft)
+        {
+            go = Some(t - frame);
+            stop = true;
+        }
         self.play_button(&mut row, audio);
+        if crate::icon_button(&mut row, "Next frame", frame_fwd_icon)
+            .on_hover_text("a frame on (Right)")
+            .clicked()
+            || key(egui::Key::ArrowRight)
+        {
+            go = Some(t + frame);
+            stop = true;
+        }
+        if crate::icon_button(&mut row, "Next edit", edit_fwd_icon)
+            .on_hover_text("to the edit after (Down)")
+            .clicked()
+            || key(egui::Key::ArrowDown)
+        {
+            go = Some(after.unwrap_or(total));
+        }
+        if key(egui::Key::J) {
+            go = Some(t - 1.0);
+        }
+        if key(egui::Key::K) {
+            stop = true;
+        }
+        if key(egui::Key::L) && !self.playing {
+            self.playing = true;
+            self.seek(t, audio);
+        }
+        if stop {
+            self.pause(audio);
+        }
+        if let Some(to) = go {
+            // Onto a frame, inside the cut.
+            let to = ((to.clamp(0.0, (total - frame).max(0.0))) / frame).round() * frame;
+            self.seek(to, audio);
+        }
         row.add_space(10.0);
         row.label(
             egui::RichText::new(timecode(t, fps))
@@ -638,13 +826,34 @@ impl Deck {
                 .size(15.0)
                 .color(crate::theme::PAPER),
         );
-        row.label(
-            egui::RichText::new(format!("/ {}", timecode(total, fps)))
-                .monospace()
-                .size(15.0)
-                .color(crate::theme::DUST),
-        );
+        if roomy {
+            row.label(
+                egui::RichText::new(format!("/ {}", timecode(total, fps)))
+                    .monospace()
+                    .size(15.0)
+                    .color(crate::theme::DUST),
+            );
+        }
+        let mut save = false;
+        row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            save = self.players[0].tex.is_some()
+                && crate::icon_button(ui, "Save frame", crate::camera_icon)
+                    .on_hover_text("this frame as a picture, at the video's own size, in stills/")
+                    .clicked();
+            match &self.saved {
+                Some(Ok(f)) => {
+                    let name = f.file_name().unwrap_or_default().to_string_lossy();
+                    ui.weak(format!("Saved {name}"))
+                        .on_hover_text(f.display().to_string());
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(ui.visuals().error_fg_color, short_err(e));
+                }
+                None => {}
+            }
+        });
         self.repaint(ui.ctx());
+        save
     }
 
     /// Moves the clocks on and keeps the sound in step.
@@ -797,6 +1006,15 @@ impl Deck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_timecode_back() {
+        assert_eq!(parse_timecode("00:00:01:12", 24.0), Some(1.5));
+        assert_eq!(parse_timecode("1:12", 24.0), Some(1.5));
+        assert_eq!(parse_timecode("0.25", 24.0), Some(0.25));
+        assert_eq!(parse_timecode(&timecode(62.5, 24.0), 24.0), Some(62.5));
+        assert_eq!(parse_timecode("1:x", 24.0), None);
+    }
 
     #[test]
     fn the_last_frame_comes_sharp_after_a_scrub() {
