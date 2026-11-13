@@ -520,15 +520,21 @@ puts that take in the sequence as well: in place of the shot's clip (as Swap tak
 a missing shot would go. A shot cut from several clips is left for the Cut page. Render on the
 sequence asks the editor to render it into `renders/`.
 
-A take can have sounds over it, effects or a voice off: Sounds on the Cut page's clip tools, or
+A take can have sounds over it, effects or a voice-over: Sounds on the Cut page's clip tools, or
 on the shot page for the take in the cut. A bridge's take can too, from its clip; those are listed
-in the bridge's file, and its speech goes by the voice alone, with no shot's recipe to follow. A file is copied into a job of its own. Speech is one of
+in the bridge's file, and its speech goes by the voice alone, with no shot's recipe to follow. A file is copied into a job of its own. A voice-over is one of
 the cast with a voice saying what's typed, priced first and made like a line's recording (the same
-voice and model), but not one of the shot's lines, so no take sends it. A sound effect is made from
+voice and model), but not one of the shot's lines, so no take sends it and nothing lip syncs it.
+A file, a voice-over and an effect each have their own start. A sound effect is made from
 a description by any installed `audio.sfx` model, as long as asked or as long as the model makes
 it. Remake on a made one fills in its words (and for an effect its model and the length it came
-out), prices it, and puts the new one in its place, in the editor too. Each is listed in the
-shot's `[[sound]]` with where in the take it starts. With an editor project, it goes
+out), prices it, and puts the new one in its place, in the editor too; when its model isn't
+installed or the speaker has no voice, Remake is off and says why. Each is listed in the shot's
+`[[sound]]` with where in the take it starts, and optionally `length` (seconds of it that play)
+and `gain` (dB). Those three can be changed on its row; with an editor it's laid again as changed
+and the old clip lifted. With an editor, each row says whether it's in the editor's sequence or
+only mixed in when shotline renders. The window won't close while something paid for is being
+made. With an editor project, it goes
 in the sequence too, on the first audio track with room at that point (a new one if none has),
 and Remove lifts it out of there as well. It stays where it was put: swapping the take later
 leaves it in the editor, and on the old take in the shot file. Without an editor, the film's own

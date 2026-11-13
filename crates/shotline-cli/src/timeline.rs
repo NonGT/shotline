@@ -119,7 +119,8 @@ pub fn render_with(
                 .map(|(s, _, path)| Track {
                     path,
                     at: s.at,
-                    volume: 1.0,
+                    volume: s.volume(),
+                    length: s.length,
                 })
                 .collect(),
         });
@@ -134,6 +135,7 @@ pub fn render_with(
             path,
             at: t.at,
             volume: t.volume,
+            length: None,
         });
     }
     let opts = Options {

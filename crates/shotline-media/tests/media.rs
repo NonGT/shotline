@@ -203,6 +203,7 @@ fn renders_clips_and_tracks() {
         path: tone(dir.path()),
         at: 0.5,
         volume: 0.5,
+        length: None,
     };
 
     let out = dir.path().join("renders/cut.mp4");
@@ -270,6 +271,7 @@ fn renders_clips_and_tracks() {
         path: music.path.clone(),
         at: 0.25,
         volume: 1.0,
+        length: None,
     }];
     let heard = dir.path().join("heard.mp4");
     let r = render(
@@ -290,6 +292,23 @@ fn renders_clips_and_tracks() {
         quiet_until < -60.0 && loud_after > -40.0,
         "{quiet_until} {loud_after}"
     );
+
+    // Trimmed, it stops early.
+    over[1].sounds[0].length = Some(0.3);
+    let short = dir.path().join("short.mp4");
+    render(
+        &ff,
+        &over,
+        &[],
+        &Options::default(),
+        &dir.path().join("w5"),
+        &short,
+        |_| {},
+    )
+    .unwrap();
+    let during = loudness(&short, 1.3, 0.2);
+    let after = loudness(&short, 1.7, 0.25);
+    assert!(during > -40.0 && after < -60.0, "{during} {after}");
 }
 
 /// Drains a pipe as if playback were instantly far ahead.

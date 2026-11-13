@@ -303,8 +303,9 @@ itself (never by writing its project file). Params:
 - `{"kind": "match", "to"}`: the clip's colour matched to the sequence's frame at `to` seconds
 - `{"kind": "crossfade", "frames"}`: a dissolve that many frames long into the clip from the one
   before, centred on the cut; 0 takes the one there off
-- `{"kind": "sound", "file", "at"}`: all of the file on an audio track with room for it, starting
-  `at` seconds into the clip's own file; nothing moves
+- `{"kind": "sound", "file", "at", "length", "gain"}`: the file on an audio track with room for
+  it, starting `at` seconds into the clip's own file; nothing moves. With `length`, only that many
+  seconds of it; `gain` (dB, 0 when left out) turns it up or down
 - `{"kind": "lift"}`: the clip taken out, on a video or an audio track, leaving its place empty
 - `{"kind": "undo", "steps"}`: takes an earlier change back
 
