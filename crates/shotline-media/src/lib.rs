@@ -214,6 +214,20 @@ impl Ffmpeg {
         Ok(())
     }
 
+    /// The sound of `from`, a file or a URL like a voice's preview, as a WAV at `out`.
+    pub fn sound_to_wav(&self, from: &str, out: &Path) -> Result<()> {
+        if let Some(dir) = out.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        run(
+            Command::new(&self.ffmpeg)
+                .args(["-v", "error", "-y", "-i", from, "-vn"])
+                .arg(out),
+            "getting the sound",
+        )?;
+        Ok(())
+    }
+
     pub fn last_frame(&self, video: &Path, png: &Path) -> Result<()> {
         if let Some(dir) = png.parent() {
             std::fs::create_dir_all(dir)?;

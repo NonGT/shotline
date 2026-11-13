@@ -36,8 +36,8 @@ use eframe::egui::{self, RichText};
 use shotline_core::ledger::money;
 use shotline_core::protocol::{Description, EditInfo, ModelInfo, Op, OpenParams, VoiceInfo};
 use shotline_core::{
-    Chapter, CutShot, Element, Git, JobStatus, Kind, Project, SPOKEN, Shot, ShotRef, Take,
-    Timeline, Transition,
+    Chapter, CutShot, Element, Git, JobStatus, Kind, LIP_SYNCED, Project, SPOKEN, Shot, ShotRef,
+    Take, Timeline, Transition,
 };
 use shotline_media::Ffmpeg;
 
@@ -489,7 +489,8 @@ pub struct App {
     /// What each speaker in the open shot has recorded.
     voices: HashMap<String, Vec<shotline_core::Job>>,
     /// The line whose recordings dropdown is open.
-    voice_open: Option<(ShotRef, usize)>,
+    /// The line whose speaker's recordings are shown in a popup; DRAFT for the one being added.
+    recordings_for: Option<(ShotRef, usize)>,
     /// That dropdown shows other shots' recordings too.
     show_all: bool,
     line_drag: Option<voice::LineDrag>,
@@ -501,8 +502,6 @@ pub struct App {
     hearing: Option<voice::Hearing>,
     /// A line's recording stopped part way, and where.
     paused: Option<(String, f64)>,
-    /// A line being recorded again, and the recording the new one replaces.
-    remaking: Option<(ShotRef, usize, String)>,
     /// Recordings' lengths, as ffprobe gave them; None when it couldn't, so it isn't asked
     /// again every frame.
     lengths: HashMap<PathBuf, Option<f64>>,
@@ -514,6 +513,10 @@ pub struct App {
     render: Arc<Mutex<cut::Render>>,
     cost_view: cost::View,
     voice_lists: Arc<Mutex<HashMap<String, VoiceList>>>,
+    /// Lines recorded with a speaker's voice before it changed, and whether they're listed.
+    pub(crate) old_voice: Option<(String, Vec<OldLine>, bool)>,
+    /// A voice's preview being fetched to play: its id, the file, and how fetching went.
+    voice_preview: Option<(String, PathBuf, Fetched)>,
     history: History,
     git: Option<Git>,
     repo: Repo,
@@ -882,7 +885,7 @@ impl App {
             shoot_stop: Arc::default(),
             say: Arc::default(),
             voices: HashMap::new(),
-            voice_open: None,
+            recordings_for: None,
             show_all: false,
             line_drag: None,
             drags: 0,
@@ -890,13 +893,14 @@ impl App {
             line_heads: vec![],
             hearing: None,
             paused: None,
-            remaking: None,
             lengths: HashMap::new(),
             clip_lengths: Arc::default(),
             timeline_form: Timeline::default(),
             render: Arc::default(),
             cost_view: cost::View::default(),
             voice_lists: Arc::default(),
+            old_voice: None,
+            voice_preview: None,
             history: History::default(),
             git: Git::find(),
             repo: Repo::None,
@@ -961,10 +965,22 @@ impl App {
             .find(|(e, _)| e.handle == who)
             .map(|(e, _)| e)
             .ok_or_else(|| format!("there's no @{who} in the cast"))?;
-        el.voice
+        let v = el.voice.as_ref().ok_or_else(|| {
+            format!("@{who} has no voice yet; give them one on the Elements page")
+        })?;
+        // Without a model of its own it takes the film's, if that's on the same plugin.
+        let film = self
+            .project
+            .config
+            .tts
             .as_ref()
-            .map(|v| v.plugin.clone())
-            .ok_or_else(|| format!("@{who} has no voice yet; give them one on the Elements page"))
+            .is_some_and(|m| m.plugin == v.plugin);
+        if v.model.is_none() && !film {
+            return Err(format!(
+                "@{who}'s voice has no model; pick one on the Elements page"
+            ));
+        }
+        Ok(v.plugin.clone())
     }
 
     /// Why `plugin` can't be asked yet: a key it needs isn't set.
@@ -2497,16 +2513,22 @@ impl App {
         let plugin = self.element_form.voice.plugin.clone();
         let voices = (!plugin.is_empty()).then(|| self.voice_list(ui.ctx(), &plugin));
         // Plugins that can speak, with their speaking models.
-        let tts: Vec<(String, Vec<&ModelInfo>)> = self
+        let tts: Vec<(String, Vec<ModelInfo>)> = self
             .plugins
             .iter()
             .filter_map(|d| {
-                let models: Vec<&ModelInfo> =
-                    d.models.iter().filter(|m| m.op == Op::AudioTts).collect();
+                let models: Vec<ModelInfo> = d
+                    .models
+                    .iter()
+                    .filter(|m| m.op == Op::AudioTts)
+                    .cloned()
+                    .collect();
                 (!models.is_empty()).then(|| (d.name.clone(), models))
             })
             .collect();
         let film_tts = self.project.config.tts.clone();
+        let playing = self.preview_playing(ui.ctx());
+        let mut wants_hear = None;
         let v = &mut self.element_form.voice;
         let installed = tts.iter().find(|(p, _)| *p == v.plugin);
         let shown = match (v.plugin.as_str(), installed) {
@@ -2580,7 +2602,9 @@ impl App {
                     .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Model"));
                 ui.end_row();
                 ui.weak("Voice");
-                keys |= voice_picker(ui, &mut v.voice_id, voices.as_ref());
+                let (k, hear) = voice_picker(ui, &mut v.voice_id, voices.as_ref(), &playing);
+                keys |= k;
+                wants_hear = hear;
                 ui.end_row();
                 settings_rows(ui, schema.as_ref(), &mut v.settings);
             });
@@ -2588,6 +2612,13 @@ impl App {
         if keys {
             self.wants_keys = Some(v.plugin.clone());
         }
+        match wants_hear {
+            Some(Hear::Play(id, url)) => self.hear_voice(ui.ctx(), &id, &url),
+            Some(Hear::Stop) => self.hush(),
+            None => {}
+        }
+        self.preview_ready();
+        self.old_voice_note(ui, &el.handle);
         if tts.is_empty() {
             hint(
                 ui,
@@ -2599,6 +2630,108 @@ impl App {
                 ui,
                 &format!("Without a voice, @{}'s lines aren't spoken.", el.handle),
             );
+        }
+    }
+
+    /// After a speaker's voice changed: how many of their lines still send recordings made with
+    /// the old one, and where.
+    fn old_voice_note(&mut self, ui: &mut egui::Ui, handle: &str) {
+        let Some((who, lines, open)) = &mut self.old_voice else {
+            return;
+        };
+        if who != handle {
+            return;
+        }
+        let n = lines.len();
+        let mut go = None;
+        let mut dismiss = false;
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(if n == 1 {
+                    "1 line was recorded with the old voice.".to_string()
+                } else {
+                    format!("{n} lines were recorded with the old voice.")
+                })
+                .color(theme::WARN),
+            );
+            let label = if *open { "Hide them" } else { "Show them" };
+            if ui.link(label).clicked() {
+                *open = !*open;
+            }
+            if icon_button(ui, "Dismiss", close_icon).clicked() {
+                dismiss = true;
+            }
+        });
+        if *open {
+            for (r, i, words) in lines.iter() {
+                let l = ui.link(format!("{r} line {}: {}", i + 1, short(words, 60)));
+                if l.on_hover_text("open the shot to record it again")
+                    .clicked()
+                {
+                    go = Some(*r);
+                }
+            }
+        }
+        if dismiss {
+            self.old_voice = None;
+        }
+        if let Some(r) = go {
+            self.flush();
+            self.tab = Tab::Shots;
+            self.open_shot(r);
+        }
+    }
+
+    /// The voice whose preview is playing, if one is.
+    fn preview_playing(&mut self, ctx: &egui::Context) -> Option<String> {
+        let id = self.hearing_what()?.strip_prefix("voice ")?.to_string();
+        self.hearing(ctx, &format!("voice {id}")).then_some(id)
+    }
+
+    /// Plays a voice's preview, fetched once into the cache first. Free: it's the provider's
+    /// sample, not something made.
+    fn hear_voice(&mut self, ctx: &egui::Context, id: &str, url: &str) {
+        let safe: String = id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let file = self
+            .project
+            .root
+            .join(".shotline/cache/voices")
+            .join(format!("{safe}.wav"));
+        if file.is_file() {
+            self.hear(&format!("voice {id}"), &file);
+            return;
+        }
+        let Some(ff) = self.ff.clone() else {
+            self.error("can't play without ffmpeg; install it or set SHOTLINE_FFMPEG".into());
+            return;
+        };
+        let done = Arc::new(Mutex::new(None));
+        self.voice_preview = Some((id.to_string(), file.clone(), done.clone()));
+        let (url, ctx) = (url.to_string(), ctx.clone());
+        std::thread::spawn(move || {
+            let got = ff.sound_to_wav(&url, &file).map_err(|e| e.to_string());
+            *done.lock().unwrap() = Some(got);
+            ctx.request_repaint();
+        });
+    }
+
+    /// Plays a preview once it's fetched.
+    fn preview_ready(&mut self) {
+        let Some((id, file, done)) = &self.voice_preview else {
+            return;
+        };
+        let Some(got) = done.lock().unwrap().take() else {
+            return;
+        };
+        let (id, file) = (id.clone(), file.clone());
+        self.voice_preview = None;
+        match got {
+            Ok(()) => self.hear(&format!("voice {id}"), &file),
+            Err(e) => self.error(format!("can't play its preview: {e}")),
         }
     }
 
@@ -2784,6 +2917,8 @@ impl App {
             matches!(
                 a,
                 Action::AddShot(..)
+                    | Action::ImportRecording(..)
+                    | Action::RemoveLine(..)
                     | Action::LeaveOut(..)
                     | Action::SendAnchor(..)
                     | Action::MoveLine(..)
@@ -2850,13 +2985,12 @@ impl App {
         }
         ui.add_space(14.0);
         self.spoken(ui);
-        if self.form.recipe.is_none() {
-            match s.lines.len() {
-                0 => {}
-                1 => hint(ui, "It has a line, kept but not spoken."),
-                n => hint(ui, &format!("It has {n} lines, kept but not spoken.")),
-            }
-            return;
+        // Shown either way, so a typo can be fixed without switching on a paid recipe.
+        if self.form.recipe.is_none() && !s.lines.is_empty() {
+            hint(
+                ui,
+                "Kept with the shot but not spoken; pick how above to record them.",
+            );
         }
         ui.add_space(8.0);
         egui::Frame::new()
@@ -2870,26 +3004,88 @@ impl App {
             });
     }
 
+    /// What a recipe does, in words: "Lip sync after (wavespeed sync/lipsync-3)".
+    fn recipe_label(&self, name: &str) -> String {
+        let shot = Shot {
+            recipe: Some(name.to_string()),
+            ..Shot::default()
+        };
+        let Ok(steps) = self.project.steps(&shot) else {
+            return format!("{name} (not set up)");
+        };
+        let after: Vec<String> = steps
+            .iter()
+            .skip_while(|s| s.op != Op::VideoGenerate)
+            .skip(1)
+            .map(|s| {
+                let by = match (&s.plugin, &s.model) {
+                    (Some(p), Some(m)) => format!(" ({p} {m})"),
+                    _ => String::new(),
+                };
+                match &s.op {
+                    Op::VideoLipsync => format!("lip sync after{by}"),
+                    op => format!("{op} after{by}"),
+                }
+            })
+            .collect();
+        let made = steps
+            .iter()
+            .find(|s| s.op == Op::VideoGenerate)
+            .is_some_and(|s| s.audio);
+        let what = if after.is_empty() {
+            if made {
+                "By the video model".to_string()
+            } else {
+                "Recorded, not lip synced".to_string()
+            }
+        } else {
+            let a = after.join(", then ");
+            let mut c = a.chars();
+            c.next().map_or(a.clone(), |f| {
+                f.to_uppercase().collect::<String>() + c.as_str()
+            })
+        };
+        if name == SPOKEN || name == LIP_SYNCED {
+            what
+        } else {
+            format!("{name}: {what}")
+        }
+    }
+
     /// Which recipe speaks the shot's lines.
     fn spoken(&mut self, ui: &mut egui::Ui) {
         let l = caption(ui, "Lines spoken");
+        // The film's own recipes too, unless they stand in for these.
+        let mut names: Vec<String> = vec![SPOKEN.into()];
+        if self
+            .project
+            .config
+            .model_for(shotline_core::Task::LipSync)
+            .is_some()
+            || self.project.config.recipes.contains_key(LIP_SYNCED)
+        {
+            names.push(LIP_SYNCED.into());
+        }
+        for rc in self.project.config.recipes.keys() {
+            if !names.contains(rc) {
+                names.push(rc.clone());
+            }
+        }
+        if let Some(rc) = &self.form.recipe
+            && !names.contains(rc)
+        {
+            names.push(rc.clone());
+        }
+        let mut picks: Vec<(Option<String>, String)> = vec![(None, "No".into())];
+        picks.extend(
+            names
+                .iter()
+                .map(|n| (Some(n.clone()), self.recipe_label(n))),
+        );
+        let lip_sync = self.form.recipe.as_deref() == Some(LIP_SYNCED);
         let f = &mut self.form;
+        let mut change = false;
         ui.horizontal(|ui| {
-            // The film's own recipes too, unless they stand in for these.
-            let mut picks: Vec<(Option<String>, String)> = vec![
-                (None, "no".into()),
-                (Some(SPOKEN.into()), "by the video model".into()),
-            ];
-            for rc in self.project.config.recipes.keys() {
-                if rc != SPOKEN {
-                    picks.push((Some(rc.clone()), format!("recipe {rc}")));
-                }
-            }
-            if let Some(rc) = &f.recipe
-                && !picks.iter().any(|(p, _)| p.as_ref() == Some(rc))
-            {
-                picks.push((Some(rc.clone()), format!("recipe {rc}")));
-            }
             let now = picks
                 .iter()
                 .find(|(p, _)| *p == f.recipe)
@@ -2897,7 +3093,7 @@ impl App {
                 .unwrap_or_default();
             egui::ComboBox::from_id_salt("recipe")
                 .selected_text(now)
-                .width(150.0)
+                .width(ui.available_width().min(340.0))
                 .show_ui(ui, |ui| {
                     for (p, name) in picks {
                         ui.selectable_value(&mut f.recipe, p, name);
@@ -2909,7 +3105,19 @@ impl App {
                      along for the video model to lip sync",
                 )
                 .labelled_by(l.id);
+            if lip_sync {
+                change = ui
+                    .button("Change…")
+                    .on_hover_text("the lip sync model is set in Settings, for the whole film")
+                    .clicked();
+            }
         });
+        if lip_sync {
+            hint(ui, "The lip sync is priced along with each take.");
+        }
+        if change {
+            self.wants_prefs = true;
+        }
     }
 
     /// The shot's settings.
@@ -3635,6 +3843,11 @@ impl App {
 
     pub fn tab(&self) -> Tab {
         self.tab
+    }
+
+    /// Whether Settings has been asked for, for the shell to open.
+    pub fn wants_prefs(&self) -> bool {
+        self.wants_prefs
     }
 
     /// The selected take's video, stopped on its first frame until it's played. False when the
@@ -4491,6 +4704,17 @@ pub(crate) fn pause_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke)
 
 /// An `egui::Modal` whose dropdowns always draw above it. Both sit on the foreground layer, and
 /// a click on the modal can put it back over a list that's open.
+/// A line recorded with a voice since changed: its shot, number and words.
+pub(crate) type OldLine = (ShotRef, usize, String);
+
+/// How fetching something on another thread went, once it has.
+type Fetched = Arc<Mutex<Option<Result<(), String>>>>;
+
+/// What a line's recording can be brought in from: what the video models take as a voice.
+pub(crate) const VOICE_FILES: [&str; 3] = ["wav", "mp3", "m4a"];
+/// Sound files that are mixed in with ffmpeg: music and sounds laid over a take.
+pub(crate) const SOUND_FILES: [&str; 6] = ["wav", "mp3", "m4a", "aac", "flac", "ogg"];
+
 pub(crate) fn modal<R>(
     ctx: &egui::Context,
     name: &str,
@@ -4760,9 +4984,47 @@ fn history_button(ui: &mut egui::Ui, text: &str, what: Option<String>, keys: &st
     })
 }
 
-/// The voice by name from the plugin's list, or its ID typed in when there's no list. Returns
-/// whether the keys were asked for.
-fn voice_picker(ui: &mut egui::Ui, id: &mut String, list: Option<&VoiceList>) -> bool {
+/// What a voice's ▶ asked for.
+enum Hear {
+    Play(String, String),
+    Stop,
+}
+
+/// The voice by name from the plugin's list, each with ▶ to hear it first when the plugin has a
+/// preview, or its ID typed in when there's no list. Returns whether the keys were asked for.
+fn voice_picker(
+    ui: &mut egui::Ui,
+    id: &mut String,
+    list: Option<&VoiceList>,
+    playing: &Option<String>,
+) -> (bool, Option<Hear>) {
+    let mut hear = None;
+    let ear = |ui: &mut egui::Ui, v: &VoiceInfo, hear: &mut Option<Hear>| {
+        let Some(url) = &v.preview else {
+            ui.add_space(24.0 + ui.spacing().item_spacing.x);
+            return;
+        };
+        let on = playing.as_deref() == Some(v.id.as_str());
+        let (icon, what): (fn(&egui::Painter, egui::Rect, egui::Stroke), _) = if on {
+            (stop_icon, "Stop")
+        } else {
+            (play_icon, "Hear")
+        };
+        if icon_button(ui, &format!("{what} {}", v.name), icon)
+            .on_hover_text(if on {
+                "stop"
+            } else {
+                "hear what it sounds like; free"
+            })
+            .clicked()
+        {
+            *hear = Some(if on {
+                Hear::Stop
+            } else {
+                Hear::Play(v.id.clone(), url.clone())
+            });
+        }
+    };
     let mut keys = false;
     let field = |ui: &mut egui::Ui, id: &mut String| {
         ui.add(
@@ -4780,19 +5042,27 @@ fn voice_picker(ui: &mut egui::Ui, id: &mut String, list: Option<&VoiceList>) ->
                 (None, true) => "pick a voice".into(),
                 (None, false) => format!("{id} (not on the account)"),
             };
-            egui::ComboBox::from_id_salt("voice id")
-                .selected_text(shown)
-                .width(320.0)
-                .show_ui(ui, |ui| {
-                    for v in voices {
-                        let r = ui.selectable_value(id, v.id.clone(), &v.name);
-                        if let Some(d) = &v.description {
-                            r.on_hover_text(d);
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("voice id")
+                    .selected_text(shown)
+                    .width(320.0)
+                    .show_ui(ui, |ui| {
+                        for v in voices {
+                            ui.horizontal(|ui| {
+                                ear(ui, v, &mut hear);
+                                let r = ui.selectable_value(id, v.id.clone(), &v.name);
+                                if let Some(d) = &v.description {
+                                    r.on_hover_text(d);
+                                }
+                            });
                         }
-                    }
-                })
-                .response
-                .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Voice"));
+                    })
+                    .response
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Voice"));
+                if let Some(v) = voices.iter().find(|v| v.id == *id) {
+                    ear(ui, v, &mut hear);
+                }
+            });
         }
         Some(VoiceList::Loading) => {
             ui.horizontal(|ui| {
@@ -4813,7 +5083,7 @@ fn voice_picker(ui: &mut egui::Ui, id: &mut String, list: Option<&VoiceList>) ->
         }
         _ => field(ui, id),
     }
-    keys
+    (keys, hear)
 }
 
 /// Voice settings as the model's schema describes them, or as `key = value` lines without one.

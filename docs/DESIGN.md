@@ -859,13 +859,21 @@ a shot continuing from it sends). Picking one copies it in. Remove beside one th
 out (its job is marked `discarded`, the file and the ledger line stay) and can be undone. Every box typed for a model (Prompt, Frame
 prompt, Make image) offers "Translate to English first" when what's in it isn't English and the
 film's translating model has its key; the price then includes the translation. Lines start with Add line; a line is its start (dragged like the
-length, or left as "after" to follow the line before), who says it, and its words with Record…,
-which prices first. Once recorded, the words give way to a dropdown of everything that speaker
-has recorded: this shot's first, other shots behind Show all, under chapter and shot headers
-that stay put while the list scrolls. Each has play and delete; one another line sends says
-how many lines use it and can't be deleted, its ✕ turned into a way to that line's shot.
-Remake… goes back to the words, and the new recording replaces the old one
-once it's made (kept if another line sends it); Cancel keeps the old one. Lines are dragged into order by their grip. Play the scene puts the picked recordings at
+length, or left as "after" to follow the line before), who says it, its words, whether it's
+recorded, Record… and ⋯, the same shape whatever state it's in. The words stay editable; once
+they differ from what was recorded the line is marked out of date and still sends the old
+recording until it's recorded again. Record again… keeps the old one among the speaker's
+recordings. Another speaker drops the recording (undoable). A new line is priced from its words
+and only added once it's paid for. ⋯ has Recordings by @x… (a popup of everything that speaker
+has recorded: this shot's first, other shots behind Show all, each with play and delete, one
+another line sends showing a way to that line's shot instead of being deleted), Recording from a
+file…, None: record with each take, and Delete line. Voice-overs laid over a take aren't listed
+there and can't be deleted while they're laid. A speaker with no voice, or a voice without a
+model, says so under the line with a link to the Elements page; what went wrong recording shows
+whole under the line until it's dismissed. The Lines panel shows even when the shot isn't
+spoken, with Record… off. A voice in the Elements page can be heard before it's picked (▶, the
+provider's sample, cached in `.shotline/cache/voices/`), and changing a voice says how many lines
+were recorded with the old one, with links to them. Lines are dragged into order by their grip. Play the scene puts the picked recordings at
 their start times. A Shoot section above Takes says what might go wrong, shows the prompt as the
 model gets it, and has Shoot a take…, which asks the price first and spends only on a
 second click, like `take`.

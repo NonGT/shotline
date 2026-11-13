@@ -1367,7 +1367,7 @@ impl App {
         }
         if ui.button("Add music…").clicked()
             && let Some(f) = rfd::FileDialog::new()
-                .add_filter("Audio", &["mp3", "wav", "m4a", "aac", "flac", "ogg"])
+                .add_filter("Audio", &crate::SOUND_FILES)
                 .pick_file()
         {
             acts.push(Action::AddTrack(f));

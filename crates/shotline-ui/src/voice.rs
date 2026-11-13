@@ -16,8 +16,14 @@ use crate::edit::{Action, LineForm};
 use crate::player::{hush, listen};
 use crate::price::{Pressed, Price, PriceRow};
 use crate::{
-    App, heading, hint, icon_button, pause_icon, play_icon, remove_button, short, stop_icon, theme,
+    App, heading, hint, icon, icon_button, kit, pause_icon, play_icon, short, stop_icon, theme,
 };
+
+fn voice_file() -> Option<PathBuf> {
+    rfd::FileDialog::new()
+        .add_filter("Voice", &crate::VOICE_FILES)
+        .pick_file()
+}
 
 #[derive(Clone, Default)]
 pub(crate) enum Say {
@@ -40,10 +46,6 @@ impl Say {
             | Say::Failed(r, i, _)
             | Say::Done(r, i, _) => Some((*r, *i)),
         }
-    }
-
-    fn busy(&self) -> bool {
-        matches!(self, Say::Pricing(..) | Say::Recording(..))
     }
 
     /// Follows its line when line `from` of `r` is moved to `to`.
@@ -87,28 +89,12 @@ pub(crate) struct Hearing {
     from: f64,
 }
 
+/// How wide a line's state chip and its Record button are, so the rows line up.
+const CHIP: f32 = 86.0;
+const RECORD: f32 = 128.0;
+
 /// The id salt of the line being added.
 const DRAFT: usize = usize::MAX;
-
-/// An arrow, to go where something is.
-fn go_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
-    let y = s.center().y;
-    p.line_segment([egui::pos2(s.left(), y), egui::pos2(s.right(), y)], stroke);
-    p.line_segment(
-        [
-            egui::pos2(s.right() - 4.0, y - 4.0),
-            egui::pos2(s.right(), y),
-        ],
-        stroke,
-    );
-    p.line_segment(
-        [
-            egui::pos2(s.right() - 4.0, y + 4.0),
-            egui::pos2(s.right(), y),
-        ],
-        stroke,
-    );
-}
 
 /// Six dots, to drag a line by.
 fn grip(ui: &mut egui::Ui, i: usize) -> egui::Response {
@@ -226,63 +212,41 @@ impl App {
         Ok(())
     }
 
-    /// Picks up a recording once it's made.
+    /// Picks up a recording once it's made. One that didn't work stays under its line, said in
+    /// full, until it's dismissed.
     pub(crate) fn said(&mut self) {
         let done = {
             let mut s = self.say.lock().unwrap();
             let Say::Done(r, i, out) = s.clone() else {
                 return;
             };
-            // A failed recording says why in the status bar; Failed is for its price.
-            *s = Say::Idle;
+            *s = match &out {
+                Ok(_) => Say::Idle,
+                Err(e) => Say::Failed(r, i, e.clone()),
+            };
             (r, i, out)
         };
         self.reload();
         if let Err(e) = self.load_takes() {
             self.error(e.to_string());
         }
-        match done {
-            (r, i, Ok(f)) => {
-                self.info(format!("line {} of {r} recorded", i + 1));
-                self.replace_remade(r, i);
-                self.hear(&f.display().to_string(), &f);
-            }
-            (r, i, Err(e)) => self.error(format!("line {} of {r}: {e}", i + 1)),
+        if let (r, i, Ok(f)) = done {
+            // The one it had stays among the speaker's recordings, to go back to.
+            self.info(format!("line {} of {r} recorded", i + 1));
+            self.hear(&f.display().to_string(), &f);
         }
     }
 
-    /// The recording a remade line had goes, unless another line still sends it.
-    fn replace_remade(&mut self, r: ShotRef, i: usize) {
-        let Some((rr, ri, old)) = self.remaking.take() else {
-            return;
-        };
-        if (rr, ri) != (r, i) {
-            self.remaking = Some((rr, ri, old));
-            return;
-        }
-        let elsewhere = self
-            .film
-            .chapters
-            .iter()
-            .flat_map(|(_, shots)| shots)
-            .find_map(|(sr, sh)| {
-                sh.lines
-                    .iter()
-                    .enumerate()
-                    .find(|(k, l)| l.audio.as_ref() == Some(&old) && (*sr, *k) != (r, i))
-                    .map(|(k, _)| (*sr, k))
-            });
-        match elsewhere {
-            Some((sr, k)) => self.info(format!(
-                "line {} of {r} recorded; the one it had stays, line {} of {sr} sends it",
-                i + 1,
-                k + 1
-            )),
-            None => self.apply(vec![Action::DeleteRecording(r, old)]),
-        }
-    }
-
-    fn ask(&self, ctx: &egui::Context, r: ShotRef, i: usize, at: Option<String>) {
+    /// Asks the price of line `i`, or records it at `at`. The line being added (DRAFT) is
+    /// priced from `draft`'s speaker and words, as it isn't saved until it's paid for.
+    fn ask(
+        &self,
+        ctx: &egui::Context,
+        r: ShotRef,
+        i: usize,
+        at: Option<String>,
+        draft: Option<(String, String)>,
+    ) {
         let Some(host) = self.host.clone() else {
             return;
         };
@@ -292,12 +256,16 @@ impl App {
             None => Say::Pricing(r, i),
         };
         std::thread::spawn(move || {
-            let s = match at {
-                None => match host.say_quote(&film, r, i) {
+            let s = match (at, draft) {
+                (None, Some((who, text))) => match host.speech_quote(&film, Some(r), &who, &text) {
                     Ok(cost) => Say::Priced(r, i, cost),
                     Err(e) => Say::Failed(r, i, format!("{e:#}")),
                 },
-                Some(cost) => Say::Done(
+                (None, None) => match host.say_quote(&film, r, i) {
+                    Ok(cost) => Say::Priced(r, i, cost),
+                    Err(e) => Say::Failed(r, i, format!("{e:#}")),
+                },
+                (Some(cost), _) => Say::Done(
                     r,
                     i,
                     host.say(&film, r, i, &cost).map_err(|e| format!("{e:#}")),
@@ -348,6 +316,11 @@ impl App {
         {
             hush(a);
         }
+    }
+
+    /// What's being heard, if anything.
+    pub(crate) fn hearing_what(&self) -> Option<&str> {
+        self.hearing.as_ref().map(|h| h.what.as_str())
     }
 
     /// True while `what` is playing.
@@ -430,8 +403,6 @@ impl App {
             Say::Priced(pr, pi, cost) if *pr == r => Some((*pi, cost.clone())),
             _ => None,
         };
-        let mut open = None;
-        let mut any_open = false;
         let mut rects = vec![];
         let mut heads = vec![];
         for i in 0..n {
@@ -481,15 +452,12 @@ impl App {
                         } else if moving && !g.dragged() {
                             self.line_drag = None;
                         }
-                        match self.line_row(ui, r, s, i, &cast, acts) {
-                            Some(true) => open = Some((r, i)),
-                            Some(false) => any_open = true,
-                            None => {}
-                        }
+                        self.line_row(ui, r, s, i, &cast, acts);
                     });
                     heads.push(head.response.rect.height());
                     // Kept while lines move, so they keep their height.
                     self.line_player(ui, r, s, i);
+                    self.line_notes(ui, r, i, &s.lines[i].who.clone());
                     // The price on its own row, as wide as the line; out of the way while
                     // lines are moved.
                     if let Some((_, cost)) = priced.as_ref().filter(|(pi, _)| *pi == i)
@@ -498,7 +466,9 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.add_space(12.0 + ui.spacing().item_spacing.x);
                             match PriceRow::new("Record").show(ui, Price::Priced(cost)) {
-                                Some(Pressed::Go) => self.ask(ui.ctx(), r, i, Some(cost.clone())),
+                                Some(Pressed::Go) => {
+                                    self.ask(ui.ctx(), r, i, Some(cost.clone()), None)
+                                }
                                 Some(Pressed::Cancel) => *self.say.lock().unwrap() = Say::Idle,
                                 _ => {}
                             }
@@ -513,13 +483,33 @@ impl App {
         }
         self.line_rects = rects;
         self.line_heads = heads;
-        self.voice_open = open;
 
         let full = self
             .line_room(r, s)
             .filter(|(max, _)| s.lines.len() >= *max);
         if self.form.adding {
-            any_open |= self.draft_row(ui, r, s, &cast, title, acts);
+            self.draft_row(ui, r, &cast, title, acts);
+            if let Some(cost) = priced
+                .as_ref()
+                .filter(|(pi, _)| *pi == DRAFT)
+                .map(|(_, c)| c)
+            {
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0 + ui.spacing().item_spacing.x);
+                    match PriceRow::new("Record").show(ui, Price::Priced(cost)) {
+                        // Only now is it a line of the shot: what's paid for is what's kept.
+                        Some(Pressed::Go) => {
+                            self.flush();
+                            self.apply(vec![Action::AddLine(r, self.form.new.clone())]);
+                            self.ask(ui.ctx(), r, s.lines.len(), Some(cost.clone()), None);
+                        }
+                        Some(Pressed::Cancel) => *self.say.lock().unwrap() = Say::Idle,
+                        _ => {}
+                    }
+                });
+            }
+            let who = self.form.new.who.clone();
+            self.line_notes(ui, r, DRAFT, &who);
         } else if ui
             .add_enabled(full.is_none(), egui::Button::new("Add line"))
             .on_disabled_hover_text(full.map_or(String::new(), |(max, model)| {
@@ -533,9 +523,7 @@ impl App {
                 f.new.who = s.lines.last().map_or(cast[0].clone(), |l| l.who.clone());
             }
         }
-        if open.is_none() && !any_open {
-            self.show_all = false;
-        }
+        self.recordings_popup(ui, r, s, acts);
 
         if !s.lines.is_empty() {
             ui.add_space(8.0);
@@ -799,9 +787,8 @@ impl App {
             .cloned()
     }
 
-    /// One line: its start and speaker, then either its words to record (with ▼ to pick a
-    /// recording instead) or the dropdown of recordings once it has one. Some while a dropdown is
-    /// open, true for the full one.
+    /// One line, always the same shape: start, speaker, its words (editable, marked out of date
+    /// when they're not what was recorded), whether it's recorded, Record…, and ⋯.
     fn line_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -810,90 +797,88 @@ impl App {
         i: usize,
         cast: &[String],
         acts: &mut Vec<Action>,
-    ) -> Option<bool> {
+    ) {
         starts(ui, &mut self.form.lines[i]);
         who(ui, i, &mut self.form.lines[i], cast);
         let picked = self.picked(s, i);
-        // Only on the line that still has the recording being replaced, or is being recorded;
-        // once lines move it's left alone.
-        let saying = self.say.lock().unwrap().line() == Some((r, i));
-        let remaking = self.remaking.as_ref().is_some_and(|(rr, ri, old)| {
-            (*rr, *ri) == (r, i) && (saying || s.lines[i].audio.as_ref() == Some(old))
-        });
-        // Kept as a dropdown while it's open, even once its pick is deleted.
-        let recorded = (picked.is_some() && !remaking) || self.voice_open == Some((r, i));
         let who = s.lines[i].who.clone();
-        let mut open = None;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if remove_button(ui).clicked() {
-                acts.push(Action::RemoveLine(r, i));
-            }
-            if remaking {
-                let say = self.say.lock().unwrap().clone();
-                let recording = matches!(say, Say::Recording(..)) && saying;
+            let more = kit::icon_button(ui, icon::MORE, &format!("More for line {}", i + 1))
+                .on_hover_text("more");
+            egui::Popup::menu(&more).show(|ui| {
+                if ui.button(format!("Recordings by @{who}…")).clicked() {
+                    self.recordings_for = Some((r, i));
+                }
                 if ui
-                    .add_enabled(!recording, egui::Button::new("Cancel"))
-                    .on_hover_text("keep the recording it has")
-                    .on_disabled_hover_text("it's being recorded; wait for it to finish")
+                    .button("Recording from a file…")
+                    .on_hover_text("one made somewhere else, of these words")
                     .clicked()
+                    && let Some(f) = voice_file()
                 {
-                    self.remaking = None;
+                    acts.push(Action::ImportRecording(r, i, f));
                 }
-            } else if let Some(j) = picked.as_ref().filter(|_| recorded) {
-                let busy = self.say.lock().unwrap().busy();
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Remake…"))
-                    .on_hover_text(
-                        "record it again, the words changed first if you like; the new one \
-                         replaces this one once it's made",
-                    )
-                    .on_disabled_hover_text("still recording another line")
-                    .clicked()
+                if picked.is_some()
+                    && ui
+                        .button("None: record with each take")
+                        .on_hover_text("each take records the line itself")
+                        .clicked()
                 {
-                    self.remaking = Some((r, i, j.id.to_string()));
+                    acts.push(Action::PickRecording(r, i, None));
+                }
+                ui.separator();
+                if kit::danger_button(ui, "Delete line").clicked() {
+                    acts.push(Action::RemoveLine(r, i));
+                }
+            });
+            let has = !self.form.lines[i].text.trim().is_empty();
+            // A slot as wide as Record again…, so every row's words line up.
+            let h = ui.spacing().interact_size.y;
+            ui.allocate_ui_with_layout(
+                egui::vec2(RECORD, h),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(RECORD);
+                    self.record_button(ui, r, i, (&who, has), picked.is_some());
+                },
+            );
+            match &picked {
+                Some(j) => {
+                    let then = j.prompt.clone().unwrap_or_default();
+                    if self.form.lines[i].text.trim() != then.trim() {
+                        kit::chip(ui, "out of date", theme::WARN, CHIP).on_hover_text(format!(
+                            "recorded as \"{then}\"; record it again to match"
+                        ));
+                    } else {
+                        kit::chip(ui, "recorded", theme::GO, CHIP)
+                            .on_hover_text("takes send this recording");
+                    }
+                }
+                None => {
+                    kit::chip(ui, "not recorded", theme::DUST, CHIP)
+                        .on_hover_text("each take records it; or record it now to hear it first");
                 }
             }
-            if recorded {
-                open = self
-                    .recordings(ui, r, i, &who, picked.as_ref(), false, acts)
-                    .then_some(true);
-            } else {
-                if !remaking {
-                    open = self
-                        .recordings(ui, r, i, &who, None, true, acts)
-                        .then_some(false);
-                }
-                let has = !self.form.lines[i].text.trim().is_empty();
-                self.record_button(ui, r, i, (&who, has));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.form.lines[i].text)
-                        .hint_text(RichText::new("What they say").color(theme::DUST))
-                        .desired_width(ui.available_width()),
-                )
-                .widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::Role::TextInput,
-                        true,
-                        format!("Line {}", i + 1),
-                    )
-                });
-            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.form.lines[i].text)
+                    .hint_text(RichText::new("What they say").color(theme::DUST))
+                    .desired_width(ui.available_width()),
+            )
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::TextInput, true, format!("Line {}", i + 1))
+            });
         });
-        open
     }
 
-    /// The line being added: saved once it's left with words in it, recorded right away, or
-    /// given a recording its speaker made before. True while that dropdown is open.
+    /// The line being added: saved once it's left with words in it, or once its recording is
+    /// paid for, or with a recording its speaker made before.
     fn draft_row(
         &mut self,
         ui: &mut egui::Ui,
         r: ShotRef,
-        s: &Shot,
         cast: &[String],
         title: egui::Id,
         acts: &mut Vec<Action>,
-    ) -> bool {
-        let mut open = false;
+    ) {
         ui.horizontal(|ui| {
             ui.add_space(12.0 + ui.spacing().item_spacing.x);
             starts(ui, &mut self.form.new);
@@ -903,37 +888,29 @@ impl App {
                     self.form.adding = false;
                     self.form.new.text.clear();
                     self.form.new.at.clear();
+                    if self.say.lock().unwrap().line() == Some((r, DRAFT)) {
+                        *self.say.lock().unwrap() = Say::Idle;
+                    }
                     return;
                 }
                 let who = self.form.new.who.clone();
-                open = self.recordings(ui, r, DRAFT, &who, None, true, acts);
                 let has = !self.form.new.text.trim().is_empty();
-                let busy = self.say.lock().unwrap().busy();
+                self.record_button(ui, r, DRAFT, (&who, has), false);
                 if ui
-                    .add_enabled(has && !busy, egui::Button::new("Record…"))
-                    .on_hover_text("hear it before a take; asking the price is free")
-                    .on_disabled_hover_text(if has {
-                        "still recording another line"
-                    } else {
-                        "type what they say first"
-                    })
+                    .button("Pick one…")
+                    .on_hover_text(format!(
+                        "one @{who} recorded before, in this shot or another"
+                    ))
                     .clicked()
                 {
-                    // Saved first: what's recorded is a line of the shot.
-                    self.flush();
-                    self.apply(vec![Action::AddLine(r, self.form.new.clone())]);
-                    self.ask(ui.ctx(), r, s.lines.len(), None);
-                    return;
+                    self.recordings_for = Some((r, DRAFT));
                 }
                 if ui
                     .add_enabled(has, egui::Button::new("From a file…"))
                     .on_hover_text("a recording made somewhere else, of these words")
                     .on_disabled_hover_text("type what they say first")
                     .clicked()
-                    && let Some(file) = rfd::FileDialog::new()
-                        // What the video models take as a voice.
-                        .add_filter("Audio", &["wav", "mp3", "m4a"])
-                        .pick_file()
+                    && let Some(file) = voice_file()
                 {
                     self.flush();
                     self.apply(vec![Action::ImportLine(r, self.form.new.clone(), file)]);
@@ -946,21 +923,23 @@ impl App {
                             .desired_width(ui.available_width()),
                     )
                     .labelled_by(title);
-                if text.lost_focus() && has {
+                let waiting = self.say.lock().unwrap().line() == Some((r, DRAFT));
+                if text.lost_focus() && has && !waiting {
                     acts.push(Action::AddLine(r, self.form.new.clone()));
                 }
             });
         });
-        open
     }
 
-    /// Record…, then the wait. Its price goes on a row of its own under the line.
+    /// Record… (Record again… once it has one), then the wait. Its price goes on a row of its
+    /// own under the line, and so does an error.
     fn record_button(
         &mut self,
         ui: &mut egui::Ui,
         r: ShotRef,
         i: usize,
         (who, has_words): (&str, bool),
+        again: bool,
     ) {
         let say = self.say.lock().unwrap().clone();
         let mine = say.line() == Some((r, i));
@@ -968,40 +947,85 @@ impl App {
             Say::Priced(..) if mine => return,
             Say::Pricing(..) if mine => Price::Asking,
             Say::Recording(..) if mine => Price::Working("recording…"),
-            Say::Failed(.., e) if mine => Price::Failed(e),
             _ => Price::Idle,
         };
         let plugin = self.voice_plugin(who);
         // One line at a time, so a price waiting on another line isn't lost.
         let blocked = if let Err(why) = &plugin {
             Some(why.clone())
+        } else if self.form.recipe.is_none() {
+            Some("the shot's lines aren't spoken; pick how under Lines spoken".to_string())
         } else if !has_words {
             Some("type what they say first".to_string())
         } else if let Some((sr, si)) = say.line().filter(|_| {
             !mine && matches!(say, Say::Pricing(..) | Say::Priced(..) | Say::Recording(..))
         }) {
-            Some(if sr == r {
-                format!("line {} is waiting; record or cancel it first", si + 1)
-            } else {
-                format!("a line of {sr} is waiting; record or cancel it first")
+            Some(match (sr == r, si) {
+                (true, DRAFT) => "the new line is waiting; record or cancel it first".into(),
+                (true, si) => format!("line {} is waiting; record or cancel it first", si + 1),
+                (false, _) => format!("a line of {sr} is waiting; record or cancel it first"),
             })
         } else {
             None
         };
         let keys = plugin.as_ref().ok().and_then(|p| self.needs_keys(p));
-        match PriceRow::new("Record")
+        let verb = if again { "Record again" } else { "Record" };
+        match PriceRow::new(verb)
             .keys(keys)
             .blocked(blocked)
             .show(ui, shown)
         {
             Some(Pressed::Keys) => self.wants_keys = plugin.ok(),
+            Some(Pressed::Ask) if i == DRAFT => {
+                let draft = (self.form.new.who.clone(), self.form.new.text.clone());
+                self.ask(ui.ctx(), r, i, None, Some(draft));
+            }
             Some(Pressed::Ask) => {
                 // What's typed is saved first, so that's what gets recorded.
                 self.flush();
-                self.ask(ui.ctx(), r, i, None);
+                self.ask(ui.ctx(), r, i, None, None);
             }
             Some(Pressed::Cancel) => *self.say.lock().unwrap() = Say::Idle,
             _ => {}
+        }
+    }
+
+    /// Under a line: why it can't be recorded when that needs doing elsewhere, and what went
+    /// wrong recording it, in full, until it's dismissed.
+    fn line_notes(&mut self, ui: &mut egui::Ui, r: ShotRef, i: usize, who: &str) {
+        let indent = 12.0 + ui.spacing().item_spacing.x;
+        if let Err(why) = self.voice_plugin(who)
+            && self.film.elements.iter().any(|(e, _)| e.handle == who)
+        {
+            let link = if why.contains("no model") {
+                format!("Set @{who}'s voice…")
+            } else {
+                format!("Give @{who} a voice…")
+            };
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                hint(ui, why.split(';').next().unwrap_or(&why));
+                if ui.link(link).clicked() {
+                    self.flush();
+                    self.element = Some(who.to_string());
+                    self.tab = crate::Tab::Elements;
+                }
+            });
+        }
+        let failed = match &*self.say.lock().unwrap() {
+            Say::Failed(fr, fi, e) if (*fr, *fi) == (r, i) => Some(e.clone()),
+            _ => None,
+        };
+        if let Some(e) = failed {
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if icon_button(ui, "Dismiss", crate::close_icon).clicked() {
+                        *self.say.lock().unwrap() = Say::Idle;
+                    }
+                    ui.add(egui::Label::new(RichText::new(e).color(theme::FLAG)).wrap());
+                });
+            });
         }
     }
 
@@ -1020,26 +1044,28 @@ impl App {
         self.voices[who].clone()
     }
 
-    /// The dropdown of what the speaker has recorded, for line `i` (or the one being added,
-    /// DRAFT): this shot's first, the rest behind Show all, grouped by chapter and shot.
-    /// `compact` is just the ▼ beside Record…. True while it's open.
-    #[allow(clippy::too_many_arguments)]
-    fn recordings(
+    /// The popup of what a line's speaker has recorded, from ⋯ (or Pick one… on the line being
+    /// added): this shot's first, the rest behind Show all, grouped by chapter and shot.
+    fn recordings_popup(
         &mut self,
         ui: &mut egui::Ui,
         r: ShotRef,
-        i: usize,
-        who: &str,
-        picked: Option<&Job>,
-        compact: bool,
+        s: &Shot,
         acts: &mut Vec<Action>,
-    ) -> bool {
-        let all = self.voices_of(who, r);
-        let shown = match picked.and_then(|j| j.prompt.as_deref()) {
-            Some(t) => t.to_string(),
-            None => "pick one".into(),
+    ) {
+        let Some((pr, i)) = self.recordings_for else {
+            return;
         };
-        let width = ui.available_width();
+        if pr != r || (i != DRAFT && i >= s.lines.len()) {
+            self.recordings_for = None;
+            return;
+        }
+        let who = match i {
+            DRAFT => self.form.new.who.clone(),
+            _ => s.lines[i].who.clone(),
+        };
+        let picked = if i == DRAFT { None } else { self.picked(s, i) };
+        let all = self.voices_of(&who, r);
         let ctx = ui.ctx().clone();
         let playing: Vec<String> = all
             .iter()
@@ -1059,56 +1085,44 @@ impl App {
                 }
             }
         }
+        let wide = kit::modal_width(&ctx, 0.5, 420.0, 640.0);
         let mut pick = None;
-        let label = match (compact, i) {
-            (true, DRAFT) => "Pick a recording".to_string(),
-            (true, _) => format!("Pick a recording for line {}", i + 1),
-            (false, _) => format!("Line {}", i + 1),
-        };
-        let combo = egui::ComboBox::from_id_salt(("voice", r, i, compact))
-            .height(crate::grouped::MAX)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-        let combo = if compact {
-            combo.selected_text("").width(ui.spacing().icon_width)
-        } else {
-            combo
-                .selected_text(short(&shown, 200))
-                .width(width)
-                .truncate()
-        };
-        let open = ui
-            .add_enabled_ui(!all.is_empty(), |ui| {
-                combo.show_ui(ui, |ui| {
-                    let p = recording_list(
-                        ui,
-                        (r, i),
-                        &all,
-                        picked.map(|j| j.id.to_string()),
-                        &playing,
-                        show_all,
-                        &names,
-                        &uses,
-                    );
-                    if matches!(p, Some(Pick::Use(_) | Pick::Open(_))) {
-                        ui.close();
-                    }
-                    pick = p;
+        let mut close = false;
+        let modal = crate::modal(&ctx, "recordings", |ui| {
+            ui.set_width(wide);
+            ui.horizontal(|ui| {
+                ui.heading(format!("Recordings by @{who}"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = crate::icon_button(ui, "Close", crate::close_icon).clicked();
+                });
+            });
+            ui.label(
+                RichText::new(match i {
+                    DRAFT => "Pick one for the new line; it's added with its words.".to_string(),
+                    _ => format!("Pick the one line {} sends.", i + 1),
                 })
-            })
-            .inner;
-        crate::grouped::remeasure(ui.ctx());
-        let mut resp = open
-            .response
-            .on_disabled_hover_text(format!("@{who} has nothing recorded yet"));
-        if compact {
-            resp = resp.on_hover_text(format!(
-                "one @{who} recorded before, in this shot or another"
-            ));
-        } else if picked.is_some() {
-            // The whole of it, when it's cut short.
-            resp = resp.on_hover_text(&shown);
+                .color(theme::DUST),
+            );
+            ui.add_space(8.0);
+            if all.is_empty() {
+                kit::empty(ui, icon::MIC, &format!("@{who} has nothing recorded yet."));
+                return;
+            }
+            pick = recording_list(
+                ui,
+                (r, i),
+                &all,
+                picked.map(|j| j.id.to_string()),
+                &playing,
+                show_all,
+                &names,
+                &uses,
+            );
+        });
+        if close || modal.should_close() || matches!(pick, Some(Pick::Use(_) | Pick::Open(_))) {
+            self.recordings_for = None;
+            self.show_all = false;
         }
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &label));
         match pick {
             Some(Pick::Use(id)) if i == DRAFT => {
                 // Added with the words of what it picks, and that recording.
@@ -1138,7 +1152,6 @@ impl App {
             }
             None => {}
         }
-        open.inner.is_some()
     }
 
     /// Each shot's "01-010  plot" and its chapter's "01 Title", for the dropdown's headers.
@@ -1282,34 +1295,18 @@ fn recording_list(
                 .collect();
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match elsewhere.iter().find(|(r, _)| *r != here.0) {
-                        Some((r, l)) => {
-                            if icon_button(ui, &format!("Go to {r}"), go_icon)
-                                .on_hover_text(format!(
-                                    "line {} of {r} uses it, so it can't be deleted; go there",
-                                    l + 1
-                                ))
-                                .clicked()
-                            {
-                                pick = Some(Pick::Open(*r));
-                            }
-                        }
-                        None if !elsewhere.is_empty() => {
-                            ui.add_enabled_ui(false, |ui| {
-                                crate::delete_button(ui, &format!("Delete {words}"))
-                            })
-                            .inner
-                            .on_disabled_hover_text(format!(
-                                "line {} uses it too, so it can't be deleted",
-                                elsewhere[0].1 + 1
-                            ));
-                        }
-                        None => {
-                            let bin = crate::delete_button(ui, &format!("Delete {words}"));
-                            if bin.on_hover_text("delete this recording").clicked() {
-                                pick = Some(Pick::Delete(id.clone()));
-                            }
-                        }
+                    // The bin stays put; where it's used is said beside it.
+                    let bin = ui
+                        .add_enabled_ui(elsewhere.is_empty(), |ui| {
+                            crate::delete_button(ui, &format!("Delete {words}"))
+                        })
+                        .inner;
+                    if bin
+                        .on_hover_text("delete this recording")
+                        .on_disabled_hover_text("another line sends it, so it can't be deleted")
+                        .clicked()
+                    {
+                        pick = Some(Pick::Delete(id.clone()));
                     }
                     let on = playing.contains(&id);
                     let (icon, what): (fn(&egui::Painter, egui::Rect, egui::Stroke), _) = if on {
@@ -1324,22 +1321,22 @@ fn recording_list(
                             Pick::Play(id.clone())
                         });
                     }
-                    if !elsewhere.is_empty() {
-                        let all: Vec<String> = elsewhere
-                            .iter()
-                            .map(|(r, l)| format!("line {} of {r}", l + 1))
-                            .collect();
-                        let n = elsewhere.len();
+                    if let Some((r, l)) = elsewhere.iter().find(|(r, _)| *r != here.0) {
+                        let go = ui
+                            .link(RichText::new(format!("line {} of {r} →", l + 1)).small())
+                            .on_hover_text("it sends this too; go there");
+                        go.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Link, true, format!("Go to {r}"))
+                        });
+                        if go.clicked() {
+                            pick = Some(Pick::Open(*r));
+                        }
+                    } else if let Some((_, l)) = elsewhere.first() {
                         ui.label(
-                            RichText::new(if n == 1 {
-                                "1 other line".to_string()
-                            } else {
-                                format!("{n} other lines")
-                            })
-                            .small()
-                            .color(theme::DUST),
-                        )
-                        .on_hover_text(format!("also used by {}", all.join(", ")));
+                            RichText::new(format!("line {} too", l + 1))
+                                .small()
+                                .color(theme::DUST),
+                        );
                     }
                     let chosen = picked.as_deref() == Some(id.as_str());
                     let b = crate::grouped::item(chosen, words)

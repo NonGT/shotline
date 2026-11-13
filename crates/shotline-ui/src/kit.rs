@@ -85,6 +85,20 @@ pub(crate) fn badge(p: &egui::Painter, at: egui::Pos2, n: usize, fill: Color32) 
     rect
 }
 
+/// A word on a tinted pill, like "recorded" or "out of date".
+/// `width` keeps a column of them lined up.
+pub(crate) fn chip(ui: &mut egui::Ui, text: &str, color: Color32, width: f32) -> Response {
+    let font = egui::FontId::proportional(11.5);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, color);
+    let size = egui::vec2((galley.size().x + 14.0).max(width), 20.0);
+    let (rect, r) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 10.0, color.gamma_multiply(0.14));
+    p.galley(rect.center() - galley.size() / 2.0, galley, color);
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
+    r
+}
+
 /// Part of a ring going round, for something running. `t` is the time in seconds.
 pub(crate) fn ring(p: &egui::Painter, c: egui::Pos2, r: f32, width: f32, color: Color32, t: f64) {
     p.circle_stroke(c, r, Stroke::new(width, theme::EDGE));
