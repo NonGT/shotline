@@ -8,6 +8,7 @@
 //! - `fake_polls = n`: polls that say running before it finishes (default 1)
 //! - `fake_overcharge = x`: the balance drops by x times the price instead of the price
 //! - `fake_no_drop = true`: the balance never drops, as if billing were slow
+//! - `fake_no_cancel = true`: cancel is refused, as by a provider that has started already
 //!
 //! `usage` answers with the contents of `shotline-fake-usage.json` in the working directory, if
 //! there is one. The balance starts at 100 USD for each process. `fake/metered` quotes in
@@ -54,6 +55,7 @@ struct Job {
     charge_on_fail: bool,
     cancelled: bool,
     billed: bool,
+    no_cancel: bool,
 }
 
 fn models() -> Vec<ModelInfo> {
@@ -329,6 +331,7 @@ impl Plugin for FakePlugin {
                 charge_on_fail,
                 cancelled: false,
                 billed: false,
+                no_cancel: req.params.get("fake_no_cancel") == Some(&json!(true)),
             },
         );
         Ok(id)
@@ -408,7 +411,11 @@ impl Plugin for FakePlugin {
 
     async fn cancel(&self, job: &str) -> Result<()> {
         let mut jobs = self.jobs.lock().unwrap();
-        jobs.get_mut(job).ok_or_else(|| not_found(job))?.cancelled = true;
+        let j = jobs.get_mut(job).ok_or_else(|| not_found(job))?;
+        if j.no_cancel {
+            return Err(PluginError::new(ErrorKind::Other, "it has started already").into());
+        }
+        j.cancelled = true;
         Ok(())
     }
 

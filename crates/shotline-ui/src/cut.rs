@@ -126,7 +126,7 @@ impl App {
             let why = if missing.is_empty() {
                 String::new()
             } else {
-                format!("no take selected for {}", missing.join(", "))
+                format!("no take in the cut for {}", missing.join(", "))
             };
             let can = missing.is_empty() && !running && self.host.is_some();
             if ui

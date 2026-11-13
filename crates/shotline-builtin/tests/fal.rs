@@ -293,6 +293,24 @@ async fn quote_run_poll_fetch() {
 }
 
 #[tokio::test]
+async fn a_started_job_cant_be_cancelled() {
+    let s = mock_fal().await;
+    Mock::given(method("PUT"))
+        .and(path("/minimax/h3-max/requests/req-9/cancel"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({"status": "ALREADY_COMPLETED"})),
+        )
+        .mount(&s)
+        .await;
+    let e = fal_at(&s)
+        .cancel("minimax/h3-max/reference-to-video#req-9")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("started making it already"), "{e}");
+}
+
+#[tokio::test]
 async fn images_with_references_go_to_edit() {
     let s = mock_fal().await;
     let fal = fal_at(&s);

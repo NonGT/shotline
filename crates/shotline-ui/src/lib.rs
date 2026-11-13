@@ -27,7 +27,7 @@ mod start;
 mod theme;
 mod voice;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -96,7 +96,8 @@ struct Film {
     renders: Vec<PathBuf>,
     cost: Option<cost::Cost>,
     /// How many takes each shot has.
-    takes: HashMap<ShotRef, usize>,
+    /// Each shot's takes with a video, and whether its newest take failed.
+    takes: HashMap<ShotRef, (usize, bool)>,
     /// Shots with a selected take.
     made: usize,
     /// Every image made and not thrown out, newest first.
@@ -284,7 +285,7 @@ pub trait Host: Send + Sync {
     /// `translate` puts the prompt into English first, if it isn't and that isn't done yet.
     fn take_quote(&self, film: &Path, shot: ShotRef, translate: bool) -> anyhow::Result<String>;
     /// Shoots a take, if the price is still `at`, telling `on` how it goes. Returns a line
-    /// about it.
+    /// about it. Once `stop` is set the provider is asked to cancel it.
     fn take(
         &self,
         film: &Path,
@@ -292,6 +293,7 @@ pub trait Host: Send + Sync {
         at: &str,
         translate: bool,
         on: &mut dyn FnMut(String),
+        stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> anyhow::Result<String>;
 }
 
@@ -481,6 +483,8 @@ pub struct App {
     /// Ticked: a shot's prompt goes into English before its next take.
     translate_prompt: bool,
     shoot: Arc<Mutex<shoot::Shoot>>,
+    /// Set to cancel the take being shot.
+    shoot_stop: Arc<std::sync::atomic::AtomicBool>,
     say: Arc<Mutex<voice::Say>>,
     /// What each speaker in the open shot has recorded.
     voices: HashMap<String, Vec<shotline_core::Job>>,
@@ -875,6 +879,7 @@ impl App {
             shoot_for: None,
             translate_prompt: false,
             shoot: Arc::default(),
+            shoot_stop: Arc::default(),
             say: Arc::default(),
             voices: HashMap::new(),
             voice_open: None,
@@ -1711,11 +1716,26 @@ impl App {
             let anchors = p.anchors(&el)?;
             elements.push((el, anchors));
         }
-        let mut takes: HashMap<ShotRef, HashSet<_>> = HashMap::new();
+        // Each take's last job says how it stands.
+        let mut last: BTreeMap<(ShotRef, shotline_core::Ulid), (u32, JobStatus, bool)> =
+            BTreeMap::new();
         for j in p.jobs()? {
-            if let (Some(s), Some(t)) = (j.shot, j.take) {
-                takes.entry(s).or_default().insert(t);
+            if let (Some(s), Some(t)) = (j.shot, j.take)
+                && !j.discarded
+            {
+                let now = (j.step, j.status, !j.outputs.is_empty());
+                let e = last.entry((s, t)).or_insert(now);
+                if j.step >= e.0 {
+                    *e = now;
+                }
             }
+        }
+        let mut takes: HashMap<ShotRef, (usize, bool)> = HashMap::new();
+        // In take order, so the last seen of a shot is its newest.
+        for ((s, _), (_, status, out)) in last {
+            let e = takes.entry(s).or_default();
+            e.0 += (status == JobStatus::Done && out) as usize;
+            e.1 = status == JobStatus::Failed;
         }
         let mut chapters = vec![];
         for c in p.chapters()? {
@@ -1732,7 +1752,7 @@ impl App {
             timeline,
             renders: renders(&p.root.join("renders")),
             cost: cost::load(p, &self.user_dir)?,
-            takes: takes.into_iter().map(|(s, t)| (s, t.len())).collect(),
+            takes,
             made: p.selected_take_ids()?.len(),
             in_use: HashMap::new(),
             images: p.made_images()?,
@@ -2216,7 +2236,8 @@ impl App {
                         for (e, anchors) in els {
                             let here = self.element.as_ref() == Some(&e.handle);
                             let key = format!("@{}", e.handle);
-                            if list_row(ui, &key, &e.name, anchors.len(), None, here).clicked() {
+                            if list_row(ui, &key, &e.name, anchors.len(), None, here, &[]).clicked()
+                            {
                                 open = Some(e.handle.clone());
                             }
                         }
@@ -2604,6 +2625,10 @@ impl App {
     }
 
     fn shots(&mut self, ui: &mut egui::Ui) {
+        let shooting = match &*self.shoot.lock().unwrap() {
+            shoot::Shoot::Running(r, _) => Some(*r),
+            _ => None,
+        };
         let mut open = None;
         let mut acts = vec![];
         egui::Panel::left("shots")
@@ -2612,6 +2637,12 @@ impl App {
             .frame(egui::Frame::new().fill(theme::RACK))
             .show(ui, |ui| {
                 page(ui, SIDE, |ui| {
+                    let all: Vec<(u32, String)> = self
+                        .film
+                        .chapters
+                        .iter()
+                        .map(|(c, _)| (c.number, c.id()))
+                        .collect();
                     for (c, shots) in &self.film.chapters {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
@@ -2620,11 +2651,17 @@ impl App {
                                 acts.push(a);
                             }
                         });
-                        for (r, s) in shots {
-                            let takes = self.film.takes.get(r).copied().unwrap_or(0);
-                            if shot_row(ui, *r, s, takes, self.shot == Some(*r)).clicked() {
+                        for (i, (r, s)) in shots.iter().enumerate() {
+                            let takes = self.film.takes.get(r).copied().unwrap_or_default();
+                            let shooting = shooting == Some(*r);
+                            let row = shot_row(ui, *r, s, takes, shooting, self.shot == Some(*r));
+                            if row.clicked() {
                                 open = Some(*r);
                             }
+                            let last = i + 1 == shots.len();
+                            row.context_menu(|ui| {
+                                acts.extend(shot_menu(ui, *r, c.number, i, last, &all, shooting));
+                            });
                         }
                         ui.horizontal(|ui| {
                             ui.add_space(4.0);
@@ -2742,9 +2779,6 @@ impl App {
         ui.add_space(theme::GAP * 1.5);
         self.take_list(ui, s, &mut acts);
         ui.add_space(theme::GAP * 1.5);
-        if ui.button("Add a shot after this one").clicked() {
-            acts.push(Action::AddShot(r.chapter, Some(r.shot)));
-        }
         // These read the shot from disk, so what's typed goes first.
         if acts.iter().any(|a| {
             matches!(
@@ -2924,11 +2958,26 @@ impl App {
         ui.add_enabled(
             on || ready,
             egui::Checkbox::new(&mut on, "Continue from previous shot"),
-        )
-        .on_disabled_hover_text(match prev {
-            Some(p) => format!("{p} has no selected take yet"),
-            None => "it's the first shot".into(),
-        });
+        );
+        // Why it can't be turned on, said where it's seen.
+        if !on && !ready {
+            match prev {
+                Some(p) => {
+                    let go = ui
+                        .horizontal(|ui| {
+                            hint(ui, &format!("Put a take of {p} in the cut first."));
+                            ui.link(format!("Open {p}")).clicked()
+                        })
+                        .inner;
+                    if go {
+                        self.open_shot(p);
+                        return;
+                    }
+                }
+                None => hint(ui, "It's the first shot, so it starts on a cut."),
+            }
+        }
+        let f = &mut self.form;
         f.transition = if on {
             Transition::Continue
         } else {
@@ -2949,10 +2998,34 @@ impl App {
                     "It's the first shot, so there's nothing before it to carry on from.",
                 ),
             }
+            self.unused_frame(ui, r, s);
             return;
         }
         ui.add_space(8.0);
         self.frame(ui, r, s);
+    }
+
+    /// A storyboard frame kept while the shot continues: shown faded, as it isn't sent.
+    fn unused_frame(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot) {
+        let Some(f) = &s.frame else { return };
+        ui.add_space(12.0);
+        let path = self.project.root.join(f);
+        ui.horizontal(|ui| {
+            ui.scope(|ui| {
+                ui.set_opacity(0.4);
+                self.thumbs.show(ui, &path, 64.0, "Unused storyboard frame");
+            });
+            ui.vertical(|ui| {
+                hint(ui, "Its storyboard frame isn't used while it continues.");
+                if remove_button(ui)
+                    .on_hover_text("takes the frame off the shot; undo brings it back")
+                    .clicked()
+                {
+                    self.flush();
+                    self.apply(vec![Action::SetFrame(r, None)]);
+                }
+            });
+        });
     }
 
     /// The last frame of the shot before's take that this one starts on, and a way onto the take
@@ -3013,19 +3086,47 @@ impl App {
         if let Some(sel) = selected
             && from.as_ref() != Some(&sel)
         {
-            let now = self
+            let new = self
                 .prev_takes
                 .iter()
                 .find(|t| t.id.to_string() == sel)
+                .cloned();
+            let now = new
+                .as_ref()
                 .map_or_else(|| "another take".to_string(), |t| format!("#{}", t.number));
-            ui.add_space(6.0);
+            ui.add_space(10.0);
             hint(ui, &format!("{prev} plays {now} in the cut now."));
-            if kit::primary_button(ui, None, "Use new previous shot last frame")
-                .on_hover_text(format!("start on the last frame of {prev}'s {now} instead"))
-                .clicked()
-            {
-                self.form.continue_from = Some(sel);
-            }
+            // What it would start on instead, beside the button.
+            ui.horizontal(|ui| {
+                if let Some(t) = &new
+                    && let Some(png) = self.project.last_frame(t)
+                {
+                    let name = format!("last frame of {t}");
+                    if png.is_file() {
+                        if self.thumbs.show(ui, &png, 64.0, &name) {
+                            self.zoom = Some(png);
+                        }
+                    } else if let Some(j) = t.output()
+                        && let Some(f) = j.outputs.first()
+                    {
+                        let video = self.project.job_dir(j.id).join(f);
+                        make_still(
+                            ui.ctx(),
+                            (self.ff.as_ref(), &self.posters),
+                            &video,
+                            &png,
+                            true,
+                        );
+                    }
+                }
+                if ui
+                    .button(format!("Start on {now}'s last frame instead"))
+                    .on_hover_text(format!("the last frame of {prev}'s {now}"))
+                    .clicked()
+                {
+                    self.form.continue_from = Some(sel);
+                }
+            });
         }
     }
 
@@ -3136,6 +3237,7 @@ impl App {
         section(ui, "Takes");
         ui.add_space(6.0);
         let mut sounds_for = None;
+        let mut use_take: Option<Take> = None;
         let mut splice: Option<Vec<shotline_core::Piece>> = None;
         ui.horizontal(|ui| {
             let any = self.takes.iter().any(|t| t.output().is_some());
@@ -3166,7 +3268,13 @@ impl App {
             return;
         }
         let mut watch = None;
-        for t in &self.takes {
+        let mut again = false;
+        let step = match &*self.shoot.lock().unwrap() {
+            shoot::Shoot::Running(r, step) if Some(*r) == self.shot => Some(step.clone()),
+            _ => None,
+        };
+        // Newest first, so a new one shows where it's looked for.
+        for t in self.takes.iter().rev() {
             let selected = s.selected_take.as_deref() == Some(t.id.to_string().as_str());
             let video = t.output().and_then(|j| {
                 let f = j.outputs.first()?;
@@ -3207,12 +3315,28 @@ impl App {
                                     egui::vec2(96.0, 54.0),
                                     egui::Sense::hover(),
                                 );
-                                ui.painter().rect_stroke(
+                                let p = ui.painter();
+                                p.rect_stroke(
                                     rect,
                                     2.0,
                                     egui::Stroke::new(1.0, theme::LINE),
                                     egui::StrokeKind::Inside,
                                 );
+                                match t.status() {
+                                    JobStatus::Failed => kit::glyph(
+                                        p,
+                                        rect.center(),
+                                        icon::FAILED,
+                                        20.0,
+                                        theme::FLAG.gamma_multiply(0.8),
+                                    ),
+                                    s if !s.is_finished() => {
+                                        let now = ui.input(|i| i.time);
+                                        kit::ring(p, rect.center(), 9.0, 2.0, theme::STEEL, now);
+                                        ui.ctx().request_repaint();
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         ui.add_space(6.0);
@@ -3230,6 +3354,9 @@ impl App {
                                 let status = t.status();
                                 if selected {
                                     ui.label(RichText::new("in the cut").color(theme::TUNGSTEN));
+                                } else if !status.is_finished() {
+                                    let what = step.clone().unwrap_or_else(|| status.to_string());
+                                    ui.label(RichText::new(what).color(theme::STEEL));
                                 } else if status != JobStatus::Done {
                                     let color = match status {
                                         JobStatus::Failed => theme::FLAG,
@@ -3260,40 +3387,52 @@ impl App {
                                     .on_hover_text(why);
                             }
                         });
+                        // Always in this order from the right: remove, more, then what to do.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if t.status().is_finished() {
-                                let next = self
-                                    .continued
-                                    .as_ref()
-                                    .filter(|(_, id)| *id == t.id.to_string())
-                                    .map(|(next, _)| *next);
-                                let rm = ui.add_enabled_ui(next.is_none(), remove_button).inner;
-                                rm.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::Role::Button,
-                                        next.is_none(),
-                                        format!("Remove #{n}"),
-                                    )
-                                });
-                                if rm
-                                    .on_hover_text("off the list; what it cost stays in the ledger")
-                                    .on_disabled_hover_text(format!(
-                                        "{} starts on its last frame; have it start on another \
-                                         take first",
-                                        next.map(|n| n.to_string()).unwrap_or_default()
-                                    ))
-                                    .clicked()
-                                {
-                                    acts.push(Action::RemoveTake(t.clone()));
-                                }
-                            }
-                            if let Some(pieces) = shotline_core::pieces_of(t)
-                                && act(ui, "Change pieces", n)
-                                    .on_hover_text("makes a new take from these pieces, changed")
-                                    .clicked()
+                            let finished = t.status().is_finished();
+                            let next = self
+                                .continued
+                                .as_ref()
+                                .filter(|(_, id)| *id == t.id.to_string())
+                                .map(|(next, _)| *next);
+                            let can = finished && next.is_none();
+                            let rm = ui
+                                .add_enabled_ui(can, |ui| {
+                                    delete_button(ui, &format!("Remove #{n}"))
+                                })
+                                .inner;
+                            if rm
+                                .on_hover_text("off the list; what it cost stays in the ledger")
+                                .on_disabled_hover_text(match next {
+                                    Some(x) => format!(
+                                        "{x} starts on its last frame; have it start on another \
+                                         take first"
+                                    ),
+                                    None => "it's still being made".into(),
+                                })
+                                .clicked()
                             {
-                                splice = Some(pieces);
+                                acts.push(Action::RemoveTake(t.clone()));
                             }
+                            let more = kit::icon_button(ui, icon::MORE, &format!("More for #{n}"))
+                                .on_hover_text("more");
+                            egui::Popup::menu(&more).show(|ui| {
+                                if ui.button("Details").clicked() {
+                                    watch = Some(t.clone());
+                                }
+                                if let Some(pieces) = shotline_core::pieces_of(t)
+                                    && ui
+                                        .button("Change pieces")
+                                        .on_hover_text(
+                                            "makes a new take from these pieces, changed",
+                                        )
+                                        .clicked()
+                                {
+                                    splice = Some(pieces);
+                                }
+                            });
+                            ui.add_space(4.0);
+                            let failed = t.status() == JobStatus::Failed;
                             if video.is_some() && selected {
                                 let k = self.project.take_sounds(t).map_or(0, |s| s.len());
                                 let label = match k {
@@ -3306,23 +3445,20 @@ impl App {
                                 {
                                     sounds_for = Some(t.clone());
                                 }
-                            }
-                            if video.is_some()
-                                && !selected
-                                && act(ui, "Use in the cut", n)
+                            } else if video.is_some() {
+                                if act(ui, "Use in the cut", n)
                                     .on_hover_text("the take this shot plays in the cut")
                                     .clicked()
-                            {
-                                if self
-                                    .continued
-                                    .as_ref()
-                                    .is_some_and(|(_, id)| *id != t.id.to_string())
                                 {
-                                    self.confirm_select = Some(t.clone());
-                                } else {
-                                    acts.push(Action::Select(t.clone()));
-                                    self.cut_follow = Some(t.clone());
+                                    use_take = Some(t.clone());
                                 }
+                            } else if failed
+                                && step.is_none()
+                                && act(ui, "Shoot again", n)
+                                    .on_hover_text("asks the price first; nothing is spent yet")
+                                    .clicked()
+                            {
+                                again = true;
                             }
                         });
                     });
@@ -3340,12 +3476,42 @@ impl App {
         if let Some(t) = sounds_for {
             self.open_sounds((&t).into(), t.to_string(), 0.0);
         }
+        if let Some(t) = use_take {
+            self.use_in_cut(&t, acts);
+        }
+        if again && let Some(r) = self.shot {
+            self.start_shoot(ui.ctx(), r, None);
+        }
         self.confirm_select(ui, acts);
         if let Some(pieces) = splice
             && let Some(r) = self.shot
         {
             self.open_splicer(r, pieces);
         }
+    }
+
+    /// Puts `t` in the cut, asking first if the shot after starts on another take's frame.
+    fn use_in_cut(&mut self, t: &Take, acts: &mut Vec<Action>) {
+        if self
+            .continued
+            .as_ref()
+            .is_some_and(|(_, id)| *id != t.id.to_string())
+        {
+            self.confirm_select = Some(t.clone());
+        } else {
+            acts.push(Action::Select(t.clone()));
+            self.cut_follow = Some(t.clone());
+        }
+    }
+
+    /// The take of `r` in the cut, by id.
+    fn in_cut_id(&self, r: ShotRef) -> Option<String> {
+        self.film
+            .chapters
+            .iter()
+            .flat_map(|(_, s)| s)
+            .find(|(x, _)| *x == r)
+            .and_then(|(_, s)| s.selected_take.clone())
     }
 
     /// Asks before another take goes in the cut while the shot after starts on this one's frame.
@@ -3557,6 +3723,10 @@ impl App {
     }
 
     fn watched(&mut self, ui: &mut egui::Ui) {
+        let Some(shot) = self.watching.as_ref().map(|(t, _)| t.shot) else {
+            return;
+        };
+        let in_cut = self.in_cut_id(shot);
         let Some((take, deck)) = &mut self.watching else {
             return;
         };
@@ -3574,6 +3744,17 @@ impl App {
             .and_then(|d| d.players.get(1))
             .map(|p| p.label.clone());
         let mut pick: Option<Option<Take>> = None;
+        let beside_take = beside
+            .as_deref()
+            .and_then(|l| others.iter().find(|o| o.to_string() == l))
+            .cloned();
+        // The take the next shot starts on can't go.
+        let held = self
+            .continued
+            .as_ref()
+            .is_some_and(|(_, id)| *id == take.id.to_string());
+        let mut chosen: Option<Take> = None;
+        let mut remove = false;
         let modal = crate::modal(ui.ctx(), "take", |ui| {
             ui.set_width(wide);
             let bar = title_bar(ui, &take.to_string());
@@ -3610,10 +3791,53 @@ impl App {
                         });
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let here = in_cut.as_deref() == Some(take.id.to_string().as_str());
+                for t in std::iter::once(&*take).chain(beside_take.as_ref()) {
+                    if in_cut.as_deref() == Some(t.id.to_string().as_str()) {
+                        ui.label(
+                            RichText::new(format!("#{} is in the cut", t.number))
+                                .color(theme::TUNGSTEN),
+                        );
+                    } else if t.output().is_some()
+                        && kit::primary_button(ui, None, &format!("Use #{} in the cut", t.number))
+                            .on_hover_text("the take this shot plays in the cut")
+                            .clicked()
+                    {
+                        chosen = Some(t.clone());
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let r = ui
+                        .add_enabled_ui(!here && !held, |ui| {
+                            kit::danger_button(ui, "Remove this take")
+                        })
+                        .inner;
+                    if r.on_hover_text("off the list; what it cost stays in the ledger")
+                        .on_disabled_hover_text(if here {
+                            "it's in the cut; put another take in first"
+                        } else {
+                            "the next shot starts on its last frame"
+                        })
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                });
+            });
+            ui.add_space(8.0);
             take_details(ui, take, &self.project);
             close |= close_corner(ui, bar);
         });
+        let mut acts = vec![];
+        if let Some(t) = chosen {
+            self.use_in_cut(&t, &mut acts);
+        }
+        if remove && let Some((t, _)) = &self.watching {
+            acts.push(Action::RemoveTake(t.clone()));
+            close = true;
+        }
         match pick {
             Some(None) => {
                 if let Some((_, Some(d))) = &mut self.watching {
@@ -3638,6 +3862,9 @@ impl App {
                 d.pause(self.audio.as_ref());
             }
             self.watching = None;
+        }
+        if !acts.is_empty() {
+            self.apply(acts);
         }
     }
 }
@@ -3749,8 +3976,14 @@ fn poster(
             r
         }
     };
+    // A play mark, so it reads as something to click.
+    let c = r.rect.center();
+    let p = ui.painter();
+    let shade = if r.hovered() { 200 } else { 150 };
+    p.circle_filled(c, 13.0, egui::Color32::from_black_alpha(shade));
+    kit::glyph(p, c + egui::vec2(1.0, 0.0), icon::PLAY, 13.0, theme::PAPER);
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("click to watch it, with what went into it")
+        .on_hover_text("watch it, with what went into it")
 }
 
 /// Beside the take in the cut: its size, length and model, and what it was asked for, as written
@@ -3982,21 +4215,125 @@ fn chapter_title(
 }
 
 /// One shot in the list: number, title, how many takes, and an amber dot once one is in the cut.
-fn shot_row(ui: &mut egui::Ui, r: ShotRef, s: &Shot, takes: usize, open: bool) -> egui::Response {
+/// A shot in the side list, with marks for how it stands: carried on from the shot before,
+/// being shot, its newest take failed, no prompt yet.
+fn shot_row(
+    ui: &mut egui::Ui,
+    r: ShotRef,
+    s: &Shot,
+    (takes, failed): (usize, bool),
+    shooting: bool,
+    open: bool,
+) -> egui::Response {
     let title = if s.title.is_empty() {
         &s.prompt
     } else {
         &s.title
     };
     let title = title.lines().next().unwrap_or("");
-    list_row(
+    let mut marks: Vec<(Mark, &str)> = vec![];
+    if s.transition == Transition::Continue {
+        marks.push((
+            Mark::Icon(icon::CONTINUES, theme::DUST),
+            "carries on from the shot before",
+        ));
+    }
+    if s.prompt.trim().is_empty() {
+        marks.push((Mark::Icon(icon::NO_PROMPT, theme::FAINT), "no prompt yet"));
+    }
+    if shooting {
+        marks.push((Mark::Running, "being shot"));
+    } else if failed {
+        marks.push((
+            Mark::Icon(icon::FAILED, theme::FLAG),
+            "its newest take failed",
+        ));
+    }
+    let r = list_row(
         ui,
         &r.to_string(),
         title,
         takes,
         Some(s.selected_take.is_some()),
         open,
-    )
+        &marks.iter().map(|(m, _)| *m).collect::<Vec<_>>(),
+    );
+    if marks.is_empty() {
+        r
+    } else {
+        let why: Vec<&str> = marks.iter().map(|(_, w)| *w).collect();
+        r.on_hover_text(why.join("; "))
+    }
+}
+
+/// A shot row's right-click menu: what to do with it, by its place in its chapter.
+fn shot_menu(
+    ui: &mut egui::Ui,
+    r: ShotRef,
+    chapter: u32,
+    i: usize,
+    last: bool,
+    chapters: &[(u32, String)],
+    shooting: bool,
+) -> Option<Action> {
+    let mut out = None;
+    if kit::icon_text_button(ui, icon::ADD, "Insert a shot after").clicked() {
+        out = Some(Action::AddShot(chapter, Some(r.shot)));
+    }
+    if kit::icon_text_button(ui, icon::COPY, "Duplicate")
+        .on_hover_text("a copy right after it, with no takes")
+        .clicked()
+    {
+        out = Some(Action::DuplicateShot(r));
+    }
+    ui.separator();
+    if ui
+        .add_enabled_ui(i > 0, |ui| kit::icon_text_button(ui, icon::UP, "Move up"))
+        .inner
+        .clicked()
+    {
+        out = Some(Action::MoveShot(r, chapter, i - 1));
+    }
+    if ui
+        .add_enabled_ui(!last, |ui| {
+            kit::icon_text_button(ui, icon::DOWN, "Move down")
+        })
+        .inner
+        .clicked()
+    {
+        out = Some(Action::MoveShot(r, chapter, i + 1));
+    }
+    if chapters.len() > 1 {
+        ui.menu_button("Move to chapter", |ui| {
+            for (n, id) in chapters.iter().filter(|(n, _)| *n != chapter) {
+                if ui.button(id).on_hover_text("at its end").clicked() {
+                    out = Some(Action::MoveShot(r, *n, usize::MAX));
+                }
+            }
+        });
+    }
+    ui.separator();
+    let del = ui
+        .add_enabled_ui(!shooting, |ui| kit::danger_button(ui, "Delete shot"))
+        .inner;
+    if del
+        .on_hover_text("its takes stay in the ledger; undo brings it back")
+        .on_disabled_hover_text("it's being shot")
+        .clicked()
+    {
+        out = Some(Action::RemoveShot(r));
+    }
+    if out.is_some() {
+        ui.close();
+    }
+    out
+}
+
+/// A small sign on a side list row.
+#[derive(Clone, Copy)]
+enum Mark {
+    Icon(&'static str, egui::Color32),
+    Running,
 }
 
 /// A row in a side list: its key in grey, a title, a count and maybe an amber dot.
@@ -4007,6 +4344,7 @@ fn list_row(
     count: usize,
     dot: Option<bool>,
     open: bool,
+    marks: &[Mark],
 ) -> egui::Response {
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 34.0), egui::Sense::click());
@@ -4054,6 +4392,17 @@ fn list_row(
         right -= n.size().x;
         p.galley(egui::pos2(right, mid - n.size().y / 2.0), n, theme::DUST);
         right -= 8.0;
+    }
+    for m in marks.iter().rev() {
+        let at = egui::pos2(right - 7.0, mid);
+        match m {
+            Mark::Icon(i, c) => kit::glyph(p, at, i, 14.0, *c),
+            Mark::Running => {
+                kit::ring(p, at, 5.0, 1.5, theme::STEEL, ui.input(|i| i.time));
+                ui.ctx().request_repaint();
+            }
+        }
+        right -= 18.0;
     }
     let left = x + num.size().x + 10.0;
     let mut job = egui::text::LayoutJob::simple_singleline(

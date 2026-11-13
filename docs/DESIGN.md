@@ -418,7 +418,7 @@ For a continue shot, the last frame of a take of the previous shot is sent as th
 with the references. The shot keeps which take in `continue_from`: the one in the cut when continue
 was turned on, or when no take is named, the one in the cut now. Putting another take of the shot
 before in the cut asks first and leaves the continue shot on the old frame; the shot's page then
-offers the new one ("Use new previous shot last frame", or `shot set --continue-from`). A take a
+offers the new one ("Start on #3's last frame instead", or `shot set --continue-from`). A take a
 continue shot starts on can't be removed. Venice's h3 won't take a start frame beside references, so
 there the frame goes as one more reference picture that the prompt calls the first frame: the shot
 opens close to it rather than exactly on it. fal's h3 takes both.
@@ -869,6 +869,9 @@ once it's made (kept if another line sends it); Cancel keeps the old one. Lines 
 their start times. A Shoot section above Takes says what might go wrong, shows the prompt as the
 model gets it, and has Shoot a take…, which asks the price first and spends only on a
 second click, like `take`.
+While it runs, Cancel asks the provider to stop it. fal stops a job only while it's queued (once
+started, its cancel answers ALREADY_COMPLETED and the job runs on); Venice and WaveSpeed can't
+cancel. When it won't stop, the row says so, and the job finishes and is charged as usual.
 Each take shows a still from its video (kept in `.shotline/cache/posters/`); clicking it opens the
 take in a popup, stopped on its first frame, with every step's model, cost and prompt, and a
 Compare with dropdown that plays another take beside it in the popup. Each player also decodes a
@@ -878,7 +881,10 @@ plays it when nothing's being typed), with its size, length, model and prompt be
 video job keeps the shot's prompt as written (`brief`) and its English (`english`) when that's what
 went; older takes show the prompt the model got. The take in the cut has a tungsten border; the
 others have Use in the cut, and finished ones Remove (undoable). References sit in the right column
-under the shot's model, Add a shot after this one at the bottom. A long
+under the shot's model. A shot row's right-click menu inserts a shot after it, duplicates it
+(pictures copied, no takes), moves it up, down or to another chapter (its takes, pictures and
+place in the cut go with it) and deletes it (its takes are thrown out, kept for the ledger); all
+undoable. A long
 message in the bottom bar is cut short with … and has a copy button.
 
 It reopens on the tab and shot it was left on (`.shotline/cache/ui-place`) and where the window

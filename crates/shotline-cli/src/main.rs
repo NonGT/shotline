@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
@@ -830,8 +832,9 @@ impl shotline_ui::Host for Plugins {
         at: &str,
         translate: bool,
         on: &mut dyn FnMut(String),
+        stop: Arc<AtomicBool>,
     ) -> Result<String> {
-        shoot::take_at(&Project::open(film)?, shot, at, translate, on)
+        shoot::take_at(&Project::open(film)?, shot, at, translate, on, Some(stop))
     }
 
     fn start_run(&self, film: &Path, id: &str) -> Result<bool> {

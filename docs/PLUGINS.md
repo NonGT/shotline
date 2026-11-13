@@ -176,7 +176,9 @@ JSON the job produced, e.g. a transcript. Only write inside `output_dir`.
 
 ### cancel
 
-Params: `{"job": "<id>"}`. Returns `{}`.
+Params: `{"job": "<id>"}`. Returns `{}` when the provider will stop it. If it won't, because
+it has started already or can't cancel at all, return an error saying so: shotline then tells the
+user the job runs to the end and is charged, and keeps polling it as usual.
 
 ### rates (optional)
 

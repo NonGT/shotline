@@ -253,7 +253,10 @@ fn edit_the_story_and_add_shots() {
     // A shot after 01-010, then one at the end of chapter 2.
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();
-    h.get_by_label("Add a shot after this one").click();
+    h.get_by_label_contains("01-010  Paka walks in")
+        .click_secondary();
+    h.run();
+    h.get_by_label("Insert a shot after").click();
     h.run();
     h.run();
     let new = ShotRef {
@@ -529,11 +532,20 @@ impl Host for TestHost {
         at: &str,
         translate: bool,
         on: &mut dyn FnMut(String),
+        stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> anyhow::Result<String> {
         assert_eq!((shot, at), (R, "0.40 USD"));
         assert!(!translate);
         on("running (40%)".into());
         let p = Project::open(film)?;
+        // A shot that says so runs until it's stopped.
+        if p.shot(shot)?.prompt.contains("[hold]") {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            on("running (60%)".into());
+            anyhow::bail!("cancelled");
+        }
         let mut j = Job::new(
             Op::VideoGenerate,
             "fal",
@@ -2054,7 +2066,7 @@ fn a_continue_shot_keeps_its_start_until_told() {
         .query_by_label("last frame of 01-010#1")
         .is_some()));
     assert!(
-        h.query_by_label("Use new previous shot last frame")
+        h.query_by_label("Start on #3's last frame instead")
             .is_none()
     );
     open(&mut h, "01-010  Paka walks in");
@@ -2080,11 +2092,11 @@ fn a_continue_shot_keeps_its_start_until_told() {
     open(&mut h, &format!("{next}  Paka stops"));
     h.get_by_label("last frame of 01-010#1");
     h.get_by_label_contains("01-010 plays #3 in the cut now");
-    h.get_by_label("Use new previous shot last frame").click();
+    h.get_by_label("Start on #3's last frame instead").click();
     h.run();
     h.run();
     assert!(
-        h.query_by_label("Use new previous shot last frame")
+        h.query_by_label("Start on #3's last frame instead")
             .is_none()
     );
     open(&mut h, "01-010  Paka walks in");
@@ -3593,6 +3605,25 @@ fn plays_compares_and_plays_the_cut() {
     wait(&mut h, 0.3);
     h.get_by_label("Pause").click();
     assert!(wait_for(&mut h, |h| !h.state().is_playing()));
+    // Either side can go in the cut from here; the one in it can't be removed.
+    h.get_by_label("#1 is in the cut");
+    assert!(
+        h.get_by_label("Remove this take")
+            .accesskit_node()
+            .is_disabled()
+    );
+    let film = Project::open(&tmp.path().join("film")).unwrap();
+    let in_cut = |f: &Project| f.shot(r).unwrap().selected_take;
+    h.get_by_label("Use #3 in the cut").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("#3 is in the cut")
+        .is_some()));
+    assert_ne!(in_cut(&film), Some(takes[0].id.to_string()));
+    h.get_by_label("Use #1 in the cut").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("#1 is in the cut")
+        .is_some()));
+    assert_eq!(in_cut(&film), Some(takes[0].id.to_string()));
     h.get_by_label("Close").click();
     wait(&mut h, 0.1);
 
@@ -4717,10 +4748,42 @@ fn a_take_from_pieces() {
     h.get_by_label("from pieces of #1, #3");
 
     // Opened again with its pieces, to change.
-    h.get_by_label("Change pieces #4").click();
+    h.get_by_label("More for #4").click();
+    h.run();
+    h.get_by_label("Change pieces").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label_contains("2. #3  0.50–1.00s")
         .is_some()));
+
+    // Unchanged, Esc just closes; with a piece more, it asks first.
+    h.key_press(egui::Key::Escape);
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Add piece")
+        .is_none()));
+    h.get_by_label("More for #4").click();
+    h.run();
+    h.get_by_label("Change pieces").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Add piece")
+        .is_some()));
+    wait(&mut h, 0.1);
+    h.get_by_label("Add piece").click();
+    wait(&mut h, 0.1);
+    h.key_press(egui::Key::Escape);
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Discard 3 pieces?")
+        .is_some()));
+    h.get_by_label("Keep working").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Make take");
+    h.key_press(egui::Key::Escape);
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Discard 3 pieces?")
+        .is_some()));
+    h.get_by_label("Discard").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Add piece")
+        .is_none()));
 }
 
 #[test]
@@ -5351,6 +5414,17 @@ fn shots() {
     h.get_by_label("Make image…").scroll_to_me();
     h.run_steps(4);
     snap(&mut h, "shot-lower");
+    h.get_by_label("More for #1").scroll_to_me();
+    wait(&mut h, 0.5);
+    h.run_steps(4);
+    snap(&mut h, "takes");
+    h.get_by_label_contains("01-010  Paka walks in")
+        .click_secondary();
+    h.run_steps(4);
+    snap(&mut h, "shot-menu");
+    h.key_press(egui::Key::Escape);
+    h.get_by_label("Make image…").scroll_to_me();
+    h.run_steps(4);
 
     h.get_by_label("Make image…").click();
     h.run_steps(4);
@@ -5421,4 +5495,218 @@ fn snap_shell(h: &mut Harness<Shell>, name: &str) {
         .unwrap()
         .save(dir.join(format!("{name}.png")))
         .unwrap();
+}
+
+#[test]
+fn a_running_take_can_be_cancelled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut s = p.shot(R).unwrap();
+    s.prompt = "@paka walks into the trees [hold]".into();
+    p.save_shot(R, &s).unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(
+        vec![Description {
+            name: "fal".into(),
+            version: "1".into(),
+            protocol: 1,
+            editor: false,
+            app: String::new(),
+            env: vec![],
+            models: vec![ModelInfo {
+                id: "minimax/h3-max/reference-to-video".into(),
+                op: Op::VideoGenerate,
+                ref_image: Some("Image {n}".into()),
+                ..ModelInfo::default()
+            }],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1200.0, 2400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_steps(4);
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    wait(&mut h, 0.3);
+    let before = p.takes(R).unwrap().len();
+    h.get_by_label("Shoot a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Shoot a take for 0.40 USD")
+        .is_some()));
+    h.get_by_label("Shoot a take for 0.40 USD").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("running (40%)")
+        .is_some()));
+    h.get_by_label("Cancel").click();
+    // The host is told, and says it stopped.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Shoot a take…")
+        .is_some()));
+    h.get_by_label_contains("01-010: cancelled");
+    assert!(h.query_by_label("Cancel").is_none());
+    assert_eq!(p.takes(R).unwrap().len(), before);
+}
+
+#[test]
+fn a_failed_take_is_shot_again_after_its_price() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(
+        vec![Description {
+            name: "fal".into(),
+            version: "1".into(),
+            protocol: 1,
+            editor: false,
+            app: String::new(),
+            env: vec![],
+            models: vec![ModelInfo {
+                id: "minimax/h3-max/reference-to-video".into(),
+                op: Op::VideoGenerate,
+                ref_image: Some("Image {n}".into()),
+                ..ModelInfo::default()
+            }],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1200.0, 2400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_steps(4);
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    wait(&mut h, 0.3);
+    // The failed one shows why, and offers to go again, priced first.
+    h.get_by_label("content policy");
+    h.get_by_label("Shoot again #2").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Shoot a take for 0.40 USD")
+        .is_some()));
+    assert!(h.query_by_label("Shoot again #1").is_none());
+    // Newest first.
+    let rows: Vec<f32> = ["Remove #1", "Remove #2"]
+        .iter()
+        .map(|l| h.get_by_label(l).rect().top())
+        .collect();
+    assert!(rows[1] < rows[0]);
+}
+
+#[test]
+fn a_frame_kept_while_continuing_shows_faded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let png = p.root.join("still.png");
+    picture(&png, 90, 160, [90, 90, 90], [40, 40, 40]);
+    let next = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                title: "Paka stops".into(),
+                transition: Transition::Continue,
+                frame: Some("still.png".into()),
+                ..Shot::default()
+            },
+        )
+        .unwrap();
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 2400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_steps(4);
+    h.get_by_label_contains(&format!("{next}  Paka stops"))
+        .click();
+    wait(&mut h, 0.3);
+    h.get_by_label("Unused storyboard frame");
+    h.get_by_label("Its storyboard frame isn't used while it continues.");
+    h.get_by_label("Remove").click();
+    assert!(wait_for(&mut h, |_| p.shot(next).unwrap().frame.is_none()));
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Unused storyboard frame")
+        .is_none()));
+}
+
+#[test]
+fn shots_are_duplicated_moved_and_deleted_from_their_menu() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let b = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                title: "Paka stops".into(),
+                ..Shot::default()
+            },
+        )
+        .unwrap();
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 1200.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_steps(4);
+    let menu = |h: &mut Harness<App>, row: &str, item: &str| {
+        h.get_by_label_contains(row).click_secondary();
+        h.run();
+        h.get_by_label(item).click();
+        h.run();
+        h.run();
+    };
+    let order = |p: &Project| -> Vec<String> {
+        p.shots(None)
+            .unwrap()
+            .iter()
+            .map(|(r, s)| format!("{r} {}", s.title))
+            .collect()
+    };
+    let first = order(&p);
+
+    menu(&mut h, &format!("{b}  Paka stops"), "Duplicate");
+    assert_eq!(order(&p).len(), 3);
+    h.get_by_label_contains("is a copy of");
+
+    menu(&mut h, &format!("{b}  Paka stops"), "Move up");
+    let now = order(&p);
+    assert!(now[0].ends_with("Paka stops"), "{now:?}");
+    assert!(p.shot(b).is_err());
+
+    // The first shot can't go up.
+    let top = p.shots(None).unwrap()[0].0;
+    h.get_by_label_contains(&format!("{top}  Paka stops"))
+        .click_secondary();
+    h.run();
+    assert!(h.get_by_label("Move up").accesskit_node().is_disabled());
+    h.key_press(egui::Key::Escape);
+    h.run();
+
+    menu(&mut h, &format!("{top}  Paka stops"), "Delete shot");
+    assert!(p.shot(top).is_err());
+    assert_eq!(order(&p).len(), 2);
+
+    // Undo puts it back, then puts it back where it was.
+    for _ in 0..2 {
+        h.get_by_label("Undo").click();
+        h.run();
+        h.run();
+    }
+    assert!(p.shot(b).is_ok(), "{:?}", order(&p));
+    h.get_by_label("Undo").click();
+    h.run();
+    h.run();
+    assert_eq!(order(&p), first);
 }
