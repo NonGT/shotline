@@ -153,6 +153,9 @@ pub struct Job {
     /// The element it's for: who speaks a line's recording, or whose anchor an image is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub who: Option<String>,
+    /// An image made as a shot's storyboard frame, not a picture for it to send along.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub frame: bool,
     /// A recording thrown out but kept, since a take still uses it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub discarded: bool,
@@ -183,6 +186,7 @@ impl Job {
             created: jiff::Timestamp::UNIX_EPOCH,
             finished: None,
             who: None,
+            frame: false,
             discarded: false,
         }
     }

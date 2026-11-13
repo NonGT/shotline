@@ -17,6 +17,8 @@ pub(crate) struct Entry {
     pub made: Option<String>,
     /// Where it's used, which keeps it from being thrown out.
     pub used: Option<String>,
+    /// Fits what it's picked for; the rest wait behind Show all.
+    pub near: bool,
 }
 
 pub(crate) enum Browsed {
@@ -28,7 +30,10 @@ pub(crate) enum Browsed {
 /// What the dropdown is open for: its own made images come first.
 #[derive(Clone, PartialEq)]
 pub(crate) enum Near {
+    /// A picture for the shot to send along.
     Shot(ShotRef),
+    /// The shot's storyboard frame.
+    Frame(ShotRef),
     Element(String),
 }
 
@@ -46,6 +51,12 @@ pub(crate) fn dropdown(
     hover: &str,
 ) -> Option<Browsed> {
     let mut out = None;
+    let all_id = egui::Id::unique(("browse all", &salt));
+    let all = ui.data(|d| d.get_temp::<bool>(all_id).unwrap_or(false));
+    let far = rows.iter().filter(|(_, _, e)| !e.near).count();
+    let shown: Vec<&(String, String, Entry)> =
+        rows.iter().filter(|(_, _, e)| e.near || all).collect();
+    let mut more = false;
     ui.add_enabled_ui(!rows.is_empty(), |ui| {
         let open = egui::ComboBox::from_id_salt(("browse", salt))
             .selected_text(LABEL)
@@ -56,8 +67,11 @@ pub(crate) fn dropdown(
                 ui.set_width(360.0);
                 let grown = grouped::list(
                     ui,
-                    rows,
-                    |ui, e| {
+                    &shown
+                        .iter()
+                        .map(|(a, b, e)| (a.clone(), b.clone(), e))
+                        .collect::<Vec<_>>(),
+                    |ui, e: &&Entry| {
                         ui.horizontal(|ui| {
                             let (rect, _) = ui
                                 .allocate_exact_size(egui::vec2(44.0, 28.0), egui::Sense::hover());
@@ -116,7 +130,16 @@ pub(crate) fn dropdown(
                             );
                         });
                     },
-                    |_| {},
+                    |ui| {
+                        if !all && far > 0 {
+                            more = ui
+                                .add(
+                                    grouped::item(false, format!("Show all ({far} more)"))
+                                        .min_size(egui::vec2(ui.available_width(), 0.0)),
+                                )
+                                .clicked();
+                        }
+                    },
                 );
                 grouped::remeasure_later(ui, grown);
                 if matches!(out, Some(Browsed::Pick(_))) {
@@ -124,11 +147,17 @@ pub(crate) fn dropdown(
                 }
             });
         grouped::remeasure(ui.ctx());
+        if open.inner.is_none() && all {
+            ui.data_mut(|d| d.insert_temp(all_id, false));
+        }
         open.response
             .on_hover_text(hover)
             .on_disabled_hover_text("nothing to pick from yet")
             .widget_info(|| egui::WidgetInfo::labeled(egui::Role::ComboBox, true, name));
     });
+    if more {
+        ui.data_mut(|d| d.insert_temp(all_id, true));
+    }
     out
 }
 
@@ -142,9 +171,23 @@ impl App {
             .iter()
             .map(|(e, _)| (e.handle.clone(), e.name.clone()))
             .collect();
+        // Frames made before jobs said so are known by being some shot's frame.
+        let is_frame = |m: &MadeImage| {
+            m.job.frame
+                || self
+                    .film
+                    .in_use
+                    .get(&m.path)
+                    .is_some_and(|u| u.starts_with("the storyboard frame"))
+        };
+        let prev = match near {
+            Near::Frame(r) => self.project.previous_shot(*r).ok().flatten(),
+            _ => None,
+        };
         let group = |m: &MadeImage| -> (u8, String) {
             let mine = match near {
-                Near::Shot(r) => m.shot == Some(*r),
+                Near::Shot(r) => m.shot == Some(*r) && !is_frame(m),
+                Near::Frame(r) => m.shot == Some(*r) && is_frame(m),
                 Near::Element(h) => m.element.as_deref() == Some(h.as_str()),
             };
             let name = if let Some(h) = &m.element {
@@ -201,6 +244,7 @@ impl App {
                         hover: format!("{} · {}\n{about}", m.job.plugin, m.job.model),
                         made: Some(m.job.id.to_string()),
                         used: self.film.in_use.get(&m.path).cloned(),
+                        near: matches!(near, Near::Frame(_)) == is_frame(m),
                     },
                 )
             })
@@ -217,6 +261,7 @@ impl App {
                         hover: format!("the last frame of {t}'s video"),
                         made: None,
                         used: self.film.in_use.get(f).cloned(),
+                        near: prev.is_some_and(|p| p == t.shot),
                     },
                 )
             }))

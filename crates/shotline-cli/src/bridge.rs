@@ -101,9 +101,11 @@ fn spend(p: &Project, id: Ulid, plugin: &str, req: &Request, at: &str) -> Result
         p,
         plugin,
         req,
-        (None, Some(id)),
+        shoot::For {
+            bridge: Some(id),
+            ..shoot::For::default()
+        },
         "bridge",
-        None,
         None,
         Go::At(at),
     )?

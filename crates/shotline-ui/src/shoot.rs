@@ -6,7 +6,7 @@ use shotline_core::{Built, Catalog, Shot, ShotRef};
 
 use crate::edit::Action;
 use crate::price::{Pressed, Price, PriceRow};
-use crate::{App, anchor, browse, hint, remove_button, theme};
+use crate::{App, anchor, browse, hint, remove_button, short, theme};
 
 #[derive(Clone, Default)]
 pub(crate) enum Shoot {
@@ -120,7 +120,6 @@ impl App {
         let mut remove = None;
         let mut leave = None;
         let mut remake = None;
-        let can_make = !self.image_models().is_empty() && self.making_for().is_none();
         // One picture a row, its note beside it with room to say what it shows.
         const TILE: f32 = 76.0;
         // "<Picture 2>" reads as "Picture 2".
@@ -145,6 +144,7 @@ impl App {
                 if self.thumbs.tile(ui, &path, egui::Vec2::splat(TILE), &file) {
                     zoom = Some(path.clone());
                 }
+                let origin = from.is_none().then(|| self.origin(&path));
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 6.0;
                     ui.horizontal(|ui| {
@@ -159,38 +159,54 @@ impl App {
                         ui.label(RichText::new(text).small().color(theme::GRAPHITE))
                             .on_hover_text(hover);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let (hover, label) = match from {
-                                Some(h) => (
-                                    format!("don't send it with {r}; @{h} keeps it"),
-                                    format!("Leave out {name}"),
-                                ),
-                                None => (format!("take {file} off {r}"), format!("Remove {name}")),
-                            };
-                            let rm = remove_button(ui).on_hover_text(hover);
-                            if from.is_none() {
-                                let again = ui
-                                    .add_enabled(can_make, egui::Button::new("Remake…"))
-                                    .on_hover_text(
-                                        "make it again from what it was made with, to change first",
-                                    );
-                                again.widget_info(|| {
+                            // An anchor stays with its element; only the shot's own are deleted.
+                            if let Some(h) = from {
+                                let out = ui.small_button("Leave out").on_hover_text(format!(
+                                    "don't send it with {r}; @{h} keeps it"
+                                ));
+                                out.widget_info(|| {
                                     egui::WidgetInfo::labeled(
                                         egui::Role::Button,
                                         true,
-                                        format!("Remake {name}"),
+                                        format!("Leave out {name}"),
                                     )
                                 });
-                                if again.clicked() {
-                                    remake = Some(path.clone());
+                                if out.clicked() {
+                                    leave = Some(file.clone());
                                 }
+                                return;
                             }
+                            let rm =
+                                remove_button(ui).on_hover_text(format!("take {file} off {r}"));
                             rm.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::Button, true, &label)
+                                egui::WidgetInfo::labeled(
+                                    egui::Role::Button,
+                                    true,
+                                    format!("Remove {name}"),
+                                )
                             });
                             if rm.clicked() {
-                                match from {
-                                    Some(_) => leave = Some(file.clone()),
-                                    None => remove = Some(i),
+                                remove = Some(i);
+                            }
+                            match origin.as_ref().and_then(|o| o.tag()) {
+                                Some(tag) => {
+                                    ui.label(RichText::new(tag).small().color(theme::DUST));
+                                }
+                                None => {
+                                    let again = ui.add(egui::Button::new("Remake…").small());
+                                    let again = again.on_hover_text(
+                                        "make it again from what it was made with, in its place",
+                                    );
+                                    again.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            true,
+                                            format!("Remake {name}"),
+                                        )
+                                    });
+                                    if again.clicked() {
+                                        remake = Some(path.clone());
+                                    }
                                 }
                             }
                         });
@@ -243,11 +259,9 @@ impl App {
         }
         if let Some(f) = remake {
             let defaults = self.image_defaults(s);
-            self.remake(anchor::For::Shot(r), &f, defaults);
+            self.remake(anchor::For::Picture(r, f.clone()), &f, defaults);
         }
-        let models = self.image_models();
-        let me = anchor::For::Shot(r);
-        let making = self.maker.as_ref().is_some_and(|m| m.target == me);
+        self.left_out(ui, r, s, acts);
         let sent: Vec<&str> = anchors.iter().map(|a| a.path.as_str()).collect();
         let left: Vec<(String, String, (String, String, std::path::PathBuf))> = self
             .film
@@ -283,6 +297,7 @@ impl App {
                         hover,
                         made: None,
                         used: None,
+                        near: true,
                     },
                 )
             })
@@ -316,37 +331,46 @@ impl App {
             {
                 acts.push(Action::AddShotImage(r, file));
             }
-            let busy = self.making_for();
-            if !models.is_empty()
-                && !making
-                && ui
-                    .add_enabled(busy.is_none(), egui::Button::new("Make image…"))
-                    .on_disabled_hover_text(format!(
-                        "still making one for {}",
-                        busy.unwrap_or_default()
-                    ))
-                    .clicked()
-            {
-                let film = &self.project.config;
-                let cfg = &film.image;
-                let aspect = s
-                    .model
-                    .as_ref()
-                    .and_then(|m| m.aspect.clone())
-                    .unwrap_or_else(|| film.aspect.clone());
-                self.maker = Some(anchor::Maker::new(
-                    me.clone(),
-                    vec![],
-                    &models,
-                    (&cfg.plugin, &cfg.model),
-                    (aspect, cfg.resolution.clone()),
-                ));
+            if self.make_button(ui, "Make image…") {
+                let defaults = self.image_defaults(s);
+                let title = format!("New picture for {r}");
+                self.open_maker(anchor::For::Shot(r), title, vec![], None, defaults);
             }
         });
-        if making {
-            ui.add_space(6.0);
-            self.show_maker(ui, &models);
+    }
+
+    /// Anchors left out of this shot, muted, each with Put back.
+    fn left_out(&mut self, ui: &mut egui::Ui, r: ShotRef, s: &Shot, acts: &mut Vec<Action>) {
+        if s.leave_out.is_empty() {
+            return;
         }
+        egui::CollapsingHeader::new(
+            RichText::new(format!("Left out ({})", s.leave_out.len())).color(theme::DUST),
+        )
+        .id_salt(("left out", r.to_string()))
+        .show(ui, |ui| {
+            for a in &s.leave_out {
+                ui.horizontal(|ui| {
+                    let path = self.project.root.join(a);
+                    ui.multiply_opacity(0.6);
+                    if self.thumbs.tile(ui, &path, egui::Vec2::splat(36.0), a) {
+                        self.zoom = Some(path.clone());
+                    }
+                    ui.label(RichText::new(short(a, 40)).small().color(theme::DUST))
+                        .on_hover_text(a.as_str());
+                    let back = ui
+                        .small_button("Put back")
+                        .on_hover_text(format!("send it with {r} again"));
+                    back.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Put back {a}"))
+                    });
+                    if back.clicked() {
+                        acts.push(Action::LeaveOut(r, a.clone(), false));
+                    }
+                });
+            }
+        });
+        ui.add_space(8.0);
     }
 
     /// What the video model gets, and what might go wrong with it.
