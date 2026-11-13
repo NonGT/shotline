@@ -331,7 +331,14 @@ impl Maker {
         let busy = matches!(stage, Stage::Pricing | Stage::Making);
         let frame = matches!(self.target, For::Frame(..));
         ui.horizontal(|ui| {
-            ui.heading(&self.title);
+            ui.label(
+                RichText::new(&self.title)
+                    .font(egui::FontId::new(
+                        17.0,
+                        egui::FontFamily::Name(theme::SEMIBOLD.into()),
+                    ))
+                    .color(theme::PAPER),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let close =
                     crate::icon_button(ui, "Close", crate::close_icon).on_hover_text(if making {
@@ -347,7 +354,7 @@ impl Maker {
         });
         ui.add_space(8.0);
         if let Stage::Made(out) = &stage {
-            return match self.review(ui, out, thumbs) {
+            return match self.review(ui, out, thumbs, models) {
                 Wants::Nothing => wants,
                 w => w,
             };
@@ -494,54 +501,127 @@ impl Maker {
         wants
     }
 
-    /// The image just made: Keep puts it to use, Try again goes back to the settings.
-    fn review(&mut self, ui: &mut egui::Ui, out: &Path, thumbs: &mut Thumbs) -> Wants {
+    /// Showing the image made, which wants the popup wider.
+    pub fn reviewing(&self) -> bool {
+        matches!(*self.stage.lock().unwrap(), Stage::Made(_))
+    }
+
+    /// The image just made, big on the left; on the right what it was made with, and Keep, Try
+    /// again (back to the settings) and Discard.
+    fn review(
+        &mut self,
+        ui: &mut egui::Ui,
+        out: &Path,
+        thumbs: &mut Thumbs,
+        models: &[ImageModel],
+    ) -> Wants {
         let mut wants = Wants::Nothing;
-        if thumbs.stage(ui, out, 360.0, "Made image") {
-            wants = Wants::Zoom(out.to_path_buf());
-        }
-        ui.add_space(8.0);
-        let what = match &self.target {
-            For::Element(h) => format!("Keep adds it to @{h}'s anchors."),
-            For::Shot(r) => format!("Keep adds it to {r}'s pictures."),
-            For::Picture(r, f) => format!(
-                "Keep puts it in place of {} in {r}; undo brings the old one back.",
-                f.file_name().unwrap_or_default().to_string_lossy()
-            ),
-            For::Frame(r, _) => format!(
-                "Keep makes it {r}'s storyboard frame, and what was typed its frame prompt; \
-                 undo brings the old ones back."
-            ),
-        };
-        hint(ui, &what);
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if crate::spend_button(ui, "Keep")
-                .on_hover_text("use it")
-                .clicked()
-            {
-                wants = Wants::Keep;
-            }
-            if ui
-                .button("Try again")
-                .on_hover_text("back to what it was made with, to change and make again")
-                .clicked()
-            {
-                *self.stage.lock().unwrap() = Stage::Idle;
-                wants = Wants::Again;
-            }
-            if ui
-                .button("Discard")
-                .on_hover_text("don't use it, and take it off the jobs list")
-                .clicked()
-            {
-                wants = Wants::Discard;
-            }
+        let side = 280.0;
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width() - side - 20.0);
+                if thumbs.stage(ui, out, 480.0, "Made image") {
+                    wants = Wants::Zoom(out.to_path_buf());
+                }
+            });
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                ui.set_width(side);
+                ui.set_min_height(480.0);
+                ui.label(crate::kit::with_icon(
+                    crate::icon::CHECK,
+                    "Made",
+                    egui::FontFamily::Proportional,
+                    13.5,
+                    theme::GO,
+                ));
+                ui.add_space(12.0);
+                let model = models
+                    .get(self.pick)
+                    .map(|m| format!("{} · {}", m.model, m.plugin))
+                    .unwrap_or_default();
+                egui::Grid::new("made with")
+                    .num_columns(2)
+                    .spacing(egui::vec2(12.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Model").color(theme::DUST));
+                        ui.label(model);
+                        ui.end_row();
+                        if !self.prompt.trim().is_empty() {
+                            ui.label(RichText::new("Prompt").color(theme::DUST));
+                            ui.add(egui::Label::new(
+                                RichText::new(self.prompt.trim()).color(theme::GRAPHITE),
+                            ));
+                            ui.end_row();
+                        }
+                        if !self.refs.is_empty() {
+                            ui.label(RichText::new("References").color(theme::DUST));
+                            ui.horizontal_wrapped(|ui| {
+                                for (i, r) in self.refs.iter().enumerate() {
+                                    thumbs.show(ui, r, 36.0, &format!("Reference {}", i + 1));
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(ui.available_height() - 150.0);
+                let what = match &self.target {
+                    For::Element(h) => format!("Keep adds it to @{h}'s anchors."),
+                    For::Shot(r) => format!("Keep adds it to {r}'s pictures."),
+                    For::Picture(r, f) => format!(
+                        "Keep puts it in place of {} in {r}; undo brings the old one back.",
+                        f.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                    For::Frame(r, _) => format!(
+                        "Keep makes it {r}'s storyboard frame, and what was typed its frame \
+                         prompt; undo brings the old ones back."
+                    ),
+                };
+                hint(ui, &what);
+                ui.add_space(10.0);
+                let keep = ui.scope(|ui| {
+                    ui.spacing_mut().button_padding.y = 9.0;
+                    ui.add_sized(
+                        egui::vec2(side, 36.0),
+                        egui::Button::new(
+                            RichText::new("Keep")
+                                .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
+                                .color(theme::RACK),
+                        )
+                        .fill(theme::PAPER),
+                    )
+                });
+                if keep.inner.on_hover_text("use it").clicked() {
+                    wants = Wants::Keep;
+                }
+                ui.add_space(4.0);
+                ui.columns(2, |c| {
+                    let w = c[0].available_width();
+                    if c[0]
+                        .add_sized(egui::vec2(w, 32.0), egui::Button::new("Try again"))
+                        .on_hover_text("back to what it was made with, to change and make again")
+                        .clicked()
+                    {
+                        *self.stage.lock().unwrap() = Stage::Idle;
+                        wants = Wants::Again;
+                    }
+                    c[1].with_layout(
+                        egui::Layout::top_down_justified(egui::Align::Center),
+                        |ui| {
+                            if crate::kit::danger_button(ui, "Discard")
+                            .on_hover_text(
+                                "don't use it; it stays under Browse existing, and what it cost \
+                                 stays in the ledger",
+                            )
+                            .clicked()
+                        {
+                            wants = Wants::Discard;
+                        }
+                        },
+                    );
+                });
+            });
         });
-        hint(
-            ui,
-            "Not kept, it stays under Browse existing, and what it cost stays in the ledger.",
-        );
         wants
     }
 

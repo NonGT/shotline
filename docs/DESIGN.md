@@ -740,7 +740,15 @@ Cut tab "Open" still hands a take to mpv or ffplay to see it full size.
 Anchors and storyboard frames are shrunk to 512px thumbnails when first shown: generated images
 are often 2-4K, past the texture size some GPUs allow. egui ships no Thai font, so Noto Sans
 Thai (`assets/fonts`, OFL) is built in; system ones looked different everywhere and Ayuthaya left
-a gap after every leading vowel.
+a gap after every leading vowel. Latin text is Inter and icons are the Phosphor font; icons are
+drawn in their own font family, since Inter has glyphs of its own at many of Phosphor's code
+points.
+
+Colours mean one thing each: amber is in the cut and buttons that spend, paper white the main
+button that doesn't spend, steel blue something running (and the playhead), green done, red
+failed or removes. Pages are cards on the bay colour; popups size themselves from the window.
+`cargo test -p shotline-ui --test ui -- --ignored shots pages` renders the main screens to
+target/shots for a look after a visual change.
 
 Shots are edited in place and saved once a field is left; every save is one undo step (Cmd+Z,
 Cmd+Shift+Z, or the buttons in the bottom bar). Undo puts the shot file back only if nothing else

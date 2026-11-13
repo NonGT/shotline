@@ -11,7 +11,7 @@ use shotline_core::ledger::report::{self, By, Row, Summary};
 use shotline_core::ledger::{Books, Entry, Kind, RateLine, money, rate};
 use shotline_core::protocol::Quote;
 
-use crate::{App, PAGE, hint, page, theme};
+use crate::{App, PAGE, hint, icon, kit, page, theme};
 
 /// Model colours, biggest spender first. Red is left out: it means trouble elsewhere.
 const PALETTE: [Color32; 8] = [
@@ -318,7 +318,7 @@ impl App {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(text).color(theme::TUNGSTEN));
+                    ui.label(RichText::new(text).color(theme::WARN));
                     ui.weak("If nothing is running it any more, release it.");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         dismiss = ui.button("Dismiss").clicked();
@@ -346,12 +346,14 @@ impl App {
             .show(ui, |ui| {
                 page(ui, PAGE, |ui| {
                     let Some(c) = &self.film.cost else {
-                        hint(
+                        kit::empty(
                             ui,
+                            icon::COST,
                             "Nothing spent yet. Paid jobs show up here, by day and model.",
                         );
                         return;
                     };
+                    ui.set_max_width(ui.available_width().min(1080.0));
                     let v = &mut self.cost_view;
                     // Grow the bars again each time the tab is opened.
                     let frame = ui.ctx().cumulative_frame_nr();
@@ -362,48 +364,81 @@ impl App {
                     v.last_frame = frame;
 
                     summary(ui, &c.summary);
-                    ui.add_space(14.0);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("Spent per day")
-                                .text_style(egui::TextStyle::Heading)
-                                .color(theme::PAPER),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            for (s, name) in [
-                                (Span::All, "All"),
-                                (Span::Month, "30 days"),
-                                (Span::Week, "7 days"),
-                            ] {
-                                if ui.selectable_label(v.span == s, name).clicked() && v.span != s {
-                                    v.span = s;
-                                    v.since = None;
-                                }
-                            }
+                    ui.add_space(theme::GAP);
+                    kit::card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            kit::card_title(ui, "Spent per day", None);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    for (s, name) in [
+                                        (Span::All, "All"),
+                                        (Span::Month, "30 days"),
+                                        (Span::Week, "7 days"),
+                                    ] {
+                                        if ui.selectable_label(v.span == s, name).clicked()
+                                            && v.span != s
+                                        {
+                                            v.span = s;
+                                            v.since = None;
+                                        }
+                                    }
+                                },
+                            );
                         });
+                        ui.add_space(6.0);
+                        let hovered = chart(ui, c, v);
+                        ui.add_space(14.0);
+                        models(ui, c, v, hovered);
                     });
-                    ui.add_space(6.0);
-                    let hovered = chart(ui, c, v);
-                    ui.add_space(14.0);
-                    models(ui, c, v, hovered);
-                    ui.add_space(18.0);
-                    by_shot(ui, c);
-                    ui.add_space(18.0);
-                    self.ledger(ui);
+                    ui.add_space(theme::GAP);
+                    kit::card(ui, |ui| by_shot(ui, c));
+                    ui.add_space(theme::GAP);
+                    kit::card(ui, |ui| self.ledger(ui));
                 });
             });
     }
 }
 
+/// The total big, then where it went: in the cut (amber, as everywhere), thrown away, other.
 fn summary(ui: &mut egui::Ui, s: &Summary) {
     let cur = &s.currency;
-    ui.heading(format!("{} {cur}", money(s.spent)));
-    ui.label(format!(
-        "in the cut {}, thrown away {}, other {}",
-        money(s.in_cut),
-        money(s.discarded),
-        money(s.other)
-    ));
+    kit::page_title(
+        ui,
+        &format!("{} {cur}", money(s.spent)),
+        Some("Spent on this film"),
+    );
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::GAP;
+        for (name, v, dot) in [
+            ("in the cut", s.in_cut, theme::TUNGSTEN),
+            ("thrown away", s.discarded, theme::FAINT),
+            ("other", s.other, theme::EDGE),
+        ] {
+            egui::Frame::new()
+                .fill(theme::CARD)
+                .stroke(egui::Stroke::new(1.0, theme::LINE))
+                .corner_radius(theme::R_ROW)
+                .inner_margin(egui::Margin::symmetric(14, 10))
+                .show(ui, |ui| {
+                    ui.set_min_width(150.0);
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            let (r, _) =
+                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            ui.painter().circle_filled(r.center(), 4.0, dot);
+                            ui.label(RichText::new(name).small().color(theme::DUST));
+                        });
+                        ui.label(
+                            RichText::new(format!("{} {cur}", money(v)))
+                                .font(theme::section())
+                                .color(theme::PAPER),
+                        );
+                    });
+                });
+        }
+    });
     if s.held > 0.0 {
         ui.label(
             RichText::new(format!(
@@ -673,11 +708,7 @@ fn models(ui: &mut egui::Ui, c: &Cost, v: &mut View, hovered: Option<usize>) {
 }
 
 fn by_shot(ui: &mut egui::Ui, c: &Cost) {
-    ui.label(
-        RichText::new("Per shot")
-            .text_style(egui::TextStyle::Heading)
-            .color(theme::PAPER),
-    );
+    kit::card_title(ui, "Per shot", None);
     ui.add_space(4.0);
     egui::Grid::new("by shot")
         .striped(true)
@@ -730,11 +761,7 @@ impl App {
     /// Checks on the books, and corrections to them.
     fn ledger(&mut self, ui: &mut egui::Ui) {
         let Some(c) = &self.film.cost else { return };
-        ui.label(
-            RichText::new("Ledger")
-                .text_style(egui::TextStyle::Heading)
-                .color(theme::PAPER),
-        );
+        kit::card_title(ui, "Ledger", None);
         ui.add_space(4.0);
         let v = &mut self.cost_view;
         let mut open = v.tool;
@@ -797,7 +824,7 @@ impl App {
         let mut book = false;
         egui::Frame::new()
             .stroke(egui::Stroke::new(1.0, theme::LINE))
-            .corner_radius(4.0)
+            .corner_radius(theme::R_ROW)
             .inner_margin(12.0)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());

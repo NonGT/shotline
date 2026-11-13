@@ -88,7 +88,7 @@ fn harness(dir: &Path) -> Harness<'static, App> {
     // Tall enough for a shot's takes, under its references.
     Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1600.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app)
 }
 
@@ -756,7 +756,7 @@ impl Host for TestHost {
             }
             assert!(ask.refs.is_empty());
             let out = film.join(".shotline").join("cafe.png");
-            image::RgbImage::new(8, 8).save(&out)?;
+            picture(&out, 288, 512, [92, 104, 84], [28, 30, 26]);
             return Ok(out);
         }
         assert_eq!(
@@ -814,7 +814,7 @@ fn edit_the_cut_and_render() {
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1000.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -884,7 +884,7 @@ fn make_an_anchor_image() {
     );
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1800.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Elements").click();
@@ -1012,7 +1012,7 @@ fn a_shot_s_pictures_and_a_take() {
     );
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1200.0, 1800.0))
+        .with_size(egui::vec2(1200.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -1248,7 +1248,7 @@ fn image_buttons_say_what_they_need() {
     let app = App::new(p, tmp.path().join("home")).silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1800.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();
     h.get_by_label_contains("01-010").click();
@@ -1300,7 +1300,7 @@ fn translate_only_when_it_helps() {
     );
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1000.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Elements").click();
@@ -1477,7 +1477,7 @@ fn edit_elements() {
     // Tall enough for the whole voice form without scrolling.
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1100.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     // Anchors decode on another thread and repaint when done, which can take a while.
     h.run_ok();
@@ -1962,7 +1962,7 @@ fn a_selected_take_s_last_frame() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1400.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
 
@@ -2035,7 +2035,7 @@ fn a_continue_shot_keeps_its_start_until_told() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1800.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     let open = |h: &mut Harness<App>, name: &str| {
@@ -2107,7 +2107,7 @@ fn an_editor_s_sequence_on_the_cut_page() {
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1000.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -2373,7 +2373,7 @@ fn on_main_edit_picking(
     );
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1600.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -3334,7 +3334,7 @@ fn shows_the_editor_cut_shotline_made_first() {
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -3366,7 +3366,7 @@ fn shows_an_editor_warning_whole() {
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -3392,7 +3392,7 @@ fn updates_filmcraft_cli_from_its_warning() {
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -3421,7 +3421,7 @@ fn starts_an_editor_project_from_the_cut() {
     app.set_plugins(vec![editor_plugin()], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -3491,7 +3491,7 @@ fn wait_for(h: &mut Harness<App>, done: impl Fn(&Harness<App>) -> bool) -> bool 
 /// Steps the app for a while in real time, as playback needs.
 /// At least a few frames too: a panel takes its new size a frame later, and a slow machine may
 /// draw only one in the time.
-fn wait(h: &mut Harness<App>, secs: f64) {
+fn wait<S>(h: &mut Harness<S>, secs: f64) {
     let until = Instant::now() + Duration::from_secs_f64(secs);
     let mut frames = 0;
     while Instant::now() < until || frames < 4 {
@@ -3540,7 +3540,7 @@ fn plays_compares_and_plays_the_cut() {
     // Tall enough that the takes stay in view under the player.
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size([1000.0, 1800.0])
+        .with_size([1000.0, 2400.0])
         .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();
@@ -3639,8 +3639,10 @@ fn elements_story_and_cost() {
 
     h.get_by_label("Cost").click();
     h.run();
-    h.get_by_label("0.4 USD");
-    h.get_by_label("in the cut 0, thrown away 0.4, other 0");
+    h.get_by_label("Spent on this film");
+    // The total, and all of it thrown away.
+    assert_eq!(h.get_all_by_label("0.4 USD").count(), 2);
+    h.get_by_label("thrown away");
     h.get_by_label("01-010");
     // Per day and model, and the bars grow in again for another span.
     h.get_by_label("spent per day, last 7 days");
@@ -3694,7 +3696,8 @@ fn elements_story_and_cost() {
     h.get_by_label("Record refund").click();
     h.run_steps(8);
     h.get_by_label("refunded 0.4 USD");
-    h.get_by_label("-0.1 USD");
+    // The total, and a tile with the same.
+    assert!(h.get_all_by_label("-0.1 USD").count() >= 1);
 }
 
 #[test]
@@ -3736,7 +3739,7 @@ fn release_what_a_dead_job_held() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1800.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cost").click();
@@ -3814,7 +3817,7 @@ fn warn_about_stuck_jobs_on_open() {
             .silent();
         let mut h = Harness::builder()
             .with_max_steps(16)
-            .with_size(egui::vec2(1400.0, 1800.0))
+            .with_size(egui::vec2(1400.0, 2400.0))
             .build_ui_state(|ui, app: &mut App| app.show(ui), app);
         h.run();
         h
@@ -3867,7 +3870,7 @@ fn set_the_format_on_the_story_tab() {
     );
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1000.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Story").click();
@@ -3952,7 +3955,7 @@ fn a_shot_on_another_model() {
     );
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1400.0, 1000.0))
+        .with_size(egui::vec2(1400.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -4019,7 +4022,7 @@ fn details_of_a_made_picture() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1000.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Elements").click();
@@ -4106,7 +4109,7 @@ fn a_take_in_its_popup() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size([1000.0, 1800.0])
+        .with_size([1000.0, 2400.0])
         .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();
@@ -4149,7 +4152,7 @@ fn the_take_in_the_cut_opens_in_its_popup() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size([1000.0, 1800.0])
+        .with_size([1000.0, 2400.0])
         .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();
@@ -4195,7 +4198,7 @@ fn remake_replaces_a_line_s_recording() {
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -4280,7 +4283,7 @@ fn a_line_recorded_and_picked() {
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -4388,7 +4391,7 @@ fn lines_dragged_into_order() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1200.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -4646,7 +4649,7 @@ fn a_take_from_pieces() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size([1100.0, 1800.0])
+        .with_size([1100.0, 2400.0])
         .allow_missing_glyphs()
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();
@@ -4745,7 +4748,7 @@ fn made_images_stay_to_pick_again() {
     let app = App::new(p.clone(), tmp.path().join("home")).silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1800.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();
     h.get_by_label_contains("01-010").click();
@@ -4844,7 +4847,7 @@ fn remake_starts_from_what_a_picture_was_made_with() {
     );
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 1800.0))
+        .with_size(egui::vec2(1100.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.step();
     h.get_by_label_contains("01-010").click();
@@ -4965,7 +4968,7 @@ fn no_more_lines_than_the_video_model_takes() {
         app.set_plugins(vec![video(mix)], None);
         let mut h = Harness::builder()
             .with_max_steps(16)
-            .with_size(egui::vec2(1000.0, 1200.0))
+            .with_size(egui::vec2(1000.0, 2400.0))
             .build_ui_state(|ui, app: &mut App| app.show(ui), app);
         h.run();
         h.get_by_label_contains("01-010  Paka walks in").click();
@@ -5017,7 +5020,7 @@ fn a_recorded_line_has_a_player_under_it() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1300.0, 1200.0))
+        .with_size(egui::vec2(1300.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -5138,7 +5141,7 @@ fn plays_an_editor_sequence() {
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1000.0, 1400.0))
+        .with_size(egui::vec2(1000.0, 2400.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
     h.get_by_label("Cut").click();
@@ -5269,4 +5272,153 @@ fn the_bridges_takes_get_the_room_the_window_has() {
     // And the window still fits: its title is on screen.
     let top = h.get_by_label("Bridge 01-010#1 to 01-010#3").rect();
     assert!(top.top() >= 0.0, "{top:?}");
+}
+
+/// A picture to look at: a soft vertical blend, so thumbnails show where they sit.
+fn picture(path: &Path, w: u32, h: u32, top: [u8; 3], bottom: [u8; 3]) {
+    let img = image::RgbImage::from_fn(w, h, |_, y| {
+        let t = y as f32 / h as f32;
+        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
+        image::Rgb([
+            mix(top[0], bottom[0]),
+            mix(top[1], bottom[1]),
+            mix(top[2], bottom[2]),
+        ])
+    });
+    img.save(path).unwrap();
+}
+
+fn snap(h: &mut Harness<App>, name: &str) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+    std::fs::create_dir_all(&dir).unwrap();
+    h.render()
+        .unwrap()
+        .save(dir.join(format!("{name}.png")))
+        .unwrap();
+}
+
+/// Renders the main screens to target/shots, to look at after a change to how they look:
+/// `cargo test -p shotline-ui --test ui shots -- --ignored`.
+#[test]
+#[ignore]
+fn shots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let png = tmp.path().join("paka.png");
+    picture(&png, 300, 400, [120, 96, 80], [60, 48, 40]);
+    p.add_anchor("paka", &png).unwrap();
+    let own = tmp.path().join("door.png");
+    picture(&own, 400, 300, [70, 84, 70], [30, 36, 30]);
+    p.add_shot_image(R, &own, "the doorway").unwrap();
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    app.set_plugins(
+        vec![Description {
+            name: "fal".into(),
+            version: "1".into(),
+            protocol: 1,
+            editor: false,
+            app: String::new(),
+            env: vec![],
+            models: vec![
+                ModelInfo {
+                    id: "minimax/h3-max/reference-to-video".into(),
+                    op: Op::VideoGenerate,
+                    ref_image: Some("Image {n}".into()),
+                    max_images: Some(9),
+                    ..ModelInfo::default()
+                },
+                ModelInfo {
+                    id: "fal-ai/nano-banana".into(),
+                    op: Op::ImageGenerate,
+                    ref_image: Some("Image {n}".into()),
+                    ..ModelInfo::default()
+                },
+            ],
+        }],
+        Some(Arc::new(TestHost)),
+    );
+    let mut h = Harness::builder()
+        .with_max_steps(64)
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_steps(4);
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    wait(&mut h, 0.5);
+    h.run_steps(4);
+    snap(&mut h, "shot");
+    h.get_by_label("Make image…").scroll_to_me();
+    h.run_steps(4);
+    snap(&mut h, "shot-lower");
+
+    h.get_by_label("Make image…").click();
+    h.run_steps(4);
+    let prompt = h.get_by_role_and_label(Role::MultilineTextInput, "Image prompt");
+    prompt.focus();
+    prompt.type_text("the café");
+    wait(&mut h, 0.3);
+    h.run_steps(4);
+    snap(&mut h, "maker");
+    h.get_by_label("Make…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make for $0.04")
+        .is_some()));
+    wait(&mut h, 0.3);
+    h.run_steps(4);
+    h.get_by_label("Make for $0.04").click();
+    assert!(wait_for(&mut h, |h| h.query_by_label("Keep").is_some()));
+    wait(&mut h, 0.5);
+    h.run_steps(4);
+    snap(&mut h, "made");
+}
+
+/// The other pages, like `shots`: `cargo test -p shotline-ui --test ui pages -- --ignored`.
+#[test]
+#[ignore]
+fn pages() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let png = tmp.path().join("paka.png");
+    picture(&png, 300, 400, [120, 96, 80], [60, 48, 40]);
+    p.add_anchor("paka", &png).unwrap();
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_plugins(vec![], Some(Arc::new(TestHost)))
+        .with_git(None)
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(64)
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run_steps(4);
+    for page in ["Story", "Elements", "Cut", "Cost"] {
+        h.get_by_label(page).click();
+        wait(&mut h, 0.5);
+        h.run_steps(4);
+        snap_shell(&mut h, &page.to_lowercase());
+        if page == "Elements" {
+            h.get_by_label_contains("@paka").click();
+            wait(&mut h, 0.5);
+            h.run_steps(4);
+            snap_shell(&mut h, "element");
+        }
+    }
+    h.get_by_label("Settings").click();
+    wait(&mut h, 0.3);
+    h.run_steps(4);
+    snap_shell(&mut h, "prefs");
+    h.key_press(egui::Key::Escape);
+    h.state_mut().command(MenuCommand::CloseFilm);
+    wait(&mut h, 0.3);
+    h.run_steps(4);
+    snap_shell(&mut h, "start");
+}
+
+fn snap_shell(h: &mut Harness<Shell>, name: &str) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shots");
+    std::fs::create_dir_all(&dir).unwrap();
+    h.render()
+        .unwrap()
+        .save(dir.join(format!("{name}.png")))
+        .unwrap();
 }

@@ -190,7 +190,7 @@ impl App {
         let mut remake: Option<(TakeSound, Job, PathBuf)> = None;
         let mut close = false;
         let modal = crate::modal(ctx, "take sounds", |ui| {
-            ui.set_width(520.0);
+            ui.set_width(crate::kit::modal_width(ui.ctx(), 1.0, 520.0, 520.0));
             ui.horizontal(|ui| {
                 ui.heading(format!("Sounds over {}", w.name));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

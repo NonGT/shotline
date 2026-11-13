@@ -270,7 +270,7 @@ pub(crate) fn show(
             };
             p.rect_filled(r, 2.0, fill);
             let (width, colour) = if b.picked {
-                (2.0, theme::TUNGSTEN)
+                (2.0, theme::PAPER)
             } else {
                 (1.0, theme::LINE)
             };
@@ -313,7 +313,7 @@ pub(crate) fn show(
                 )
                 .intersect(span);
                 if band.is_positive() {
-                    p.rect_filled(band, 2.0, theme::TUNGSTEN.gamma_multiply(0.35));
+                    p.rect_filled(band, 2.0, theme::PAPER.gamma_multiply(0.18));
                 }
             }
             let x = x_of(j.at);
@@ -326,11 +326,11 @@ pub(crate) fn show(
                 egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Join {}", j.name))
             });
             let colour = if j.picked || resp.hovered() {
-                theme::TUNGSTEN
-            } else if j.bridged {
-                theme::TUNGSTEN_DEEP
-            } else {
                 theme::PAPER
+            } else if j.bridged {
+                theme::STEEL
+            } else {
+                theme::DUST
             };
             let c = mark.center();
             p.add(egui::Shape::convex_polygon(
@@ -361,11 +361,11 @@ pub(crate) fn show(
         p.rect_filled(
             Rect::from_center_size(pos2(x, ruler.center().y), vec2(9.0, RULER - 4.0)),
             2.0,
-            theme::TUNGSTEN,
+            theme::STEEL,
         );
         p.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
-            Stroke::new(1.5, theme::TUNGSTEN),
+            Stroke::new(1.5, theme::STEEL),
         );
         p.add(egui::Shape::convex_polygon(
             vec![
@@ -373,7 +373,7 @@ pub(crate) fn show(
                 pos2(x + 5.0, rect.top()),
                 pos2(x, rect.top() + 7.0),
             ],
-            theme::TUNGSTEN,
+            theme::STEEL,
             Stroke::NONE,
         ));
     }
