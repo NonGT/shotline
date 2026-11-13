@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use shotline_core::protocol::{
     Change, ClipInfo, EditParams, Edited, Op, Request, SequenceInfo, TrackInfo, TransitionInfo,
 };
-use shotline_core::{ShotRef, Take};
+use shotline_core::{ShotRef, Take, Transition};
 
 use crate::price::{Pressed, Price, PriceRow};
 use crate::{App, short, theme};
@@ -190,6 +190,7 @@ impl App {
         let mut clips: Vec<&ClipInfo> = t.clips.iter().filter(|c| !c.id.is_empty()).collect();
         clips.sort_by(|a, b| a.start.total_cmp(&b.start));
         let bridged = &self.bridged;
+        let luts = self.project.root.join(".shotline/cache/luts");
         clips
             .windows(2)
             .filter(|w| meet(w[0], w[1], fps))
@@ -199,6 +200,13 @@ impl App {
                 name: format!("{} to {}", name(w[0]), name(w[1])),
                 picked: self.join_pick.as_ref() == Some(&w[1].id),
                 bridged: bridged.contains(&w[1].id),
+                continues: w[1]
+                    .file
+                    .as_ref()
+                    .and_then(|f| self.edit_takes.get(f))
+                    .and_then(|t| self.film.cut.iter().find(|c| c.shot == t.shot))
+                    .is_some_and(|c| c.transition == Transition::Continue),
+                matched: w[1].luts.iter().any(|l| l.starts_with(&luts)),
                 fade: t
                     .transitions
                     .iter()
@@ -252,7 +260,8 @@ impl App {
             change,
         };
         let mut start = None;
-        let frame = 1.0 / seq.fps.max(1.0);
+        let fps = seq.fps.max(1.0);
+        let frame = 1.0 / fps;
         let files = a
             .file
             .clone()
@@ -377,7 +386,10 @@ impl App {
                     .range(1..=240)
                     .suffix(" frames"),
             )
-            .on_hover_text(format!("{:.2} s", self.fade_frames as f64 * frame));
+            .on_hover_text(crate::player::timecode(
+                self.fade_frames as f64 * frame,
+                fps,
+            ));
         let n = self.fade_frames as f64;
         r.widget_info(move || egui::WidgetInfo::slider(true, n, "Dissolve frames"));
         let label = if fade.is_some() {
@@ -399,7 +411,11 @@ impl App {
         if let Some(f) = fade
             && ui
                 .add_enabled(free, egui::Button::new("Straight cut"))
-                .on_hover_text(format!("takes the {:.2} s {} off", f.length, f.name))
+                .on_hover_text(format!(
+                    "takes the {} {} off",
+                    crate::player::timecode(f.length, fps),
+                    f.name
+                ))
                 .clicked()
         {
             start = Some((
@@ -757,6 +773,7 @@ impl App {
         t: &Take,
         editor: bool,
     ) -> Option<(Take, bool)> {
+        let fps = self.cut_fps();
         let others: Vec<(Take, PathBuf)> = self
             .project
             .takes(t.shot)
@@ -796,7 +813,7 @@ impl App {
                     ui.vertical(|ui| {
                         ui.label(RichText::new(o.to_string()).color(theme::PAPER));
                         let long = self.clip_length(ui.ctx(), video);
-                        ui.weak(long.map_or("…".into(), |l| format!("{l:.1} s")));
+                        ui.weak(long.map_or("…".into(), |l| crate::player::timecode(l, fps)));
                         ui.horizontal(|ui| {
                             if editor {
                                 let r = ui.small_button("Keep length");

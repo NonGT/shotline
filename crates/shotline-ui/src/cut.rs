@@ -41,6 +41,14 @@ impl App {
         self.refresh_edits(ui.ctx());
         self.editor_opened();
         let editor = self.pick_sequence();
+        // Esc lets go of what's picked, once nothing else wants it.
+        if ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && ui.memory(|m| m.focused().is_none())
+            && !egui::Popup::is_any_open(ui.ctx())
+            && self.sounds_win.is_none()
+        {
+            self.deselect();
+        }
         let edge = egui::Margin::symmetric(PAGE.x as i8, 12);
         egui::Panel::top("cut-head")
             .frame(egui::Frame::new().fill(theme::BAY).inner_margin(edge))
@@ -154,7 +162,11 @@ impl App {
             .collect();
         let mut blocks = vec![];
         let mut sounds = vec![];
+        let fps = self.cut_fps();
         let mut end = 0.0;
+        let mut joins = vec![];
+        let mut before: Option<String> = None;
+        let xfade = self.timeline_form.xfade;
         let cut = self.film.cut.clone();
         for (i, c) in cut.iter().enumerate() {
             let (Some(video), Some(take)) = (&c.video, &c.take) else {
@@ -182,6 +194,19 @@ impl App {
                 hover.push("colour matched".into());
             }
             hover.push("click for tools".into());
+            if let Some(b) = before.take() {
+                joins.push(lanes::Join {
+                    at: end,
+                    id: format!("own:{i}"),
+                    name: format!("{b} to {take}"),
+                    picked: self.cut_ui.own_join == Some(i),
+                    bridged: false,
+                    fade: (xfade > 0.0).then_some((end - xfade / 2.0, xfade)),
+                    continues: c.transition == Transition::Continue,
+                    matched: c.colormatch(at, false),
+                });
+            }
+            before = Some(take.to_string());
             blocks.push(Block {
                 name: take.to_string(),
                 start: end,
@@ -201,7 +226,10 @@ impl App {
                     start: end + ts.at,
                     length: long,
                     still: None,
-                    hover: format!("over {take}, {:.2} s in\nclick for tools", ts.at),
+                    hover: format!(
+                        "over {take}, {} in\nclick for tools",
+                        crate::player::timecode(ts.at, fps)
+                    ),
                     enabled: true,
                     shot: Some(c.shot),
                     id: Some(format!("own:{i}")),
@@ -215,7 +243,7 @@ impl App {
             blocks,
             sound: false,
             enabled: true,
-            joins: vec![],
+            joins,
         }];
         let tracks = self.timeline_form.tracks.clone();
         let mut audio = vec![];
@@ -256,8 +284,24 @@ impl App {
                 joins: vec![],
             });
         }
-        let playhead = self.shown_deck(CUT).map(|d| d.position());
-        match lanes::show(ui, "cut", &video, &audio, end, playhead, &mut self.thumbs) {
+        let deck = self.shown_deck(CUT);
+        let playhead = deck.map(|d| d.position());
+        let fps = deck.map_or(24.0, |d| d.fps());
+        self.cut_ui.edits = lanes::edit_points(video.iter());
+        let own = |id: &str| {
+            id.strip_prefix("own:")
+                .and_then(|i| i.parse::<usize>().ok())
+        };
+        match lanes::show(
+            ui,
+            "cut",
+            &video,
+            &audio,
+            end,
+            fps,
+            playhead,
+            &mut self.thumbs,
+        ) {
             Some(Hit::Seek(t)) => self.cut_seek(ui.ctx(), CUT, t, false),
             Some(Hit::Scrub(t)) => self.cut_seek(ui.ctx(), CUT, t, true),
             Some(Hit::Open(r)) => {
@@ -265,11 +309,27 @@ impl App {
                 self.open_shot(r);
             }
             Some(Hit::Pick(id)) => {
-                let i = id.strip_prefix("own:").and_then(|i| i.parse().ok());
+                let i = own(&id);
+                self.cut_ui.own_join = None;
                 self.cut_ui.own_pick = (self.cut_ui.own_pick != i).then_some(i).flatten();
             }
-            Some(Hit::PickJoin(_)) | None => {}
+            Some(Hit::PickJoin(id, t)) => {
+                let i = own(&id);
+                self.cut_ui.own_pick = None;
+                self.cut_ui.own_join = (self.cut_ui.own_join != i).then_some(i).flatten();
+                self.cut_seek(ui.ctx(), CUT, t, false);
+            }
+            Some(Hit::Deselect) => self.deselect(),
+            None => {}
         }
+    }
+
+    /// Lets go of whatever's picked on the timeline.
+    fn deselect(&mut self) {
+        self.cut_ui.own_pick = None;
+        self.cut_ui.own_join = None;
+        self.clip_pick = None;
+        self.join_pick = None;
     }
 
     /// shotline's own cut as one preview with its crossfades, music and laid sounds, made in the
@@ -366,17 +426,18 @@ impl App {
 
     /// What can be done with the take picked on shotline's own cut.
     fn own_tools(&mut self, ui: &mut egui::Ui) {
-        let picked = self.cut_ui.own_pick.and_then(|i| {
-            self.film
-                .cut
-                .iter()
-                .filter(|c| c.video.is_some())
-                .nth(i)
-                .and_then(|c| c.take.clone())
-        });
+        if let Some(i) = self.cut_ui.own_join {
+            self.own_join_tools(ui, i);
+            return;
+        }
+        let picked = self
+            .cut_ui
+            .own_pick
+            .and_then(|i| self.film.cut.get(i))
+            .and_then(|c| c.take.clone());
         let Some(t) = picked else {
             self.cut_ui.own_pick = None;
-            ui.weak("Click a take to change it from here.");
+            ui.weak("Click a take or a join to change it from here.");
             return;
         };
         ui.horizontal_wrapped(|ui| {
@@ -400,6 +461,59 @@ impl App {
             if let Some(other) = self.take_menu(ui, &t, false).map(|(o, _)| o) {
                 self.flush();
                 self.apply(vec![Action::Select(other)]);
+            }
+        });
+    }
+
+    /// What a join on shotline's own cut is: a cut or carried on, matched or not. How it's made
+    /// is the shot's, so that's where it's changed.
+    fn own_join_tools(&mut self, ui: &mut egui::Ui, i: usize) {
+        let at = self.timeline_form.colormatch.at;
+        let Some((c, before)) = self
+            .film
+            .cut
+            .get(i)
+            .zip(self.film.cut[..i].iter().rev().find_map(|c| c.take.clone()))
+        else {
+            self.cut_ui.own_join = None;
+            return;
+        };
+        let (Some(t), shot) = (c.take.clone(), c.shot) else {
+            self.cut_ui.own_join = None;
+            return;
+        };
+        let (continues, matched) = (
+            c.transition == Transition::Continue,
+            c.colormatch(at, false),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!("{before} to {t}"))
+                    .strong()
+                    .color(theme::PAPER),
+            );
+            let (what, colour) = if continues {
+                ("continues from the shot before", theme::TUNGSTEN)
+            } else {
+                ("a cut", theme::DUST)
+            };
+            ui.label(RichText::new(what).color(colour));
+            if matched {
+                ui.label(RichText::new("colour matched").color(theme::GO));
+            }
+            if self.timeline_form.xfade > 0.0 {
+                ui.weak(format!(
+                    "crossfade {}",
+                    crate::player::timecode(self.timeline_form.xfade, self.cut_fps())
+                ));
+            }
+            if ui
+                .button(format!("Open {shot}"))
+                .on_hover_text("how a shot starts is set on the shot")
+                .clicked()
+            {
+                self.tab = crate::Tab::Shots;
+                self.open_shot(shot);
             }
         });
     }
@@ -694,12 +808,14 @@ impl App {
                 inspector(ui, |ui| self.clip_tools(ui, file, seq));
                 status_row(ui, |ui| self.edit_status(ui, file, seq));
                 let playhead = self.shown_deck(&title).map(|d| d.position());
+                self.cut_ui.edits = lanes::edit_points(video.iter());
                 match lanes::show(
                     ui,
                     "edit",
                     &video,
                     &audio,
                     seq.length(),
+                    seq.fps,
                     playhead,
                     &mut self.thumbs,
                 ) {
@@ -713,10 +829,12 @@ impl App {
                         self.join_pick = None;
                         self.clip_pick = (self.clip_pick.as_ref() != Some(&id)).then_some(id);
                     }
-                    Some(Hit::PickJoin(id)) => {
+                    Some(Hit::PickJoin(id, t)) => {
                         self.clip_pick = None;
                         self.join_pick = (self.join_pick.as_ref() != Some(&id)).then_some(id);
+                        self.cut_seek(&ctx, &title, t, false);
                     }
+                    Some(Hit::Deselect) => self.deselect(),
                     _ => {}
                 }
             });
@@ -1097,7 +1215,24 @@ impl App {
         let height = (ui.available_height() - 40.0).max(120.0);
         let top = ui.cursor().min;
         match &mut self.cut_deck {
-            Some((_, Ok(d))) if d.title() == title => d.monitor(ui, self.audio.as_ref(), height),
+            Some((_, Ok(d))) if d.title() == title => {
+                let edits: &[f64] = if self.cut_ui.showing.is_some() {
+                    &[]
+                } else {
+                    &self.cut_ui.edits
+                };
+                if d.monitor(ui, self.audio.as_ref(), height, edits) {
+                    let name = format!(
+                        "{}-{}.png",
+                        title.replace(['#', ' ', '/', '·'], "-"),
+                        crate::player::timecode(d.position(), d.fps()).replace(':', "")
+                    );
+                    let png = self.project.root.join("stills").join(name);
+                    // A failure shows when the frame can't be written there.
+                    let _ = std::fs::create_dir_all(self.project.root.join("stills"));
+                    d.save_frame(&png, self.audio.as_ref());
+                }
+            }
             Some((_, Err(e))) if !e.is_empty() => blank_monitor(ui, height, e),
             _ => blank_monitor(ui, height, waiting.unwrap_or("")),
         }
@@ -1119,6 +1254,16 @@ impl App {
                 .inner
             });
         }
+    }
+
+    /// The frame rate the Cut page counts in: the monitor's, else 24.
+    pub(crate) fn cut_fps(&self) -> f64 {
+        self.cut_deck
+            .as_ref()
+            .and_then(|(_, d)| d.as_ref().ok())
+            .map(|d| d.fps())
+            .filter(|f| *f > 0.0)
+            .unwrap_or(24.0)
     }
 
     /// The Cut page's player, while it shows `title`.
@@ -1153,7 +1298,10 @@ impl App {
             hover.push(self.project.rel(f));
         }
         if c.from > 0.0 {
-            hover.push(format!("from {:.2} s into it", c.from));
+            hover.push(format!(
+                "from {} into it",
+                crate::player::timecode(c.from, self.cut_fps())
+            ));
         }
         if c.speed != 1.0 {
             hover.push(format!("at {:.0}% speed", c.speed * 100.0));
@@ -1231,6 +1379,7 @@ impl App {
     /// Crossfade and colour matching, saved in timeline.toml once left.
     fn joins(&mut self, ui: &mut egui::Ui) {
         heading(ui, "Joins");
+        let fps = self.cut_fps();
         let t = &mut self.timeline_form;
         egui::Grid::new("joins")
             .num_columns(2)
@@ -1238,14 +1387,8 @@ impl App {
             .show(ui, |ui| {
                 let l = ui.weak("Crossfade");
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut t.xfade)
-                            .range(0.0..=3.0)
-                            .speed(0.05)
-                            .fixed_decimals(2)
-                            .suffix(" s"),
-                    )
-                    .labelled_by(l.id);
+                    ui.add(crate::player::timecode_field(&mut t.xfade, fps, 3.0))
+                        .labelled_by(l.id);
                     ui.weak(if t.xfade == 0.0 {
                         "straight cuts"
                     } else {
@@ -1298,6 +1441,7 @@ impl App {
 
     fn music(&mut self, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
         heading(ui, "Music");
+        let fps = self.cut_fps();
         let t = &mut self.timeline_form;
         if t.tracks.is_empty() {
             hint(
@@ -1306,42 +1450,39 @@ impl App {
             );
         }
         let mut remove = None;
-        egui::Grid::new("tracks")
-            .num_columns(4)
-            .spacing(egui::vec2(12.0, 8.0))
-            .show(ui, |ui| {
-                for (i, tr) in t.tracks.iter_mut().enumerate() {
-                    let name = ui.label(RichText::new(&tr.file).color(theme::PAPER));
-                    ui.horizontal(|ui| {
-                        ui.weak("starts at");
-                        ui.add(
-                            egui::DragValue::new(&mut tr.at)
-                                .range(0.0..=36000.0)
-                                .speed(0.1)
-                                .fixed_decimals(1)
-                                .suffix(" s"),
-                        )
-                        .labelled_by(name.id);
+        // Two rows each, so the card stays narrow next to the monitor.
+        for (i, tr) in t.tracks.iter_mut().enumerate() {
+            ui.push_id(i, |ui| {
+                let mut name = None;
+                ui.horizontal(|ui| {
+                    name = Some(ui.label(RichText::new(&tr.file).color(theme::PAPER)).id);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if remove_button(ui)
+                            .on_hover_text(format!("{} stops playing over the cut", tr.file))
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
                     });
-                    ui.horizontal(|ui| {
-                        ui.weak("volume");
-                        ui.add(
-                            egui::DragValue::new(&mut tr.volume)
-                                .range(0.0..=2.0)
-                                .speed(0.01)
-                                .fixed_decimals(2),
-                        )
-                        .labelled_by(name.id);
-                    });
-                    if remove_button(ui)
-                        .on_hover_text(format!("{} stops playing over the cut", tr.file))
-                        .clicked()
-                    {
-                        remove = Some(i);
-                    }
-                    ui.end_row();
-                }
+                });
+                let name = name.unwrap();
+                ui.horizontal(|ui| {
+                    ui.weak("starts at");
+                    ui.add(crate::player::timecode_field(&mut tr.at, fps, 36000.0))
+                        .labelled_by(name);
+                    ui.add_space(8.0);
+                    ui.weak("volume");
+                    ui.add(
+                        egui::DragValue::new(&mut tr.volume)
+                            .range(0.0..=2.0)
+                            .speed(0.01)
+                            .fixed_decimals(2),
+                    )
+                    .labelled_by(name);
+                });
+                ui.add_space(8.0);
             });
+        }
         if let Some(i) = remove {
             t.tracks.remove(i);
         }

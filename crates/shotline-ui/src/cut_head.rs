@@ -28,10 +28,14 @@ pub(crate) struct CutUi {
     pub fade_for: Option<String>,
     /// The take picked on shotline's own cut, by its place in the cut.
     pub own_pick: Option<usize>,
+    /// The join picked on shotline's own cut, by the place in the cut of the shot after it.
+    pub own_join: Option<usize>,
     /// Shots still to put in the editor's sequence, one change at a time.
     pub put_queue: Vec<Take>,
     /// Sounds laid over the editor's takes and bridges, as absolute paths.
     pub laid: std::collections::HashSet<PathBuf>,
+    /// Where clips start and end on the video, for the transport to jump between.
+    pub edits: Vec<f64>,
 }
 
 impl App {
@@ -140,7 +144,7 @@ impl App {
                 "{} × {} · {fps} fps · {}",
                 seq.width,
                 seq.height,
-                crate::player::clock(seq.length()),
+                crate::player::timecode(seq.length(), seq.fps),
             ))
             .color(theme::DUST),
         );

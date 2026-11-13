@@ -3066,14 +3066,15 @@ fn bridges_a_join_in_an_editor() {
     assert!(h.get_by_label("Remove #1").accesskit_node().is_disabled());
 
     // Its picture opens it in a popup of its own; Esc closes just that.
+    // The monitor has a Save frame of its own, so the popup's is the second.
+    let saves = |h: &Harness<App>| h.query_all_by_label("Save frame").count();
+    wait(&mut h, 0.2);
+    let before = saves(&h);
     h.get_by_label("bridge #1 poster").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Save frame")
-        .is_some()));
+    assert!(wait_for(&mut h, |h| saves(h) > before));
+    let open = saves(&h);
     h.key_press(egui::Key::Escape);
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Save frame")
-        .is_none()));
+    assert!(wait_for(&mut h, |h| saves(h) < open));
     h.get_by_label("Bridge 01-010#1 to 01-010#3");
 
     // A second take, not used, comes off the list.
@@ -6226,4 +6227,153 @@ fn stops_a_render() {
         .query_by_label("render stopped")
         .is_some()));
     assert!(h.query_by_label("Stop").is_none());
+}
+
+/// shotline's own cut of two real takes, the second carrying on from the first, with music.
+fn own_two(tmp: &Path) -> Option<(Project, Harness<'static, App>)> {
+    own_with_music(tmp, 1)
+}
+
+fn own_with_music(tmp: &Path, music: usize) -> Option<(Project, Harness<'static, App>)> {
+    let p = film(tmp);
+    let v = p
+        .job_dir(p.take(R, "1").unwrap().output().unwrap().id)
+        .join("out.mp4");
+    if !real_video(&v) {
+        return None;
+    }
+    p.select_take(R, "1").unwrap();
+    let r = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                transition: Transition::Continue,
+                ..Shot::default()
+            },
+        )
+        .unwrap();
+    let file = tmp.join("second.mp4");
+    real_video(&file);
+    let t = p.import_take(r, &file).unwrap();
+    p.select_take(r, &t.number.to_string()).unwrap();
+    std::fs::copy(&file, p.root.join("rain.mp4")).unwrap();
+    let mut tl = p.timeline().unwrap();
+    for i in 0..music {
+        tl.tracks.push(shotline_core::Track {
+            file: "rain.mp4".into(),
+            at: i as f64 * 0.5,
+            volume: 1.0,
+        });
+    }
+    p.save_timeline(&tl).unwrap();
+    let app = App::new(p.clone(), tmp.join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(64)
+        .with_size(egui::vec2(1000.0, 1000.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_steps(4);
+    h.get_by_label("Cut").click();
+    wait(&mut h, 0.3);
+    Some((p, h))
+}
+
+#[test]
+fn steps_and_jumps_through_the_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((p, mut h)) = own_two(tmp.path()) else {
+        return;
+    };
+    let at = |h: &Harness<App>| h.state().cut_position().unwrap();
+    assert!(wait_for(&mut h, |h| h.state().cut_position().is_some()));
+    h.get_by_label("Next frame").click();
+    wait(&mut h, 0.1);
+    assert!((at(&h) - 1.0 / 24.0).abs() < 1e-3, "{}", at(&h));
+    h.key_press(egui::Key::ArrowRight);
+    wait(&mut h, 0.1);
+    assert!((at(&h) - 2.0 / 24.0).abs() < 1e-3, "{}", at(&h));
+    // The edit after is where the second take starts.
+    h.get_by_label("Next edit").click();
+    wait(&mut h, 0.1);
+    assert!((at(&h) - 2.0).abs() < 1e-3, "{}", at(&h));
+    h.key_press(egui::Key::ArrowUp);
+    wait(&mut h, 0.1);
+    assert!(at(&h).abs() < 1e-3, "{}", at(&h));
+    // L plays, K stops.
+    h.key_press(egui::Key::L);
+    wait(&mut h, 0.1);
+    assert!(h.state().is_playing());
+    h.key_press(egui::Key::K);
+    wait(&mut h, 0.1);
+    assert!(!h.state().is_playing());
+    // A frame goes into stills/.
+    h.get_by_label("Save frame").click();
+    assert!(wait_for(&mut h, |_| std::fs::read_dir(
+        p.root.join("stills")
+    )
+    .is_ok_and(|mut d| d.next().is_some())));
+}
+
+#[test]
+fn picks_a_join_on_the_own_cut() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_, mut h)) = own_two(tmp.path()) else {
+        return;
+    };
+    let join = "Join 01-010#1 to 01-020#1";
+    h.get_by_label(join).click();
+    wait(&mut h, 0.2);
+    // It says how it's made, and the playhead goes there.
+    h.get_by_label("continues from the shot before");
+    h.get_by_label("colour matched");
+    assert!((h.state().cut_position().unwrap() - 2.0).abs() < 0.05);
+    // Esc lets go of it, and so does a click on nothing.
+    h.key_press(egui::Key::Escape);
+    wait(&mut h, 0.1);
+    h.get_by_label("Click a take or a join to change it from here.");
+    h.get_by_role_and_label(Role::Button, "01-010#1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Open the shot");
+}
+
+#[test]
+fn zooms_and_folds_the_timeline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some((_, mut h)) = own_two(tmp.path()) else {
+        return;
+    };
+    assert!(h.query_by_label("Scroll the timeline").is_none());
+    h.get_by_label("Zoom in").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Scroll the timeline");
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Z);
+    wait(&mut h, 0.1);
+    assert!(h.query_by_label("Scroll the timeline").is_none());
+    h.get_by_label("Fold A1").click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Unfold A1");
+}
+
+#[test]
+#[ignore]
+fn timeline_look() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Lots of music, so the lanes scroll.
+    let Some((_, mut h)) = own_with_music(tmp.path(), 6) else {
+        return;
+    };
+    h.set_size(egui::vec2(1280.0, 800.0));
+    wait(&mut h, 2.0);
+    h.get_by_label("Join 01-010#1 to 01-020#1").click();
+    wait(&mut h, 0.3);
+    h.get_by_label("Zoom in").click();
+    h.get_by_label("Zoom in").click();
+    wait(&mut h, 0.3);
+    snap(&mut h, "timeline");
+    h.get_by_label("Fold A1").click();
+    h.get_by_label("Fold A2").click();
+    wait(&mut h, 0.2);
+    snap(&mut h, "timeline-folded");
 }
