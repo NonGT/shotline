@@ -1,0 +1,51 @@
+//! Phosphor icons (assets/fonts/Phosphor.ttf), by codepoint. Draw them with `theme::icon(size)`,
+//! or put them in a label: the font sits behind the text ones.
+#![allow(dead_code)]
+
+pub const STORY: &str = "\u{E8F2}";
+pub const ELEMENTS: &str = "\u{E4D6}";
+pub const SHOTS: &str = "\u{E792}";
+pub const CUT: &str = "\u{EAE0}";
+pub const COST: &str = "\u{E150}";
+pub const RELOAD: &str = "\u{E036}";
+pub const SETTINGS: &str = "\u{E272}";
+pub const CLOSE: &str = "\u{E4F6}";
+pub const ADD: &str = "\u{E3D4}";
+pub const TRASH: &str = "\u{E4A6}";
+pub const IMAGE: &str = "\u{E2CA}";
+pub const ZOOM: &str = "\u{E0A2}";
+pub const PLAY: &str = "\u{E3D0}";
+pub const PAUSE: &str = "\u{E39E}";
+pub const UNDO: &str = "\u{E08A}";
+pub const REDO: &str = "\u{E08C}";
+pub const GIT: &str = "\u{E278}";
+pub const SPINNER: &str = "\u{EB44}";
+pub const CHECK: &str = "\u{E182}";
+pub const WARNING: &str = "\u{E4E0}";
+pub const MORE: &str = "\u{E1FE}";
+pub const MAKE: &str = "\u{E6B6}";
+pub const UPLOAD: &str = "\u{E4C0}";
+pub const LINK: &str = "\u{E2E2}";
+pub const MIC: &str = "\u{E326}";
+pub const SPEAKER: &str = "\u{E44A}";
+pub const CARET_DOWN: &str = "\u{E136}";
+pub const CARET_LEFT: &str = "\u{E138}";
+pub const CARET_RIGHT: &str = "\u{E13A}";
+pub const LEAVE_OUT: &str = "\u{E224}";
+pub const PUT_BACK: &str = "\u{E038}";
+pub const COPY: &str = "\u{E1CA}";
+pub const EDIT: &str = "\u{E3B4}";
+pub const CAMERA: &str = "\u{E4DA}";
+pub const RECORD: &str = "\u{E3EE}";
+pub const FOLDER: &str = "\u{E256}";
+pub const SPARKLE: &str = "\u{E6A2}";
+pub const CLOCK: &str = "\u{E19A}";
+pub const WAVEFORM: &str = "\u{E802}";
+pub const SLIDERS: &str = "\u{E434}";
+pub const SEARCH: &str = "\u{E30C}";
+pub const OPEN_OUT: &str = "\u{E5DE}";
+pub const PLUGIN: &str = "\u{E596}";
+pub const TRANSLATE: &str = "\u{E4A2}";
+pub const LIST: &str = "\u{E2F0}";
+pub const DOWNLOAD: &str = "\u{E20C}";
+pub const SLATE: &str = "\u{E8C2}";

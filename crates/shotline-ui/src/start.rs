@@ -10,7 +10,7 @@ use shotline_core::slug::slugify;
 use shotline_core::{Git, Project};
 
 use crate::prefs::Prefs;
-use crate::{App, Host, caption, hint, read, theme};
+use crate::{App, Host, caption, hint, icon, kit, read, theme};
 
 const RECENT: usize = 8;
 
@@ -247,6 +247,11 @@ impl Shell {
             && let Some(plugin) = app.wants_keys.take()
         {
             self.preferences(Some(&plugin));
+        }
+        if let Screen::Film(app) = &mut self.screen
+            && std::mem::take(&mut app.wants_prefs)
+        {
+            self.preferences(None);
         }
         self.prefs_window(ui);
         let title = title(self.film().map(|a| &a.project));
@@ -521,7 +526,7 @@ fn new_film_dialog(ui: &mut egui::Ui, form: &mut Form, has_git: bool) -> (Option
     let mut out = None;
     let mut cancel = false;
     let modal = crate::modal(ui.ctx(), "new film", |ui| {
-        ui.set_width(460.0);
+        ui.set_width(kit::modal_width(ui.ctx(), 1.0, 460.0, 460.0));
         ui.heading("New film");
         ui.add_space(10.0);
         out = form.show(ui, has_git, |ui| cancel = ui.button("Cancel").clicked());
@@ -539,23 +544,71 @@ fn start_page(
     egui::CentralPanel::default()
         .frame(egui::Frame::central_panel(ui.style()).inner_margin(0.0))
         .show(ui, |ui| {
-            crate::page(ui, egui::vec2(8.0, 8.0), |ui| {
-                let w = 460.0_f32.min(ui.available_width());
-                ui.add_space(72.0);
+            crate::page(ui, egui::vec2(24.0, 24.0), |ui| {
+                let wide = ui.available_width() >= 900.0;
+                let w = if wide {
+                    880.0
+                } else {
+                    460.0_f32.min(ui.available_width())
+                };
+                ui.add_space(if wide { 64.0 } else { 24.0 });
                 ui.vertical_centered(|ui| {
                     ui.set_max_width(w);
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        ui.label(
-                            RichText::new("shotline")
-                                .font(theme::slate())
-                                .color(theme::PAPER),
-                        );
-                        ui.add_space(32.0);
-                        ui.heading("New film");
-                        ui.add_space(10.0);
-                        out = form
-                            .show(ui, has_git, |_| {})
-                            .or_else(|| open_film(ui, &form.folder, recent));
+                        ui.horizontal(|ui| {
+                            let (mark, _) = ui
+                                .allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
+                            ui.painter().rect_filled(mark, 11.0, theme::TUNGSTEN);
+                            kit::glyph(ui.painter(), mark.center(), icon::PLAY, 20.0, theme::RACK);
+                            ui.add_space(6.0);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                ui.label(
+                                    RichText::new("shotline")
+                                        .font(theme::title())
+                                        .color(theme::PAPER),
+                                );
+                                ui.label(
+                                    RichText::new("Plan and shoot a film shot by shot.")
+                                        .color(theme::DUST),
+                                );
+                            });
+                        });
+                        ui.add_space(28.0);
+                        let new = |ui: &mut egui::Ui, form: &mut Form| {
+                            kit::card(ui, |ui| {
+                                kit::card_title(ui, "New film", None);
+                                ui.add_space(8.0);
+                                form.show(ui, has_git, |_| {})
+                            })
+                        };
+                        let open = |ui: &mut egui::Ui, folder: &str| {
+                            kit::card(ui, |ui| open_film(ui, folder, recent))
+                        };
+                        if wide {
+                            ui.horizontal_top(|ui| {
+                                let half = (ui.available_width() - theme::GAP) / 2.0;
+                                let a = ui
+                                    .vertical(|ui| {
+                                        ui.set_width(half);
+                                        new(ui, form)
+                                    })
+                                    .inner;
+                                ui.add_space(theme::GAP);
+                                let b = ui
+                                    .vertical(|ui| {
+                                        ui.set_width(half);
+                                        open(ui, &form.folder)
+                                    })
+                                    .inner;
+                                out = a.or(b);
+                            });
+                        } else {
+                            let a = new(ui, form);
+                            ui.add_space(theme::GAP);
+                            let b = open(ui, &form.folder);
+                            out = a.or(b);
+                        }
                     });
                 });
             });
@@ -565,10 +618,9 @@ fn start_page(
 
 fn open_film(ui: &mut egui::Ui, folder: &str, recent: &[(PathBuf, String)]) -> Option<Opened> {
     let mut out = None;
-    ui.add_space(36.0);
-    ui.heading("Open a film");
-    ui.add_space(10.0);
-    if ui.button("Choose a folder").clicked()
+    kit::card_title(ui, "Open a film", None);
+    ui.add_space(8.0);
+    if kit::icon_text_button(ui, icon::FOLDER, "Choose a folder").clicked()
         && let Some(d) = rfd::FileDialog::new()
             .set_directory(expand(folder))
             .pick_folder()
@@ -578,19 +630,70 @@ fn open_film(ui: &mut egui::Ui, folder: &str, recent: &[(PathBuf, String)]) -> O
     if !recent.is_empty() {
         ui.add_space(14.0);
         caption(ui, "Recent");
+        ui.add_space(2.0);
     }
     for (dir, name) in recent {
-        let row = ui.add(
-            egui::Button::new(
-                RichText::new(format!("{name}  {}", dir.display())).color(theme::GRAPHITE),
-            )
-            .frame(false),
-        );
-        if row.clicked() {
+        if recent_row(ui, name, dir).clicked() {
             out = Some(Opened::Existing(dir.clone()));
         }
     }
     out
+}
+
+/// A film opened before: its name, and where it is cut short from the left.
+fn recent_row(ui: &mut egui::Ui, name: &str, dir: &Path) -> egui::Response {
+    let (rect, r) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::click());
+    let path = dir.display().to_string();
+    r.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{name}  {path}"))
+    });
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        if r.hovered() {
+            p.rect_filled(rect, theme::R_ROW, theme::RAISED);
+        }
+        kit::glyph(
+            p,
+            egui::pos2(rect.left() + 20.0, rect.center().y),
+            icon::FOLDER,
+            18.0,
+            theme::DUST,
+        );
+        let x = rect.left() + 42.0;
+        let w = rect.right() - x - 10.0;
+        p.text(
+            egui::pos2(x, rect.top() + 7.0),
+            egui::Align2::LEFT_TOP,
+            name,
+            egui::FontId::new(13.5, egui::FontFamily::Name(theme::SEMIBOLD.into())),
+            theme::PAPER,
+        );
+        // Keep the end of the path, which tells films apart.
+        let font = egui::FontId::proportional(12.0);
+        let mut shown = path.clone();
+        let fits = |s: &str| {
+            p.layout_no_wrap(s.to_string(), font.clone(), theme::DUST)
+                .size()
+                .x
+                <= w
+        };
+        while !fits(&shown) && shown.chars().count() > 4 {
+            let rest: String = shown
+                .chars()
+                .skip(if shown.starts_with('…') { 2 } else { 1 })
+                .collect();
+            shown = format!("…{rest}");
+        }
+        p.text(
+            egui::pos2(x, rect.top() + 26.0),
+            egui::Align2::LEFT_TOP,
+            shown,
+            font,
+            theme::DUST,
+        );
+    }
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 impl Form {
@@ -675,8 +778,11 @@ impl Form {
         ui.add_space(10.0);
         let create = ui
             .horizontal(|ui| {
-                let create =
-                    ui.add_enabled(dir.is_some() && !taken, egui::Button::new("Create film"));
+                let create = ui
+                    .add_enabled_ui(dir.is_some() && !taken, |ui| {
+                        kit::primary_button(ui, None, "Create film")
+                    })
+                    .inner;
                 buttons(ui);
                 create
             })

@@ -76,7 +76,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new("References")
-                    .text_style(egui::TextStyle::Heading)
+                    .font(theme::section())
                     .color(theme::PAPER),
             );
             if let Some(b) = &built
@@ -383,7 +383,7 @@ impl App {
                     ui.label(RichText::new(w).color(theme::FLAG));
                 }
                 for c in &b.cautions {
-                    ui.label(RichText::new(c).color(theme::TUNGSTEN));
+                    ui.label(RichText::new(c).color(theme::WARN));
                 }
                 egui::CollapsingHeader::new(
                     RichText::new("What the model gets").color(theme::GRAPHITE),

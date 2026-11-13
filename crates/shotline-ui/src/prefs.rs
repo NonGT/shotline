@@ -335,7 +335,7 @@ impl Prefs {
         let (mut ok, mut cancel) = (false, false);
         let mut check = None;
         let modal = crate::modal(ui.ctx(), "preferences", |ui| {
-            ui.set_width(900.0);
+            ui.set_width(crate::kit::modal_width(ui.ctx(), 0.8, 720.0, 960.0));
             ui.heading("Preferences");
             ui.add_space(8.0);
             let row = ui.horizontal_top(|ui| {
@@ -452,7 +452,7 @@ impl Prefs {
     fn models_page(&mut self, ui: &mut egui::Ui) {
         ui.label(
             RichText::new("Default Models")
-                .text_style(egui::TextStyle::Heading)
+                .font(theme::section())
                 .color(theme::PAPER),
         );
         ui.add_space(8.0);
@@ -479,7 +479,7 @@ impl Prefs {
     fn budget_page(&mut self, ui: &mut egui::Ui) {
         ui.label(
             RichText::new("Budget")
-                .text_style(egui::TextStyle::Heading)
+                .font(theme::section())
                 .color(theme::PAPER),
         );
         ui.add_space(8.0);
@@ -523,7 +523,7 @@ impl Prefs {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(&p.name)
-                    .text_style(egui::TextStyle::Heading)
+                    .font(theme::section())
                     .color(theme::PAPER),
             );
             if let Ok(d) = &p.description {
@@ -661,7 +661,7 @@ fn group(ui: &mut egui::Ui, title: &str, about: &str, body: impl FnOnce(&mut egu
     ui.add_space(2.0);
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::LINE))
-        .corner_radius(4.0)
+        .corner_radius(theme::R_ROW)
         .inner_margin(10)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -721,18 +721,18 @@ fn key_row(ui: &mut egui::Ui, k: &mut Key) {
             k.shown = !k.shown;
         }
         if ui
-            .add_enabled(
-                !k.typed.is_empty(),
-                egui::Button::new(RichText::new("Remove").color(theme::FLAG)),
-            )
+            .add_enabled_ui(!k.typed.is_empty(), |ui| {
+                crate::kit::danger_button(ui, "Remove")
+            })
+            .inner
             .on_hover_text("take it out of .env")
             .clicked()
         {
             k.typed.clear();
         }
         let (state, color) = match (k.change(), &k.source) {
-            (Some(Some(_)), _) => ("saved on OK", theme::TUNGSTEN),
-            (Some(None), _) => ("taken out on OK", theme::TUNGSTEN),
+            (Some(Some(_)), _) => ("saved on OK", theme::PAPER),
+            (Some(None), _) => ("taken out on OK", theme::PAPER),
             (None, Source::File) => ("in .env", theme::GRAPHITE),
             (None, Source::Environment) => ("from the environment", theme::GRAPHITE),
             (None, Source::Missing) => ("not set", theme::FLAG),
@@ -750,7 +750,7 @@ fn program(ui: &mut egui::Ui, p: &PluginInfo, pins: &mut BTreeMap<String, Option
                 Some(e) => format!("keeps {}", e.display()),
                 None => "PATH decides".into(),
             };
-            ui.label(RichText::new(text).color(theme::TUNGSTEN));
+            ui.label(RichText::new(text).color(theme::PAPER));
             if ui.small_button("Leave as is").clicked() {
                 pins.remove(&p.name);
             }
@@ -767,7 +767,7 @@ fn program(ui: &mut egui::Ui, p: &PluginInfo, pins: &mut BTreeMap<String, Option
         label(ui, "Runs from", "");
         ui.label(RichText::new(&place).color(theme::PAPER));
         if kept {
-            ui.label(RichText::new("kept").small().color(theme::TUNGSTEN));
+            ui.label(RichText::new("kept").small().color(theme::PAPER));
             if ui
                 .small_button("Let PATH decide")
                 .on_hover_text("takes away the saved choice in your plugins folder")

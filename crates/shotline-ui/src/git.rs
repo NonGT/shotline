@@ -35,8 +35,7 @@ impl App {
         match &self.repo {
             Repo::None => {}
             Repo::NotYet => {
-                if ui
-                    .button("Keep history with git")
+                if crate::kit::ghost_button(ui, crate::icon::GIT, "Keep history with git")
                     .on_hover_text("start a git repository for this film")
                     .clicked()
                 {
@@ -48,7 +47,7 @@ impl App {
             Repo::Changes(c) => {
                 let n = c.len();
                 let text = format!("Commit {n} change{}", if n == 1 { "" } else { "s" });
-                if ui.button(text).clicked() {
+                if crate::kit::ghost_button(ui, crate::icon::GIT, &text).clicked() {
                     self.flush();
                     self.refresh_repo();
                     self.status = None;
@@ -72,7 +71,7 @@ impl App {
         };
         let film = self.project.root.display().to_string();
         let modal = crate::modal(ui.ctx(), "git", |ui| {
-            ui.set_width(440.0);
+            ui.set_width(crate::kit::modal_width(ui.ctx(), 1.0, 440.0, 440.0));
             match dialog {
                 Dialog::Commit(message) => {
                     ui.heading("Commit to git");

@@ -13,7 +13,7 @@ use shotline_core::{MatchAt, ShotRef, Transition};
 use crate::edit::Action;
 use crate::lanes::{self, Block, Hit, Lane};
 use crate::player::{Deck, Player};
-use crate::{App, PAGE, hint, page, remove_button, short, theme};
+use crate::{App, PAGE, hint, icon, kit, page, remove_button, short, theme};
 
 /// The deck's title while it plays the cut.
 const CUT: &str = "the cut";
@@ -83,14 +83,14 @@ impl App {
         egui::Panel::right("cut-side")
             .resizable(true)
             .default_size(340.0)
-            .frame(egui::Frame::new().fill(theme::RACK))
+            .frame(egui::Frame::new().fill(theme::BAY))
             .show(ui, |ui| {
-                page(ui, egui::vec2(16.0, 12.0), |ui| {
-                    self.joins(ui);
-                    ui.add_space(18.0);
-                    self.music(ui, &mut acts);
-                    ui.add_space(18.0);
-                    self.renders(ui);
+                page(ui, egui::vec2(theme::GAP, theme::GAP), |ui| {
+                    kit::card(ui, |ui| self.joins(ui));
+                    ui.add_space(theme::GAP);
+                    kit::card(ui, |ui| self.music(ui, &mut acts));
+                    ui.add_space(theme::GAP);
+                    kit::card(ui, |ui| self.renders(ui));
                 });
             });
         egui::Panel::bottom("cut-timeline")
@@ -130,7 +130,10 @@ impl App {
             };
             let can = missing.is_empty() && !running && self.host.is_some();
             if ui
-                .add_enabled(can, egui::Button::new("Render"))
+                .add_enabled_ui(can, |ui| {
+                    kit::primary_button(ui, Some(icon::DOWNLOAD), "Render")
+                })
+                .inner
                 .on_hover_text("one video with the joins and music below, into renders/; free")
                 .on_disabled_hover_text(if running { "rendering already" } else { &why })
                 .clicked()
@@ -1051,7 +1054,7 @@ impl App {
                 RichText::new(format!(
                     "Preview not updated: {app} hasn't rendered it since the last change"
                 ))
-                .color(theme::TUNGSTEN),
+                .color(theme::WARN),
             )
             .on_hover_text(
                 "until then the player shows a quick preview: LUTs and dissolves, no other effects",
@@ -1537,7 +1540,8 @@ fn blank_monitor(ui: &mut egui::Ui, height: f32, note: &str) {
         egui::vec2(ui.available_width(), height),
         egui::Sense::hover(),
     );
-    ui.painter().rect_filled(screen, 4.0, egui::Color32::BLACK);
+    ui.painter()
+        .rect_filled(screen, theme::R_CARD, theme::STAGE);
     if !note.is_empty() {
         ui.put(
             screen.shrink(16.0),
@@ -1727,11 +1731,7 @@ fn track_pieces(t: &TrackInfo, video: bool) -> Vec<shotline_media::sequence::Pie
 }
 
 fn heading(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .text_style(egui::TextStyle::Heading)
-            .color(theme::PAPER),
-    );
+    kit::card_title(ui, text, None);
     ui.add_space(4.0);
 }
 

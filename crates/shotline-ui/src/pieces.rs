@@ -121,7 +121,7 @@ impl Splicer {
             self.open(self.source, ff, audio, tall);
         }
         let busy = !matches!(*self.making.lock().unwrap(), Making::Idle);
-        let wide = (ui.ctx().content_rect().width() * 0.7).clamp(480.0, 960.0);
+        let wide = crate::kit::modal_width(ui.ctx(), 0.7, 480.0, 960.0);
         let mut close = false;
         let mut pick = None;
         let modal = crate::modal(ui.ctx(), "pieces", |ui| {
@@ -207,19 +207,15 @@ impl Splicer {
                 p.rect_filled(
                     span(piece.from, piece.to),
                     2.0,
-                    theme::TUNGSTEN.gamma_multiply(0.4),
+                    theme::PAPER.gamma_multiply(0.22),
                 );
             }
         }
         let (a, b) = self.marked();
         if let (Some(a), Some(b)) = (a, b) {
-            p.rect_filled(span(a, b), 2.0, theme::TUNGSTEN_LIT);
+            p.rect_filled(span(a, b), 2.0, theme::STEEL);
         } else if let Some(a) = a.or(b) {
-            p.rect_filled(
-                span(a, a).expand2(egui::vec2(1.0, 2.0)),
-                0.0,
-                theme::TUNGSTEN_LIT,
-            );
+            p.rect_filled(span(a, a).expand2(egui::vec2(1.0, 2.0)), 0.0, theme::STEEL);
         }
     }
 
@@ -259,7 +255,7 @@ impl Splicer {
             match self.editing {
                 Some(i) => {
                     ui.label(
-                        RichText::new(format!("changing piece {}", i + 1)).color(theme::TUNGSTEN),
+                        RichText::new(format!("changing piece {}", i + 1)).color(theme::STEEL),
                     );
                     if ui.button("Done").clicked() {
                         self.editing = None;
@@ -367,7 +363,7 @@ impl Splicer {
                             p.to,
                             p.to - p.from
                         );
-                        let color = if on { theme::TUNGSTEN } else { theme::PAPER };
+                        let color = if on { theme::STEEL } else { theme::PAPER };
                         if ui
                             .add(egui::Button::new(RichText::new(text).color(color)).frame(false))
                             .on_hover_text("play it, and change where it starts and ends")

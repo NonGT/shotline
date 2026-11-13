@@ -600,7 +600,8 @@ impl Deck {
         self.advance(ui.ctx(), audio);
         let width = ui.available_width();
         let (screen, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-        ui.painter().rect_filled(screen, 4.0, egui::Color32::BLACK);
+        ui.painter()
+            .rect_filled(screen, crate::theme::R_CARD, crate::theme::STAGE);
         let p = &mut self.players[0];
         let aspect = p.aspect().max(0.1);
         let (mut w, mut h) = (height * aspect, height);
@@ -721,7 +722,8 @@ impl Deck {
         let height =
             (width / self.players.len() as f32 / self.players[0].aspect()).min(self.max_height);
         let (screen, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-        ui.painter().rect_filled(screen, 4.0, egui::Color32::BLACK);
+        ui.painter()
+            .rect_filled(screen, crate::theme::R_CARD, crate::theme::STAGE);
         let all: f32 = self.players.iter().map(|p| height * p.aspect()).sum();
         let mut x = screen.center().x - all / 2.0;
         for p in &mut self.players {

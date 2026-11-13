@@ -324,7 +324,7 @@ impl App {
             .find(|(p, m)| *p == w.form.plugin && m.id == w.form.model)
             .map(|(_, m)| m.clone());
         let busy = w.making.is_some() || w.framing.is_some();
-        let wide = (ctx.content_rect().width() * 0.6).clamp(480.0, 860.0);
+        let wide = crate::kit::modal_width(&ctx, 0.6, 480.0, 860.0);
         let mut close = false;
         let mut go = None;
         let mut ask = false;
@@ -580,7 +580,7 @@ impl App {
                         let video = self.project.bridge_video(job);
                         let row = egui::Frame::new()
                             .inner_margin(egui::Margin::symmetric(10, 8))
-                            .corner_radius(4.0)
+                            .corner_radius(theme::R_ROW)
                             .fill(if on {
                                 theme::TUNGSTEN.gamma_multiply(0.12)
                             } else {
