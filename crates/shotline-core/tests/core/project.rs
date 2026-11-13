@@ -302,6 +302,34 @@ fn a_sound_goes_over_one_take() {
     assert_eq!(fs::read(&got[0].2).unwrap(), b"wav");
     assert!(p.take_sounds(&two).unwrap().is_empty());
 
+    // Moved, trimmed and turned down where it lies.
+    let mut moved = got[0].0.clone();
+    (moved.at, moved.gain, moved.length) = (0.5, -6.0, Some(1.0));
+    p.set_sound((&one).into(), &moved).unwrap();
+    let now = &p.take_sounds(&one).unwrap()[0].0;
+    assert_eq!(now, &moved);
+    assert!((now.volume() - 0.501).abs() < 0.001);
+    for bad in [
+        shotline_core::TakeSound {
+            at: -1.0,
+            ..moved.clone()
+        },
+        shotline_core::TakeSound {
+            length: Some(0.0),
+            ..moved.clone()
+        },
+        shotline_core::TakeSound {
+            gain: 40.0,
+            ..moved.clone()
+        },
+        shotline_core::TakeSound {
+            job: "nope".into(),
+            ..moved.clone()
+        },
+    ] {
+        assert!(p.set_sound((&one).into(), &bad).is_err(), "{bad:?}");
+    }
+
     p.remove_sound((&one).into(), &j.id.to_string()).unwrap();
     assert!(p.take_sounds(&one).unwrap().is_empty());
     assert!(p.job(&j.id.to_string()).unwrap().discarded);

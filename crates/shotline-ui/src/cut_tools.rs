@@ -372,7 +372,7 @@ impl App {
         };
         if ui
             .add_enabled(free, egui::Button::new(label))
-            .on_hover_text("effects or a voice off over this take")
+            .on_hover_text("effects or a voice-over over this take")
             .clicked()
         {
             // From the playhead when it's over the clip, else from where the clip starts.

@@ -26,6 +26,8 @@ pub struct Track {
     /// Seconds into the film where it starts.
     pub at: f64,
     pub volume: f64,
+    /// Only this many seconds of it.
+    pub length: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,8 +231,12 @@ pub fn render(
         let mut mix = alast.clone();
         for (j, t) in tracks.iter().enumerate() {
             let ms = (t.at.max(0.0) * 1000.0).round() as u64;
+            let trim = t
+                .length
+                .map(|l| format!("atrim=0:{l:.4},"))
+                .unwrap_or_default();
             fc.push(format!(
-                "[{}:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={},adelay={ms}|{ms}[t{j}]",
+                "[{}:a]{trim}aformat=sample_rates=48000:channel_layouts=stereo,volume={},adelay={ms}|{ms}[t{j}]",
                 2 * k + j,
                 t.volume
             ));

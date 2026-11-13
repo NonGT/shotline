@@ -1207,6 +1207,8 @@ mod tests {
                     Change::Sound {
                         file: door.clone(),
                         at: 1.0,
+                        length: None,
+                        gain: 0.0,
                     },
                 ))
                 .await
@@ -1235,6 +1237,24 @@ mod tests {
         FilmCraft.edit(&ask("", undo(&done))).await.unwrap();
         assert!(seq().audio[1].clips.is_empty());
         assert_eq!(seq().audio[0].clips.len(), 2);
+
+        // Trimmed and turned down as it goes in; undo takes it all off.
+        let short = FilmCraft
+            .edit(&ask(
+                &at(3.0).0.id,
+                Change::Sound {
+                    file: door.clone(),
+                    at: 1.0,
+                    length: Some(0.5),
+                    gain: -6.0,
+                },
+            ))
+            .await
+            .unwrap();
+        let put = seq().audio[1].clips[0].clone();
+        assert_eq!((put.start, put.length), (4.0, 0.5));
+        FilmCraft.edit(&ask("", undo(&short))).await.unwrap();
+        assert!(seq().audio[1].clips.is_empty());
 
         // Undo can give the clips new ids.
         let v = at(3.0).0;

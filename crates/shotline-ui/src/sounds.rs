@@ -31,8 +31,12 @@ pub(crate) struct SoundsWin {
     /// The take, a shot's or a bridge's, and what it's called.
     pub under: Under,
     pub name: String,
-    /// Seconds into the take a new sound starts.
-    pub at: f64,
+    /// Seconds into the take each kind of new sound starts: from a file, a voice-over, an effect.
+    file_at: f64,
+    speech_at: f64,
+    effect_at: f64,
+    /// A laid sound being moved, trimmed or turned, until the field is let go.
+    editing: Option<TakeSound>,
     who: String,
     text: String,
     speak: Speak,
@@ -53,7 +57,10 @@ impl SoundsWin {
         Self {
             under,
             name,
-            at: (at * 100.0).round() / 100.0,
+            file_at: (at * 100.0).round() / 100.0,
+            speech_at: (at * 100.0).round() / 100.0,
+            effect_at: (at * 100.0).round() / 100.0,
+            editing: None,
             who: String::new(),
             text: String::new(),
             speak: Speak::Idle,
@@ -68,10 +75,24 @@ impl SoundsWin {
     }
 
     fn busy(&self) -> bool {
-        self.lift.is_some()
+        self.holds().is_some()
             || [&self.speak, &self.effect]
                 .iter()
-                .any(|s| matches!(s, Speak::Asking(_) | Speak::Making(_)))
+                .any(|s| matches!(s, Speak::Asking(_)))
+    }
+
+    /// What has to finish before the window can close: something paid for, or the editor
+    /// taking the old sound out.
+    fn holds(&self) -> Option<&'static str> {
+        if matches!(self.speak, Speak::Making(_)) {
+            Some("the voice-over is made")
+        } else if matches!(self.effect, Speak::Making(_)) {
+            Some("the sound effect is made")
+        } else if self.lift.is_some() {
+            Some("the editor has taken the old sound out")
+        } else {
+            None
+        }
     }
 }
 
@@ -188,88 +209,149 @@ impl App {
         let mut add = false;
         let mut remove: Option<(TakeSound, Job, PathBuf)> = None;
         let mut remake: Option<(TakeSound, Job, PathBuf)> = None;
+        let mut set: Option<(TakeSound, PathBuf)> = None;
         let mut close = false;
+        let holds = w.holds();
+        // Where the take is in the editor, if it is.
+        let in_main = main
+            .as_ref()
+            .map(|m| (m.2.name.clone(), self.clip_of(&m.2, w.under, 0.0).is_some()));
         let modal = crate::modal(ctx, "take sounds", |ui| {
-            ui.set_width(crate::kit::modal_width(ui.ctx(), 1.0, 520.0, 520.0));
+            ui.set_width(crate::kit::modal_width(ui.ctx(), 1.0, 560.0, 560.0));
             ui.horizontal(|ui| {
                 ui.heading(format!("Sounds over {}", w.name));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close |= crate::icon_button(ui, "Close", crate::close_icon).clicked();
+                    let r = ui
+                        .add_enabled_ui(holds.is_none(), |ui| {
+                            crate::icon_button(ui, "Close", crate::close_icon)
+                        })
+                        .inner;
+                    if let Some(h) = holds {
+                        r.on_disabled_hover_text(format!("closes once {h}"));
+                    } else {
+                        close |= r.clicked();
+                    }
                 });
             });
+            if let Some(h) = holds {
+                hint(ui, &format!("This stays open until {h}."));
+            }
+            match &in_main {
+                Some((seq, false)) => hint(
+                    ui,
+                    &format!(
+                        "This take isn't in {seq}, so these sounds are only mixed in when \
+                         shotline renders the cut."
+                    ),
+                ),
+                None => hint(ui, "Mixed in when shotline renders the cut."),
+                _ => {}
+            }
             ui.add_space(6.0);
             if sounds.is_empty() {
                 hint(
                     ui,
-                    "Effects or a voice off, laid over this take in the cut.",
+                    "Effects or a voice-over, laid over this take in the cut.",
                 );
             }
             for s in &sounds {
                 let (ts, job, path) = s;
-                ui.horizontal(|ui| {
-                    let what = job.id.to_string();
-                    let name = sound_name(job);
-                    let playing = self.hearing(ui.ctx(), &what);
-                    let (icon, label): (fn(&egui::Painter, egui::Rect, egui::Stroke), _) =
-                        if playing {
-                            (crate::stop_icon, format!("Stop {name}"))
-                        } else {
-                            (crate::play_icon, format!("Play {name}"))
-                        };
-                    if crate::icon_button(ui, &label, icon).clicked() {
-                        if playing {
-                            self.hush();
-                        } else {
-                            self.hear(&what, path);
-                        }
-                    }
-                    ui.label(RichText::new(short(&name, 48)).color(theme::PAPER))
-                        .on_hover_text(&name);
-                    ui.label(
-                        RichText::new(format!("from {:.2} s", ts.at))
-                            .small()
-                            .color(theme::DUST),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let r = ui.add_enabled_ui(!busy, crate::remove_button).inner;
-                        r.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::Role::Button,
-                                !busy,
-                                format!("Remove {name}"),
-                            )
-                        });
-                        if r.clicked() {
-                            remove = Some(s.clone());
-                        }
-                        if remakeable(job) {
-                            let r = ui
-                                .add_enabled(!busy, egui::Button::new("Remake").small())
-                                .on_hover_text("make it again with the same words, in its place");
-                            r.widget_info(|| {
-                                egui::WidgetInfo::labeled(
-                                    egui::Role::Button,
-                                    !busy,
-                                    format!("Remake {name}"),
-                                )
-                            });
-                            if r.clicked() {
-                                remake = Some(s.clone());
+                let what = job.id.to_string();
+                let name = sound_name(job);
+                let laid = main.as_ref().and_then(|m| laid_clip(m, path)).is_some();
+                let blocked = self.remake_blocked(job, &effects);
+                let whole = self.clip_length(ui.ctx(), path);
+                ui.push_id(&ts.job, |ui| {
+                    crate::kit::card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let playing = self.hearing(ui.ctx(), &what);
+                            let (icon, label): (fn(&egui::Painter, egui::Rect, egui::Stroke), _) =
+                                if playing {
+                                    (crate::stop_icon, format!("Stop {name}"))
+                                } else {
+                                    (crate::play_icon, format!("Play {name}"))
+                                };
+                            if crate::icon_button(ui, &label, icon).clicked() {
+                                if playing {
+                                    self.hush();
+                                } else {
+                                    self.hear(&what, path);
+                                }
                             }
+                            ui.label(RichText::new(short(&name, 40)).color(theme::PAPER))
+                                .on_hover_text(&name);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let r = ui.add_enabled_ui(!busy, crate::remove_button).inner;
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::Button,
+                                            !busy,
+                                            format!("Remove {name}"),
+                                        )
+                                    });
+                                    if r.clicked() {
+                                        remove = Some(s.clone());
+                                    }
+                                    if remakeable(job) {
+                                        let on = !busy && blocked.is_none();
+                                        let r = ui
+                                            .add_enabled(on, egui::Button::new("Remake").small())
+                                            .on_hover_text(
+                                                "make it again with the same words, in its place",
+                                            )
+                                            .on_disabled_hover_text(
+                                                blocked.as_deref().unwrap_or("wait for the editor"),
+                                            );
+                                        r.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::Role::Button,
+                                                on,
+                                                format!("Remake {name}"),
+                                            )
+                                        });
+                                        if r.clicked() {
+                                            remake = Some(s.clone());
+                                        }
+                                    }
+                                    if let Some((seq, _)) = &in_main {
+                                        let r = if laid {
+                                            crate::kit::chip(ui, "in editor", theme::GO, 0.0)
+                                                .on_hover_text(format!("in {seq} too"))
+                                        } else {
+                                            crate::kit::chip(ui, "render only", theme::DUST, 0.0)
+                                                .on_hover_text(format!(
+                                                    "not in {seq}; mixed in when shotline renders \
+                                             the cut"
+                                                ))
+                                        };
+                                        r.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::Role::Label,
+                                                true,
+                                                if laid { "in editor" } else { "render only" },
+                                            )
+                                        });
+                                    }
+                                },
+                            );
+                        });
+                        if let Some(new) = sound_fields(ui, &mut w.editing, ts, whole, &name, !busy)
+                        {
+                            set = Some((new, path.clone()));
                         }
-                    });
+                    })
                 });
+                if let Some(b) = &blocked
+                    && remakeable(job)
+                {
+                    hint(ui, &format!("Remake is off: {b}."));
+                }
+                ui.add_space(4.0);
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label("Starts at");
-                ui.add(
-                    egui::DragValue::new(&mut w.at)
-                        .range(0.0..=600.0)
-                        .speed(0.05)
-                        .suffix(" s"),
-                )
-                .on_hover_text("seconds into the take, for the next sound added");
                 add = ui
                     .add_enabled(!busy, egui::Button::new("From a file…"))
                     .on_hover_text(match &main {
@@ -277,9 +359,14 @@ impl App {
                         None => "a sound from somewhere else, mixed in when the cut is rendered",
                     })
                     .clicked();
+                starts_at(ui, &mut w.file_at, "From a file");
             });
             ui.add_space(10.0);
-            ui.label(RichText::new("Speech").strong().color(theme::PAPER));
+            ui.label(RichText::new("Voice-over").strong().color(theme::PAPER));
+            hint(
+                ui,
+                "Heard over the take, not lip synced. Words said on screen go in the shot's Lines.",
+            );
             ui.add_space(4.0);
             if voiced.is_empty() {
                 hint(
@@ -289,10 +376,16 @@ impl App {
             } else {
                 self.speech_row(ui, &mut w, &voiced);
             }
-            if !effects.is_empty() {
-                ui.add_space(10.0);
-                ui.label(RichText::new("Sound effect").strong().color(theme::PAPER));
-                ui.add_space(4.0);
+            ui.add_space(10.0);
+            ui.label(RichText::new("Sound effect").strong().color(theme::PAPER));
+            ui.add_space(4.0);
+            if effects.is_empty() {
+                hint(
+                    ui,
+                    "No installed plugin makes sound effects. Install one that does, like \
+                     elevenlabs, to make them here.",
+                );
+            } else {
                 self.effect_row(ui, &mut w, &effects);
             }
         });
@@ -302,7 +395,7 @@ impl App {
         {
             let before = self.sound_jobs(w.under);
             self.flush();
-            self.apply(vec![Action::AddSound(w.under, file, w.at)]);
+            self.apply(vec![Action::AddSound(w.under, file, w.file_at)]);
             let new = self
                 .sound_jobs(w.under)
                 .into_iter()
@@ -313,16 +406,38 @@ impl App {
         }
         if let Some(s) = remove
             && let Some(lift) = self.unlay(ctx, (w.under, &w.name), s, main.as_ref())
-            && let Some(m) = main
+            && let Some(m) = main.clone()
         {
             self.sound_change(ctx, m, lift.0, lift.1, Change::Lift);
+        }
+        if let Some((new, path)) = set {
+            // In the editor it's laid again as it is now, and the old clip lifted after.
+            let old = main.as_ref().and_then(|m| laid_clip(m, &path));
+            self.flush();
+            self.apply(vec![Action::SetSound(w.under, new.clone())]);
+            if let Some(old) = old {
+                self.lay(ctx, (w.under, &w.name), &new.job, main.clone());
+                w.lift = Some((old, format!("the old {}", short(&w.name, 30))));
+            }
         }
         if let Some(s) = remake {
             self.remake_sound(ctx, &mut w, s, &effects);
         }
-        if !(close || modal.should_close()) || w.busy() {
+        let closing = close || modal.should_close();
+        if !closing || w.holds().is_some() {
             self.sounds_win = Some(w);
         }
+    }
+
+    /// Why a sound can't be made again here, if it can't.
+    fn remake_blocked(&self, job: &Job, effects: &[(String, String)]) -> Option<String> {
+        if let Some(who) = &job.who {
+            return self.voice_plugin(who).err();
+        }
+        let installed = effects
+            .iter()
+            .any(|(p, m)| *p == job.plugin && *m == job.model);
+        (!installed).then(|| format!("{} · {} isn't installed", job.plugin, job.model))
     }
 
     fn sound_jobs(&self, u: Under) -> Vec<String> {
@@ -353,6 +468,7 @@ impl App {
         w.model = w.model.min(models.len() - 1);
         ui.add(
             egui::TextEdit::singleline(&mut w.effect_text)
+                .id_salt("effect text")
                 .hint_text("what it sounds like, e.g. a wooden door slams shut")
                 .desired_width(f32::INFINITY),
         )
@@ -374,6 +490,8 @@ impl App {
                     }),
             )
             .on_hover_text("0.5 to 30 seconds; at 0 the model picks, which can cost more");
+            ui.add_space(8.0);
+            starts_at(ui, &mut w.effect_at, "Sound effect");
             if models.len() > 1 {
                 egui::ComboBox::from_id_salt("effect model")
                     .selected_text(&models[w.model].1)
@@ -397,7 +515,7 @@ impl App {
         }
         let ready = !w.effect_text.trim().is_empty();
         let free = self.changing.is_none();
-        let at = w.at;
+        let at = w.effect_at;
         match go_buttons(
             ui,
             &w.effect,
@@ -468,6 +586,7 @@ impl App {
                 });
             ui.add(
                 egui::TextEdit::singleline(&mut w.text)
+                    .id_salt("speech text")
                     .hint_text("what they say")
                     .desired_width(f32::INFINITY),
             )
@@ -487,6 +606,7 @@ impl App {
         if let Some((_, name)) = &w.remake_speech {
             hint(ui, &format!("in place of {}", short(name, 60)));
         }
+        starts_at(ui, &mut w.speech_at, "Voice-over");
         let ready = !w.text.trim().is_empty();
         let free = self.changing.is_none();
         let speaker = self.voice_plugin(&w.who).unwrap_or_default();
@@ -495,8 +615,8 @@ impl App {
             &w.speak,
             ready,
             free,
-            w.at,
-            ("the speech", "type what they say first"),
+            w.speech_at,
+            ("the voice-over", "type what they say first"),
             (&speaker, self.needs_keys(&speaker)),
         ) {
             Some(Ask::Keys(p)) => self.wants_keys = Some(p),
@@ -551,7 +671,23 @@ impl App {
                     .into_iter()
                     .find(|(s, ..)| s.job == id)
             });
-            self.apply(vec![Action::AddSoundJob(w.under, job.clone(), w.at)]);
+            let at = if effect { w.effect_at } else { w.speech_at };
+            let mut acts = vec![Action::AddSoundJob(w.under, job.clone(), at)];
+            // Made again, it keeps the old one's level.
+            if let Some((ts, ..)) = &old
+                && ts.gain != 0.0
+            {
+                acts.push(Action::SetSound(
+                    w.under,
+                    TakeSound {
+                        job: job.clone(),
+                        at,
+                        length: None,
+                        ..ts.clone()
+                    },
+                ));
+            }
+            self.apply(acts);
             let main = self.main_edit();
             if let Some(old) = old {
                 w.lift = self.unlay(ctx, (w.under, &w.name), old, main.as_ref());
@@ -580,13 +716,8 @@ impl App {
         }
         self.flush();
         self.apply(vec![Action::RemoveSound(u, ts.job.clone())]);
-        let clip = main?
-            .2
-            .audio
-            .iter()
-            .flat_map(|t| &t.clips)
-            .find(|c| c.file.as_deref().is_some_and(|f| same(f, &path)))?;
-        Some((clip.id.clone(), format!("{} off {name}", sound_name(&job))))
+        let clip = laid_clip(main?, &path)?;
+        Some((clip, format!("{} off {name}", sound_name(&job))))
     }
 
     /// Fills in speech or an effect as `s` was made, to be priced and made again in its place.
@@ -598,11 +729,11 @@ impl App {
         effects: &[(String, String)],
     ) {
         let text = job.prompt.clone().unwrap_or_default();
-        w.at = ts.at;
         let old = Some((ts.job.clone(), sound_name(&job)));
         if let Some(who) = &job.who {
             w.who = who.clone();
             w.text = text;
+            w.speech_at = ts.at;
             w.remake_speech = old;
             w.speak = Speak::Asking(self.ask_speech(ctx, w, None));
             return;
@@ -611,10 +742,10 @@ impl App {
             .iter()
             .position(|(p, m)| *p == job.plugin && *m == job.model)
         else {
-            w.effect = Speak::Unmade(format!("{} · {} isn't installed", job.plugin, job.model));
             return;
         };
         w.model = i;
+        w.effect_at = ts.at;
         w.effect_text = text;
         // As long as the one made, which also costs less than letting the model pick again.
         w.length = self
@@ -650,8 +781,122 @@ impl App {
         };
         let file = std::path::absolute(&file).unwrap_or(file);
         let what = format!("{} over {name}", sound_name(&j));
-        self.sound_change(ctx, m, clip.id, what, Change::Sound { file, at: ts.at });
+        let change = Change::Sound {
+            file,
+            at: ts.at,
+            length: ts.length,
+            gain: ts.gain,
+        };
+        self.sound_change(ctx, m, clip.id, what, change);
     }
+}
+
+/// The editor's audio clip of `path`, if it's laid there.
+fn laid_clip(main: &Main, path: &Path) -> Option<String> {
+    main.2
+        .audio
+        .iter()
+        .flat_map(|t| &t.clips)
+        .find(|c| c.file.as_deref().is_some_and(|f| same(f, path)))
+        .map(|c| c.id.clone())
+}
+
+/// "from N s": where a new sound of one kind starts in the take.
+fn starts_at(ui: &mut egui::Ui, at: &mut f64, kind: &str) {
+    ui.push_id(kind, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("from").color(theme::DUST));
+            ui.add(
+                egui::DragValue::new(at)
+                    .range(0.0..=600.0)
+                    .speed(0.05)
+                    .suffix(" s"),
+            )
+            .on_hover_text("seconds into the take it starts")
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::SpinButton, true, format!("{kind} starts at"))
+            });
+        })
+    });
+}
+
+/// Where a laid sound starts, how much of it plays and how loud. Gives the sound as changed once
+/// the field is let go.
+fn sound_fields(
+    ui: &mut egui::Ui,
+    editing: &mut Option<TakeSound>,
+    ts: &TakeSound,
+    whole: Option<f64>,
+    name: &str,
+    on: bool,
+) -> Option<TakeSound> {
+    let mine = editing.as_ref().filter(|e| e.job == ts.job);
+    let mut v = mine.cloned().unwrap_or_else(|| ts.clone());
+    let mut length = v.length.unwrap_or(0.0);
+    let held = ui
+        .add_enabled_ui(on, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(28.0);
+                let field = |ui: &mut egui::Ui, label: &str, d: egui::DragValue, what: &str| {
+                    ui.label(RichText::new(label).color(theme::DUST));
+                    let r = ui.add(d);
+                    let what = format!("{what} {name}");
+                    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, on, &what));
+                    r
+                };
+                let a = field(
+                    ui,
+                    "from",
+                    egui::DragValue::new(&mut v.at)
+                        .range(0.0..=600.0)
+                        .speed(0.05)
+                        .suffix(" s"),
+                    "Start of",
+                )
+                .on_hover_text("seconds into the take it starts");
+                ui.add_space(8.0);
+                let most = whole.unwrap_or(600.0);
+                let b = field(
+                    ui,
+                    "plays",
+                    egui::DragValue::new(&mut length)
+                        .range(0.0..=most)
+                        .speed(0.05)
+                        .custom_formatter(|l, _| {
+                            if l <= 0.0 {
+                                "all".into()
+                            } else {
+                                format!("{l:.2} s")
+                            }
+                        }),
+                    "Length of",
+                )
+                .on_hover_text("how much of it plays; 0 plays all of it");
+                ui.add_space(8.0);
+                let c = field(
+                    ui,
+                    "gain",
+                    egui::DragValue::new(&mut v.gain)
+                        .range(-60.0..=24.0)
+                        .speed(0.25)
+                        .custom_formatter(|g, _| format!("{g:+.1} dB")),
+                    "Gain of",
+                )
+                .on_hover_text("louder or quieter than it was made");
+                [a, b, c].iter().any(|r| r.dragged() || r.has_focus())
+            })
+            .inner
+        })
+        .inner;
+    v.length = (length > 0.0 && whole.is_none_or(|w| length < w - 0.01)).then_some(length);
+    if v != *mine.unwrap_or(ts) {
+        *editing = Some(v.clone());
+    }
+    if held || editing.as_ref().is_none_or(|e| e.job != ts.job) {
+        return None;
+    }
+    let done = editing.take()?;
+    (done != *ts).then_some(done)
 }
 
 /// A file's name, what was said, or what an effect was asked to sound like.

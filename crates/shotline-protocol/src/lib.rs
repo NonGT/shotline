@@ -544,6 +544,10 @@ pub struct EditParams {
     pub change: Change,
 }
 
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Change {
@@ -566,8 +570,15 @@ pub enum Change {
         sound: bool,
     },
     /// Lays all of `file` on an audio track with room for it, starting `at` seconds into the
-    /// clip's own file. Nothing moves.
-    Sound { file: PathBuf, at: f64 },
+    /// clip's own file. Nothing moves. With `length`, only that much of it; `gain` in dB.
+    Sound {
+        file: PathBuf,
+        at: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        length: Option<f64>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        gain: f64,
+    },
     /// Takes the clip out, on a video or an audio track, and leaves its place empty.
     Lift,
     /// The clip's input LUT, a `.cube` file; none takes it off.

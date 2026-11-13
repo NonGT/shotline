@@ -115,6 +115,23 @@ pub struct TakeSound {
     /// Seconds into the take where it starts.
     #[serde(default)]
     pub at: f64,
+    /// Louder or quieter than made, in dB.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gain: f64,
+    /// Plays only this many seconds of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<f64>,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+impl TakeSound {
+    /// `gain` as a factor to scale the samples by.
+    pub fn volume(&self) -> f64 {
+        10f64.powf(self.gain / 20.0)
+    }
 }
 
 /// What a sound is laid over: a shot's take, or a bridge's (its job id).
@@ -700,9 +717,33 @@ impl Project {
             take: u.take().to_string(),
             job: j.id.to_string(),
             at,
+            gain: 0.0,
+            length: None,
         });
         self.save_sound_list(u, list)?;
         Ok(j)
+    }
+
+    /// Moves, trims or turns a laid sound up or down; `s.job` says which.
+    pub fn set_sound(&self, u: Under, s: &TakeSound) -> Result<()> {
+        if s.at < 0.0 {
+            return invalid("a sound can't start before its take");
+        }
+        if s.length.is_some_and(|l| l <= 0.0) {
+            return invalid("a sound has to last a little");
+        }
+        if !(-60.0..=24.0).contains(&s.gain) {
+            return invalid("gain goes from -60 to +24 dB");
+        }
+        let mut list = self.sound_list(u)?;
+        let Some(old) = list.iter_mut().find(|t| t.job == s.job) else {
+            return invalid(format!("no sound {} there", s.job));
+        };
+        *old = TakeSound {
+            take: old.take.clone(),
+            ..s.clone()
+        };
+        self.save_sound_list(u, list)
     }
 
     /// The sounds over `u` whose files are still there, with them.

@@ -216,7 +216,8 @@ impl App {
                 picked: false,
             });
             for (ts, job, path) in self.project.take_sounds(take).unwrap_or_default() {
-                let long = self.clip_length(&ctx, &path).unwrap_or(1.0);
+                let whole = self.clip_length(&ctx, &path).unwrap_or(1.0);
+                let long = ts.length.map_or(whole, |l| l.min(whole));
                 sounds.push(Block {
                     name: job.brief.unwrap_or_default(),
                     start: end + ts.at,
@@ -1231,7 +1232,7 @@ impl App {
     }
 
     /// How long a clip plays, once ffprobe has said.
-    fn clip_length(&self, ctx: &egui::Context, path: &Path) -> Option<f64> {
+    pub(crate) fn clip_length(&self, ctx: &egui::Context, path: &Path) -> Option<f64> {
         let mut known = self.clip_lengths.lock().unwrap();
         if let Some(l) = known.get(path) {
             return *l;

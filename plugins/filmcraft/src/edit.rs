@@ -381,17 +381,23 @@ fn apply(e: &Editor, ask: &EditParams, change: &Change) -> Result<Vec<Value>, St
             colour_undo(e, ask, &f, clip, open)
         }
         Change::Crossfade { frames } => crossfade(e, &f, clip, *frames, open),
-        Change::Sound { file, at } => {
+        Change::Sound {
+            file,
+            at,
+            length: only,
+            gain,
+        } => {
             let item = import(e, file)?;
             let speed = f.clip["speed"].as_f64().filter(|s| *s > 0.0).unwrap_or(1.0);
             let into = ticks(*at) - f.clip["source_in"].as_i64().unwrap_or(0);
             let time =
                 (f.clip["start"].as_i64().unwrap_or(0) + (into as f64 / speed) as i64).max(0);
             let now = snapshot(e, &ask.film, &ask.file)?;
-            let length =
+            let whole =
                 now["project"]["items"][item.to_string()]["kind"]["Media"]["info"]["duration"]
                     .as_i64()
                     .unwrap_or(0);
+            let length = only.map_or(whole, |l| ticks(l).min(whole));
             let (_, seq) = sequence(&now, &ask.sequence)?;
             let mine = f.sound.as_ref().map(|(_, t)| *t);
             let track = room(seq, mine, time, time + length).map_or(json!("new"), |t| json!(t));
@@ -403,7 +409,29 @@ fn apply(e: &Editor, ask: &EditParams, change: &Change) -> Result<Vec<Value>, St
                 "video": false,
                 "audio": true,
             });
-            e.batch(&[open.clone(), step("timeline.place", p)])?;
+            let got = e.batch(&[open.clone(), step("timeline.place", p)])?;
+            let cut = length < whole && ((whole - length) as f64) >= 0.5 * TICKS_PER_SECOND / f.fps;
+            if cut || *gain != 0.0 {
+                let new = got
+                    .last()
+                    .and_then(|r| r["clips"].as_array()?.first().cloned())
+                    .ok_or("FilmCraft didn't say which clip it put in")?;
+                let mut steps = vec![open.clone()];
+                if cut {
+                    steps.push(step(
+                        "timeline.trim",
+                        json!({"clip": new, "edge": "out", "mode": "regular",
+                               "delta": length - whole, "linked": false}),
+                    ));
+                }
+                if *gain != 0.0 {
+                    steps.push(step(
+                        "clip.audioGain",
+                        json!({"clips": [new], "mode": "set", "db": gain}),
+                    ));
+                }
+                e.batch(&steps)?;
+            }
             Ok(vec![
                 open,
                 step(SOUND_OFF, json!({"item": item, "start": time})),

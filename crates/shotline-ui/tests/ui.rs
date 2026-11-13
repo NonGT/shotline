@@ -2649,6 +2649,8 @@ fn lays_a_sound_over_a_take_in_the_editors_sequence() {
         Change::Sound {
             file: std::path::absolute(copied).unwrap(),
             at: 0.25,
+            length: None,
+            gain: 0.0,
         }
     );
 
@@ -2659,11 +2661,43 @@ fn lays_a_sound_over_a_take_in_the_editors_sequence() {
     wait(&mut h, 0.3);
     // A file brought in can't be made again.
     assert!(h.query_by_label("Remake Door.wav").is_none());
-    h.get_by_label("Remove Door.wav").click();
-    assert!(wait_for(&mut h, |_| lines().len() == 2));
+    h.get_by_label("in editor");
+
+    // Moved where it lies: laid again from there in the editor, and the old clip lifted.
+    let start = h.get_by_label("Start of Door.wav");
+    start.focus();
+    h.run();
+    h.get_by_label("Start of Door.wav").type_text("1");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert!(wait_for(&mut h, |_| lines().len() == 3));
+    assert_eq!(p.take_sounds(&first).unwrap()[0].0.at, 1.0);
     assert_eq!(
         (lines()[1].clip.as_str(), &lines()[1].change),
+        (
+            "7",
+            &Change::Sound {
+                file: std::path::absolute(copied).unwrap(),
+                at: 1.0,
+                length: None,
+                gain: 0.0,
+            }
+        )
+    );
+    assert_eq!(
+        (lines()[2].clip.as_str(), &lines()[2].change),
         ("9", &Change::Lift)
+    );
+    // The editor as it is now: only the one laid from 1 s.
+    let mut laid = editor_clip("10", copied, 0.0);
+    laid.from = 0.0;
+    write_edits_with(&p, vec![editor_clip("7", &video, 0.0)], vec![], vec![laid]);
+    wait(&mut h, 0.3);
+    h.get_by_label("Remove Door.wav").click();
+    assert!(wait_for(&mut h, |_| lines().len() == 4));
+    assert_eq!(
+        (lines()[3].clip.as_str(), &lines()[3].change),
+        ("10", &Change::Lift)
     );
     assert!(p.take_sounds(&first).unwrap().is_empty());
 }
@@ -2691,14 +2725,14 @@ fn one_of_the_cast_says_something_over_a_take() {
     h.get_by_label("Sounds…").click();
     wait(&mut h, 0.1);
     assert!(
-        h.get_by_label("Make the speech")
+        h.get_by_label("Make the voice-over")
             .accesskit_node()
             .is_disabled()
     );
     h.get_by_label("What they say").focus();
     h.get_by_label("What they say").type_text("Over here!");
     h.run();
-    h.get_by_label("Make the speech").click();
+    h.get_by_label("Make the voice-over").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Make for 0.02 USD")
         .is_some()));
@@ -2716,6 +2750,8 @@ fn one_of_the_cast_says_something_over_a_take() {
         Change::Sound {
             file: std::path::absolute(made).unwrap(),
             at: 0.25,
+            length: None,
+            gain: 0.0,
         }
     );
     h.get_by_label("Play @paka: Over here!");
@@ -2747,6 +2783,8 @@ fn one_of_the_cast_says_something_over_a_take() {
         Change::Sound {
             file: std::path::absolute(made).unwrap(),
             at: 0.25,
+            length: None,
+            gain: 0.0,
         }
     );
     h.get_by_label("Play a door slams");
@@ -2780,11 +2818,18 @@ fn one_of_the_cast_says_something_over_a_take() {
         Change::Sound {
             file: std::path::absolute(made).unwrap(),
             at: 0.25,
+            length: None,
+            gain: 0.0,
         }
     )));
     assert!(changes.contains(&("9".into(), Change::Lift)));
 
     // An effect is asked for again with its model.
+    // Once the editor has taken the old speech out.
+    assert!(wait_for(&mut h, |h| !h
+        .get_by_label("Remake a door slams")
+        .accesskit_node()
+        .is_disabled()));
     h.get_by_label("Remake a door slams").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Make for 0.01 USD")
@@ -2851,17 +2896,19 @@ fn a_bridge_in_the_cut_has_sounds_too() {
         Change::Sound {
             file: std::path::absolute(&got[0].2).unwrap(),
             at: 0.0,
+            length: None,
+            gain: 0.0,
         }
     );
 
     // Speech too, made without a shot.
     assert!(wait_for(&mut h, |h| h
-        .query_by_label("Make the speech")
+        .query_by_label("Make the voice-over")
         .is_some()));
     h.get_by_label("What they say").focus();
     h.get_by_label("What they say").type_text("Over here!");
     h.run();
-    h.get_by_label("Make the speech").click();
+    h.get_by_label("Make the voice-over").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Make for 0.02 USD")
         .is_some()));
@@ -5975,4 +6022,47 @@ fn lines_look() {
     h.get_by_label("Recordings by @paka…").click();
     h.run_steps(6);
     snap(&mut h, "recordings");
+}
+
+#[test]
+fn a_sound_that_cant_be_remade_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let first = p.take(R, "1").unwrap();
+    // Made by a model that isn't installed now.
+    let mut j = Job::new(Op::AudioSfx, "elevenlabs", "old_sfx_model");
+    j.shot = Some(R);
+    j.prompt = Some("rain on a roof".into());
+    let mut j = p.create_job(j).unwrap();
+    std::fs::write(p.job_dir(j.id).join("out.wav"), "wav").unwrap();
+    j.status = JobStatus::Done;
+    j.outputs = vec!["out.wav".into()];
+    p.save_job(&j).unwrap();
+    p.add_sound_job((&first).into(), &j.id.to_string(), 0.0)
+        .unwrap();
+    p.select_take(R, "1").unwrap();
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1000.0, 2400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    wait(&mut h, 0.2);
+    h.get_by_label("Sounds (1)… #1").click();
+    wait(&mut h, 0.2);
+    assert!(
+        h.get_by_label("Remake rain on a roof")
+            .accesskit_node()
+            .is_disabled()
+    );
+    h.get_by_label_contains("elevenlabs · old_sfx_model isn't installed");
+    // No editor: it's said once where the sounds go, not tagged on each row.
+    h.get_by_label("Mixed in when shotline renders the cut.");
+    assert!(h.query_by_label("render only").is_none());
+    // No plugin to make effects with: says so instead of leaving the section out.
+    h.get_by_label_contains("No installed plugin makes sound effects");
 }

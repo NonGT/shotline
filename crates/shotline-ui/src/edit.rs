@@ -208,6 +208,8 @@ pub(crate) enum Action {
     AddSoundJob(Under, String, f64),
     /// A take's sound taken off, by its job id.
     RemoveSound(Under, String),
+    /// A laid sound moved, trimmed or turned up or down.
+    SetSound(Under, shotline_core::TakeSound),
     SetLine(ShotRef, usize, LineForm),
     RemoveLine(ShotRef, usize),
     /// The recording a line sends, by job id, or None to make it with each take.
@@ -288,9 +290,10 @@ impl Action {
             | Action::LeaveOut(r, ..)
             | Action::SendAnchor(r, ..) => r.to_string(),
             Action::Select(t) | Action::RemoveTake(t) => t.shot.to_string(),
-            Action::AddSound(u, ..) | Action::AddSoundJob(u, ..) | Action::RemoveSound(u, _) => {
-                under_name(*u)
-            }
+            Action::AddSound(u, ..)
+            | Action::AddSoundJob(u, ..)
+            | Action::RemoveSound(u, _)
+            | Action::SetSound(u, _) => under_name(*u),
             Action::Story(_) => "the story".into(),
             Action::Style(_) => "the style".into(),
             Action::Format(_) => "the format".into(),
@@ -347,7 +350,9 @@ impl Action {
                 }
                 out
             }
-            Action::AddSound(u, ..) | Action::AddSoundJob(u, ..) => sounds_file(p, *u),
+            Action::AddSound(u, ..) | Action::AddSoundJob(u, ..) | Action::SetSound(u, _) => {
+                sounds_file(p, *u)
+            }
             Action::RemoveSound(u, id) => sounds_file(p, *u)
                 .into_iter()
                 .chain(p.job(id).map(|j| p.job_dir(j.id).join("job.toml")))
@@ -859,6 +864,10 @@ impl App {
             Action::RemoveSound(u, id) => {
                 p.remove_sound(u, &id)?;
                 format!("a sound off {}", under_name(u)).into()
+            }
+            Action::SetSound(u, ts) => {
+                p.set_sound(u, &ts)?;
+                format!("a sound over {} changed", under_name(u)).into()
             }
             Action::SetLine(r, i, l) => {
                 let had = p.shot(r)?.lines.get(i).and_then(|x| x.audio.clone());

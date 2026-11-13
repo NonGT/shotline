@@ -3648,7 +3648,7 @@ impl App {
                                     k => format!("Sounds ({k})…"),
                                 };
                                 if act(ui, &label, n)
-                                    .on_hover_text("effects or a voice off over it in the cut")
+                                    .on_hover_text("effects or a voice-over over it in the cut")
                                     .clicked()
                                 {
                                     sounds_for = Some(t.clone());
