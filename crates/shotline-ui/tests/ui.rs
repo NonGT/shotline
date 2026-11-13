@@ -950,7 +950,9 @@ fn make_an_anchor_image() {
     wait(&mut h, 0.3);
     h.run_steps(4);
     h.get_by_label("Keep").click();
-    h.run();
+    // Its thumbnail loads in the background, slowly on some machines.
+    wait(&mut h, 1.0);
+    h.run_steps(4);
     assert_eq!(anchors(&p).len(), 1);
     // Done with, so it closes.
     assert!(h.query_by_label("Make…").is_none());
