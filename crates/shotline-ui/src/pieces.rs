@@ -33,6 +33,10 @@ pub(crate) struct Splicer {
     colormatch: bool,
     pub making: Arc<Mutex<Making>>,
     error: Option<String>,
+    /// The pieces it opened with, to tell whether closing loses work.
+    opened_with: Vec<Piece>,
+    /// Closing was asked for with work not made into a take.
+    asking: bool,
 }
 
 const JOINS: [(Join, &str, &str); 3] = [
@@ -64,11 +68,13 @@ impl Splicer {
             go_to: None,
             start: None,
             end: None,
+            opened_with: pieces.clone(),
             pieces,
             editing: None,
             colormatch: true,
             making: Arc::new(Mutex::new(Making::Idle)),
             error: None,
+            asking: false,
         }
     }
 
@@ -176,13 +182,43 @@ impl Splicer {
             ui.add_space(12.0);
             self.list(ui, audio);
             ui.add_space(10.0);
-            self.make_row(ui, ff, project);
+            if self.asking {
+                let n = self.pieces.len();
+                let (discard, keep) = ui
+                    .horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Discard {n} piece{}?",
+                                if n == 1 { "" } else { "s" }
+                            ))
+                            .color(theme::PAPER),
+                        );
+                        let d = crate::kit::danger_button(ui, "Discard").clicked();
+                        let k = ui.button("Keep working").clicked();
+                        (d, k)
+                    })
+                    .inner;
+                if discard {
+                    self.pieces = self.opened_with.clone();
+                    close = true;
+                }
+                if keep {
+                    self.asking = false;
+                }
+            } else {
+                self.make_row(ui, ff, project);
+            }
         });
         if let Some(i) = pick {
             self.editing = None;
             self.open(i, ff, audio, tall);
         }
-        if (close || modal.should_close()) && !busy {
+        let leaving = close || (modal.should_close() && !self.asking);
+        if leaving && !busy {
+            if self.pieces != self.opened_with && !self.asking {
+                self.asking = true;
+                return true;
+            }
             self.pause(audio);
             return false;
         }

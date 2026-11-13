@@ -460,6 +460,7 @@ impl App {
         let plugin = self.built(r).map(|b| b.plugin).unwrap_or_default();
         let pressed = PriceRow::new("Shoot a take")
             .big()
+            .stoppable()
             .keys(self.needs_keys(&plugin))
             .blocked(blocked)
             .show(ui, shown);
@@ -471,6 +472,11 @@ impl App {
                 }
             }
             Some(Pressed::Cancel) => *self.shoot.lock().unwrap() = Shoot::Idle,
+            Some(Pressed::Stop) => {
+                self.shoot_stop
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                *self.shoot.lock().unwrap() = Shoot::Running(r, "cancelling…".into());
+            }
             Some(Pressed::Keys) => self.wants_keys = Some(plugin),
             None => {}
         }
@@ -495,7 +501,7 @@ impl App {
     }
 
     /// Prices a take, or with `at` shoots one at that price.
-    fn start_shoot(&mut self, ctx: &egui::Context, r: ShotRef, at: Option<String>) {
+    pub(crate) fn start_shoot(&mut self, ctx: &egui::Context, r: ShotRef, at: Option<String>) {
         // What's on screen is what's sent.
         self.flush();
         let Some(host) = self.host.clone() else {
@@ -510,6 +516,8 @@ impl App {
         }
         let (state, ctx, film) = (self.shoot.clone(), ctx.clone(), self.project.root.clone());
         let translate = self.translate_prompt;
+        self.shoot_stop = std::sync::Arc::default();
+        let stop = self.shoot_stop.clone();
         std::thread::spawn(move || {
             let done = match at {
                 None => match host.take_quote(&film, r, translate) {
@@ -518,11 +526,17 @@ impl App {
                 },
                 Some(at) => {
                     let (step, c) = (state.clone(), ctx.clone());
+                    let stopping = stop.clone();
                     let mut on = move |s: String| {
-                        *step.lock().unwrap() = Shoot::Running(r, s);
+                        // "cancelling…" stays up until it's done, unless it can't be.
+                        if !stopping.load(std::sync::atomic::Ordering::Relaxed)
+                            || s.starts_with("can't cancel")
+                        {
+                            *step.lock().unwrap() = Shoot::Running(r, s);
+                        }
                         c.request_repaint();
                     };
-                    let out = host.take(&film, r, &at, translate, &mut on);
+                    let out = host.take(&film, r, &at, translate, &mut on, stop);
                     Shoot::Done(r, out.map_err(|e| format!("{e:#}")))
                 }
             };

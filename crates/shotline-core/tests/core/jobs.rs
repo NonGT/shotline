@@ -267,3 +267,60 @@ fn a_continue_shot_keeps_the_take_it_started_on() {
     p.remove_take(a, "1").unwrap();
     assert!(p.remove_take(a, "2").is_err());
 }
+
+#[test]
+fn shots_move_with_their_takes_and_pictures() {
+    let (dir, p, r) = project();
+    take(&p, r, 1, JobStatus::Done);
+    p.select_take(r, "1").unwrap();
+    let still = dir.path().join("still.png");
+    std::fs::write(&still, b"png").unwrap();
+    p.set_frame(r, Some(&still)).unwrap();
+    p.add_shot_image(r, &still, "her coat").unwrap();
+    let b = p.add_shot("1", None, Shot::default()).unwrap();
+    let c = p.add_shot("1", None, Shot::default()).unwrap();
+    p.save_timeline(&shotline_core::Timeline {
+        shots: vec![r.to_string(), c.to_string()],
+        ..Default::default()
+    })
+    .unwrap();
+
+    // To the end: after 030, so 040.
+    let to = p.move_shot(r, "1", 2).unwrap();
+    assert_eq!(to.to_string(), "01-040");
+    let order: Vec<String> = p
+        .shots(None)
+        .unwrap()
+        .iter()
+        .map(|(r, _)| r.to_string())
+        .collect();
+    assert_eq!(order, [b.to_string(), c.to_string(), to.to_string()]);
+    assert!(p.shot(r).is_err());
+    let s = p.shot(to).unwrap();
+    assert!(p.root.join(s.frame.as_ref().unwrap()).is_file());
+    assert!(s.frame.unwrap().ends_with("shots/040.png"));
+    assert!(p.root.join(&s.images[0].file).is_file());
+    assert!(!p.shot_image_dir(r).unwrap().exists());
+    assert_eq!(p.takes(to).unwrap().len(), 1);
+    assert!(p.selected_take(to).unwrap().is_some());
+    assert_eq!(p.timeline().unwrap().shots, [to.to_string(), c.to_string()]);
+    // Where it already is, nothing changes.
+    assert_eq!(p.move_shot(to, "1", 2).unwrap(), to);
+
+    // A copy right after, with its own pictures and no takes.
+    let copy = p.duplicate_shot(b).unwrap();
+    assert_eq!(copy.to_string(), "01-025");
+    let two = p.duplicate_shot(to).unwrap();
+    let s = p.shot(two).unwrap();
+    assert!(s.selected_take.is_none());
+    assert!(p.takes(two).unwrap().is_empty());
+    assert!(s.frame.unwrap().ends_with("shots/050.png"));
+
+    // Taken out, its takes are thrown out but kept.
+    let job = p.takes(to).unwrap()[0].jobs[0].id;
+    p.remove_shot(to).unwrap();
+    assert!(p.shot(to).is_err());
+    assert!(p.takes(to).unwrap().is_empty());
+    assert!(p.job_dir(job).join("job.toml").is_file());
+    assert_eq!(p.timeline().unwrap().shots, [c.to_string()]);
+}

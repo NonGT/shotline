@@ -240,6 +240,25 @@ async fn cancel_releases() {
 }
 
 #[tokio::test]
+async fn a_refused_cancel_runs_on_and_is_charged() {
+    let f = film("fake_polls = 3\nfake_no_cancel = true", Budgets::default()).await;
+    let plan = f.plan(R).await.unwrap();
+    let opts = fast();
+    opts.cancel.notify_one();
+    let mut refused = None;
+    let out = take(&f.p, &f.books, &f.plugins, &plan, &opts, |e| {
+        if let Event::CantCancel(why) = e {
+            refused = Some(why);
+        }
+    })
+    .await
+    .unwrap();
+    assert!(refused.unwrap().contains("started already"));
+    assert_eq!(out.job.status, JobStatus::Done);
+    assert_eq!(kinds(&f), [LedgerKind::Reserve, LedgerKind::Charge]);
+}
+
+#[tokio::test]
 async fn continue_needs_the_last_frame() {
     let f = film("", Budgets::default()).await;
     let first = f.plan(R).await.unwrap();

@@ -233,6 +233,10 @@ pub(crate) enum Action {
     RenameChapter(u32, String),
     /// A new shot at the end of the chapter, or after the given number.
     AddShot(u32, Option<u32>),
+    /// To a place among the other shots of a chapter, by chapter number and index.
+    MoveShot(ShotRef, u32, usize),
+    DuplicateShot(ShotRef),
+    RemoveShot(ShotRef),
     SaveElement(Element),
     AddElement(NewElement),
     /// An image file copied in as the element's next anchor.
@@ -293,6 +297,9 @@ impl Action {
             Action::AddChapter(t) => format!("chapter {t}"),
             Action::RenameChapter(n, _) => format!("chapter {n:02}'s title"),
             Action::AddShot(..) => "a new shot".into(),
+            Action::MoveShot(r, ..) | Action::DuplicateShot(r) | Action::RemoveShot(r) => {
+                r.to_string()
+            }
             Action::AddElement(n) => format!("new {}", n.kind),
             Action::SaveElement(el) | Action::AddAnchor(el, _) | Action::RemoveAnchor(el, _) => {
                 format!("@{}", el.handle)
@@ -387,6 +394,18 @@ impl Action {
                 .into_iter()
                 .collect(),
             Action::Timeline(_) | Action::AddTrack(_) => vec![p.root.join(TIMELINE_FILE)],
+            Action::MoveShot(r, ..) | Action::RemoveShot(r) => {
+                let mut out = p.shot_files(*r).unwrap_or_default();
+                out.extend(
+                    p.shot_jobs(*r)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|j| p.job_dir(j.id).join("job.toml")),
+                );
+                out.push(p.root.join(TIMELINE_FILE));
+                out
+            }
+            Action::DuplicateShot(_) => vec![],
             Action::AddChapter(_)
             | Action::AddShot(..)
             | Action::AddElement(_)
@@ -881,6 +900,37 @@ impl App {
                 let t = p.remove_take(t.shot, &t.number.to_string())?;
                 format!("{t} removed").into()
             }
+            Action::MoveShot(r, chapter, index) => {
+                let to = p.move_shot(r, &chapter.to_string(), index)?;
+                let made = made_shot(p, to);
+                if self.shot == Some(r) {
+                    self.shot = Some(to);
+                }
+                Done {
+                    msg: if to == r {
+                        format!("{r} is there already")
+                    } else {
+                        format!("{r} is {to} now")
+                    },
+                    made,
+                }
+            }
+            Action::DuplicateShot(r) => {
+                let to = p.duplicate_shot(r)?;
+                let made = made_shot(p, to);
+                self.shot = Some(to);
+                Done {
+                    msg: format!("{to} is a copy of {r}"),
+                    made,
+                }
+            }
+            Action::RemoveShot(r) => {
+                p.remove_shot(r)?;
+                if self.shot == Some(r) {
+                    self.shot = None;
+                }
+                format!("{r} deleted; its takes stay in the ledger").into()
+            }
             Action::Story(t) => {
                 std::fs::write(p.root.join("story.md"), t)?;
                 "story saved".to_string().into()
@@ -1134,6 +1184,18 @@ fn restore(step: &Step, back: bool) -> anyhow::Result<()> {
         c.ends(back).1.put(&c.path)?;
     }
     Ok(())
+}
+
+/// What a new or moved shot made, for undo: its files beside the toml, and its pictures' folder.
+fn made_shot(p: &Project, r: ShotRef) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = p
+        .shot_files(r)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| f.parent() == p.shot_path(r).ok().as_deref().and_then(Path::parent))
+        .collect();
+    out.extend(p.shot_image_dir(r).ok().filter(|d| d.is_dir()));
+    out
 }
 
 /// The shot's own video model, when it has both halves of one.

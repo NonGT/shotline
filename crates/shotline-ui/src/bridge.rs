@@ -549,7 +549,7 @@ impl App {
                 }
                 Some(Pressed::Cancel) => w.price = None,
                 Some(Pressed::Keys) => self.wants_keys = Some(w.form.plugin.clone()),
-                None => {}
+                Some(Pressed::Stop) | None => {}
             }
             if let Some(e) = &w.error {
                 ui.label(RichText::new(short(e, 200)).color(theme::FLAG))

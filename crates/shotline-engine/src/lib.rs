@@ -473,6 +473,9 @@ pub enum Event {
     },
     Status(Status),
     Cancelling,
+    /// The provider won't stop it, e.g. it has started already or can't cancel at all; it runs
+    /// to the end and is charged as usual.
+    CantCancel(String),
     /// What the provider's balance dropped by over the job, or `None` if it didn't move in time.
     Measured(Option<Amount>),
     /// A rate worked out from the balance, kept as a fallback.
@@ -692,9 +695,13 @@ impl Run<'_> {
             tokio::select! {
                 _ = tokio::time::sleep(opts.poll_every) => {}
                 _ = opts.cancel.notified(), if !cancelled => {
-                    cancelled = true;
-                    on_event(Event::Cancelling);
-                    let _ = plugin.cancel(&plugin_job).await;
+                    match plugin.cancel(&plugin_job).await {
+                        Ok(()) => {
+                            cancelled = true;
+                            on_event(Event::Cancelling);
+                        }
+                        Err(e) => on_event(Event::CantCancel(explain(e))),
+                    }
                 }
             }
             match plugin.poll(&plugin_job).await {
@@ -781,14 +788,15 @@ impl Run<'_> {
                         books.release(now, &ctx.job, measured.as_ref())?;
                     }
                 }
-                let (st, msg) = if status.state == State::Cancelled || cancelled {
-                    (JobStatus::Cancelled, "cancelled".to_string())
-                } else {
-                    let msg = match status.error {
-                        Some(pe) => explain(PluginErr::Plugin(pe)),
-                        None => "the job failed".into(),
-                    };
-                    (JobStatus::Failed, msg)
+                let why = status.error.map(|pe| explain(PluginErr::Plugin(pe)));
+                let (st, msg) = match (status.state == State::Cancelled || cancelled, why) {
+                    (true, None) => (JobStatus::Cancelled, "cancelled".to_string()),
+                    // What the provider said is kept, whoever stopped it.
+                    (true, Some(why)) => (JobStatus::Cancelled, format!("cancelled: {why}")),
+                    (false, why) => (
+                        JobStatus::Failed,
+                        why.unwrap_or_else(|| "the job failed".into()),
+                    ),
                 };
                 finish(&mut job, st, Some(msg.clone()))?;
                 Ok((job, Some(msg)))

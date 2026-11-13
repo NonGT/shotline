@@ -490,7 +490,7 @@ impl Maker {
                 }
             }
             Some(Pressed::Cancel) => *self.stage.lock().unwrap() = Stage::Idle,
-            None => {}
+            Some(Pressed::Stop) | None => {}
         }
         if let Stage::Unmade(e) = &stage {
             ui.label(

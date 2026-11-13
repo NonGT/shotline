@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -240,6 +241,9 @@ fn teller(name: String, mut say: impl FnMut(String)) -> impl FnMut(Event) {
         }
         Event::Submitted { plugin_job } => say(format!("sent to {name} ({plugin_job})")),
         Event::Cancelling => say("cancelling...".into()),
+        Event::CantCancel(why) => say(format!(
+            "can't cancel: {why}; it runs to the end and is charged"
+        )),
         Event::Measured(Some(a)) => say(format!(
             "{name} balance dropped {} {}",
             money(a.amount),
@@ -391,12 +395,14 @@ pub fn take_quote(p: &Project, r: ShotRef, translate: bool) -> Result<String> {
 }
 
 /// Runs a take if it still costs `at`, telling `say` how it goes. Returns a line about it.
+/// Shoots at the price `at`. Setting `stop` cancels it with the provider.
 pub fn take_at(
     p: &Project,
     r: ShotRef,
     at: &str,
     translate: bool,
     mut say: impl FnMut(String),
+    stop: Option<Arc<AtomicBool>>,
 ) -> Result<String> {
     if let Some((tp, treq)) = translation(p, r, translate)? {
         let total = take_quote(p, r, translate)?;
@@ -406,7 +412,7 @@ pub fn take_at(
         say("translating the prompt".into());
         translate_prompt(p, r, &tp, &treq)?;
         let cost = plan_take(p, r, None, None)?.cost;
-        return take_at(p, r, &cost, false, say);
+        return take_at(p, r, &cost, false, say, stop);
     }
     // rt bound first so it drops last, after the plugins.
     let Planned {
@@ -419,7 +425,19 @@ pub fn take_at(
     if cost != at {
         bail!("the price changed from {at} to {cost}; nothing spent");
     }
+    if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+        bail!("stopped before it started; nothing spent");
+    }
     let opts = options();
+    if let Some(stop) = stop {
+        let cancel = Arc::clone(&opts.cancel);
+        rt.spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            cancel.notify_one();
+        });
+    }
     let outcome = rt.block_on(shotline_engine::take(
         p,
         &b,

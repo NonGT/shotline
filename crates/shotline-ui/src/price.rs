@@ -3,7 +3,7 @@
 
 use eframe::egui::{self, RichText};
 
-use crate::{short, theme};
+use crate::{kit, short, theme};
 
 /// Where a paid action is.
 pub(crate) enum Price<'a> {
@@ -20,6 +20,8 @@ pub(crate) enum Pressed {
     Ask,
     Go,
     Cancel,
+    /// Stop what's running, with the provider.
+    Stop,
     /// Set key…: the plugin needs a key that isn't set.
     Keys,
 }
@@ -34,6 +36,8 @@ pub(crate) struct PriceRow<'a> {
     /// What key the plugin is missing, which blocks it before the rest.
     keys: Option<String>,
     go_hover: Option<String>,
+    /// While working, a Cancel that stops it.
+    stoppable: bool,
 }
 
 impl<'a> PriceRow<'a> {
@@ -45,7 +49,13 @@ impl<'a> PriceRow<'a> {
             blocked: None,
             keys: None,
             go_hover: None,
+            stoppable: false,
         }
+    }
+
+    pub(crate) fn stoppable(mut self) -> Self {
+        self.stoppable = true;
+        self
     }
 
     pub(crate) fn named(mut self, name: impl Into<String>) -> Self {
@@ -83,8 +93,27 @@ impl<'a> PriceRow<'a> {
                 ui.weak("asking the price…");
             }
             Price::Working(what) => {
-                ui.spinner();
+                kit::ring(
+                    ui.painter(),
+                    ui.cursor().min + egui::vec2(9.0, ui.spacing().interact_size.y / 2.0),
+                    7.0,
+                    2.0,
+                    theme::STEEL,
+                    ui.input(|i| i.time),
+                );
+                ui.ctx().request_repaint();
+                ui.add_space(24.0);
                 ui.weak(what);
+                if self.stoppable
+                    && kit::danger_button(ui, "Cancel")
+                        .on_hover_text(
+                            "stops it if the provider hasn't started on it yet; once it has, it \
+                             runs to the end and is charged",
+                        )
+                        .clicked()
+                {
+                    out = Some(Pressed::Stop);
+                }
             }
             Price::Priced(cost) => {
                 let go = crate::spend_button(ui, &format!("{} for {cost}", self.verb))
@@ -171,6 +200,7 @@ mod tests {
                     Pressed::Go => "go",
                     Pressed::Cancel => "cancel",
                     Pressed::Keys => "keys",
+                    Pressed::Stop => "stop",
                 }));
             },
             row,

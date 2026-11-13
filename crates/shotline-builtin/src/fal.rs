@@ -658,8 +658,34 @@ impl Plugin for Fal {
     async fn cancel(&self, job: &str) -> Result<()> {
         let (model, id) = split_job(job)?;
         let url = format!("{}/{}/requests/{id}/cancel", self.queue, app(model));
-        self.send(self.http.put(url), &RefMap::default()).await?;
-        Ok(())
+        let resp = self
+            .http
+            .put(url)
+            .header("Authorization", format!("Key {}", self.key()?))
+            .send()
+            .await
+            .map_err(|e| {
+                PluginError::new(
+                    ErrorKind::Other,
+                    format!("can't reach fal: {}", shotline_plugin::util::why(&e)),
+                )
+            })?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        // Once a model has started, fal says ALREADY_COMPLETED even while it's IN_PROGRESS,
+        // and the job runs on to the end (checked against the live API, Nov 2026).
+        if text.contains("ALREADY_COMPLETED") {
+            return Err(PluginError::new(
+                ErrorKind::Other,
+                "fal has started making it already and won't stop",
+            )
+            .into());
+        }
+        let body: Value = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        Err(map_error(status, &body, &RefMap::default()).into())
     }
 }
 

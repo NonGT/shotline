@@ -857,6 +857,170 @@ impl Project {
         self.save_shot(r, &shot)?;
         Ok(r)
     }
+
+    /// A shot's own files: its toml, storyboard frame and pictures, with a folder after what's
+    /// in it. Its jobs are separate.
+    pub fn shot_files(&self, r: ShotRef) -> Result<Vec<PathBuf>> {
+        let file = self.shot_path(r)?;
+        let stem = file.file_stem().map(|s| s.to_os_string());
+        let mut out: Vec<PathBuf> = fsx::list(file.parent().unwrap())?
+            .into_iter()
+            .filter(|p| p.is_file() && p.file_stem().map(|s| s.to_os_string()) == stem)
+            .collect();
+        let dir = self.shot_image_dir(r)?;
+        if dir.is_dir() {
+            out.extend(fsx::list(&dir)?.into_iter().filter(|p| p.is_file()));
+            out.push(dir);
+        }
+        Ok(out)
+    }
+
+    /// Every job made for the shot, thrown out or not.
+    pub fn shot_jobs(&self, r: ShotRef) -> Result<Vec<Job>> {
+        Ok(self
+            .jobs()?
+            .into_iter()
+            .filter(|j| j.shot == Some(r))
+            .collect())
+    }
+
+    /// Moves a shot to `index` among the other shots of `chapter`, with its files, its jobs and
+    /// its place in the cut. Returns where it is now.
+    pub fn move_shot(&self, r: ShotRef, chapter: &str, index: usize) -> Result<ShotRef> {
+        let c = self.chapter(chapter)?;
+        let here = c.number == r.chapter;
+        let others: Vec<u32> = self
+            .shot_numbers(&c)?
+            .into_iter()
+            .filter(|&n| !(here && n == r.shot))
+            .collect();
+        let index = index.min(others.len());
+        if here && others.iter().filter(|&&n| n < r.shot).count() == index {
+            return Ok(r);
+        }
+        let before = index.checked_sub(1).map_or(0, |i| others[i]);
+        let n = match others.get(index) {
+            None => before + STEP,
+            Some(&after) if after - before < 2 => {
+                return invalid(format!(
+                    "no room between {before:03} and {after:03}, renumber the shots first"
+                ));
+            }
+            Some(&after) => before + (after - before) / 2,
+        };
+        let to = ShotRef {
+            chapter: c.number,
+            shot: n,
+        };
+        self.copy_shot_files(r, to, &self.shot(r)?)?;
+        let file = self.shot_path(r)?;
+        for f in self.shot_files(r)? {
+            if f.is_dir() {
+                fsx::remove_dir(&f)?;
+            } else if f != file {
+                fsx::remove(&f)?;
+            }
+        }
+        fsx::remove(&file)?;
+        for mut j in self.shot_jobs(r)? {
+            j.shot = Some(to);
+            fsx::write_toml(&self.job_dir(j.id).join("job.toml"), &j)?;
+        }
+        self.retime(r, Some(to))?;
+        Ok(to)
+    }
+
+    /// A copy of the shot right after it, with its own copies of its pictures and none of its
+    /// takes.
+    pub fn duplicate_shot(&self, r: ShotRef) -> Result<ShotRef> {
+        let mut shot = self.shot(r)?;
+        shot.selected_take = None;
+        shot.continue_from = None;
+        shot.sounds.clear();
+        let to = ShotRef {
+            chapter: r.chapter,
+            shot: next_number(
+                &self.shot_numbers(&self.chapter(&r.chapter.to_string())?)?,
+                Some(r.shot),
+            )?,
+        };
+        self.copy_shot_files(r, to, &shot)?;
+        Ok(to)
+    }
+
+    /// Takes a shot out of the film. Its takes are thrown out, not deleted, as the ledger points
+    /// at them.
+    pub fn remove_shot(&self, r: ShotRef) -> Result<Shot> {
+        let shot = self.shot(r)?;
+        let jobs = self.shot_jobs(r)?;
+        if let Some(j) = jobs.iter().find(|j| !j.status.is_finished()) {
+            return invalid(format!("{r} has a job still {}", j.status));
+        }
+        for j in jobs.iter().filter(|j| !j.discarded) {
+            self.set_discarded(j.id, true)?;
+        }
+        for f in self.shot_files(r)? {
+            if f.is_dir() {
+                fsx::remove_dir(&f)?;
+            } else {
+                fsx::remove(&f)?;
+            }
+        }
+        self.retime(r, None)?;
+        Ok(shot)
+    }
+
+    /// Writes `shot` as `to` with copies of `r`'s frame and pictures, its paths pointed at them.
+    fn copy_shot_files(&self, r: ShotRef, to: ShotRef, shot: &Shot) -> Result<Shot> {
+        let from = self.shot_path(r)?.with_extension("");
+        let dest = self.shot_path(to)?.with_extension("");
+        let (old, new) = (self.rel(&from), self.rel(&dest));
+        let swap = |rel: &str| -> Option<String> {
+            let rest = rel.strip_prefix(&old)?;
+            (rest.starts_with('.') || rest.starts_with('/')).then(|| format!("{new}{rest}"))
+        };
+        for f in self.shot_files(r)? {
+            if f.is_dir() || f.extension().is_some_and(|e| e == "toml") {
+                continue;
+            }
+            if let Some(to) = swap(&self.rel(&f)) {
+                fsx::copy(&f, &self.root.join(to))?;
+            }
+        }
+        let mut shot = shot.clone();
+        if let Some(f) = &shot.frame
+            && let Some(to) = swap(f)
+        {
+            shot.frame = Some(to);
+        }
+        for i in &mut shot.images {
+            if let Some(to) = swap(&i.file) {
+                i.file = to;
+            }
+        }
+        self.save_shot(to, &shot)?;
+        Ok(shot)
+    }
+
+    /// The cut's own order follows a shot that moved, or drops one that went.
+    fn retime(&self, r: ShotRef, to: Option<ShotRef>) -> Result<()> {
+        let mut t = self.timeline()?;
+        let id = r.to_string();
+        if !t.shots.contains(&id) {
+            return Ok(());
+        }
+        match to {
+            Some(to) => {
+                for s in &mut t.shots {
+                    if *s == id {
+                        *s = to.to_string();
+                    }
+                }
+            }
+            None => t.shots.retain(|s| *s != id),
+        }
+        self.save_timeline(&t)
+    }
 }
 
 #[cfg(test)]
