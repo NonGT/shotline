@@ -1544,11 +1544,15 @@ fn edit_elements() {
     h.get_by_label("Elements").click();
     h.run_ok();
 
-    let name = h.get_by_role_and_label(Role::TextInput, "New element");
+    // Each kind has its own +; Enter in the name adds it.
+    h.get_by_label("New cast member").click();
+    h.run_ok();
+    h.run_ok();
+    let name = h.get_by_role_and_label(Role::TextInput, "Name");
     name.focus();
     name.type_text("Mali");
     h.run_ok();
-    h.get_by_label("Add element").click();
+    h.key_press(egui::Key::Enter);
     h.run_ok();
     h.run_ok();
     assert_eq!(p.element("mali").unwrap().name, "Mali");
@@ -1652,6 +1656,8 @@ fn edit_elements() {
     assert_eq!(p.element("paka").unwrap().labels["01.png"], "side view");
 
     // Taking an anchor off takes its label too, and both come back on undo.
+    h.get_by_label("More for elements/cast/paka/01.png").click();
+    h.run_ok();
     h.get_by_label("Remove").click();
     h.run_ok();
     assert!(!anchor.exists());
@@ -4017,61 +4023,71 @@ fn warn_about_stuck_jobs_on_open() {
 }
 
 #[test]
-fn set_the_format_on_the_story_tab() {
+fn set_the_format_in_preferences() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
     p.select_take("01-010".parse().unwrap(), "1").unwrap();
-    let mut app = App::new(p.clone(), tmp.path().join("home"))
-        .with_viewer(None)
-        .checking_edits_every(EDITS_EVERY)
-        .silent();
-    app.set_plugins(
-        vec![Description {
-            name: "fal".into(),
-            version: "1".into(),
-            protocol: 1,
-            editor: false,
-            app: String::new(),
-            env: vec![],
-            models: vec![ModelInfo {
-                id: "minimax/h3-max/reference-to-video".into(),
-                op: Op::VideoGenerate,
-                aspects: vec!["9:16".into(), "16:9".into()],
-                resolutions: vec!["768P".into(), "1080P".into()],
-                ..ModelInfo::default()
-            }],
-        }],
-        Some(Arc::new(TestHost)),
-    );
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_plugins(vec![], Some(Arc::new(TestHost)))
+        .with_window_menu()
+        .testing();
     let mut h = Harness::builder()
         .with_max_steps(16)
-        .with_size(egui::vec2(1100.0, 2400.0))
-        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+        .with_size(egui::vec2(1100.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
     h.get_by_label("Story").click();
     h.run();
+    // The Story page says what it is and sends Change… to Preferences.
+    h.get_by_label_contains("9:16");
+    // Under Linux's menu bar in the window it starts below the fold.
+    h.get_by_label("Change…").scroll_to_me();
+    h.run();
+    h.get_by_label("Change…").click();
+    h.run();
+    h.run();
     h.get_by_label_contains("already has a take. Takes keep the shape");
-    let aspect = || Project::open(&p.root).unwrap().format();
+    let format = || Project::open(&p.root).unwrap().format();
     h.get_by_role_and_label(Role::ComboBox, "Shape").click();
     h.run();
     h.get_by_label("16:9 wide").click();
     h.run();
-    h.get_by_role_and_label(Role::ComboBox, "Resolution")
-        .click();
+
+    // With a take made, OK asks first; Back leaves it as it was.
+    h.get_by_label("OK").click();
     h.run();
-    h.get_by_label("1080P").click();
     h.run();
-    let f = aspect();
-    assert_eq!(
-        (f.aspect.as_str(), f.resolution.as_str()),
-        ("16:9", "1080P")
-    );
-    h.get_by_label("Undo").click();
+    h.get_by_label("Change the whole film's format?");
+    h.get_by_label("Back").click();
     h.run();
-    h.get_by_label("Undo").click();
+    assert_eq!(format().aspect, "9:16");
+    h.get_by_label("OK").click();
     h.run();
-    let f = aspect();
-    assert_eq!((f.aspect.as_str(), f.resolution.as_str()), ("9:16", "768P"));
+    h.run();
+    h.get_by_label("Change it").click();
+    h.run();
+    assert_eq!(format().aspect, "16:9");
+    assert!(h.query_by_label("Preferences").is_none());
+    h.state_mut().command(MenuCommand::Undo);
+    h.run();
+    assert_eq!(format().aspect, "9:16");
+}
+
+#[test]
+fn no_video_plugin_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let app = App::new(p, tmp.path().join("home")).silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 900.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Story").click();
+    h.run();
+    h.get_by_label("No video plugin installed");
+    // Words are counted as the story's typed.
+    h.get_by_label_contains(" words");
 }
 
 #[test]
@@ -4951,6 +4967,92 @@ fn a_take_from_pieces() {
 }
 
 #[test]
+fn elements_move_anchors_change_kind_and_go() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    for (n, c) in [("a", 0u8), ("b", 200)] {
+        let f = tmp.path().join(format!("{n}.png"));
+        image::RgbImage::from_pixel(8, 8, image::Rgb([c, c, c]))
+            .save(&f)
+            .unwrap();
+        p.add_anchor("paka", &f).unwrap();
+    }
+    let cast = |n: &str| p.root.join(format!("elements/cast/paka/{n}"));
+    let second = std::fs::read(cast("02.png")).unwrap();
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 1400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run_ok();
+    h.get_by_label("Elements").click();
+    h.run_ok();
+    h.get_by_label("@paka  Paka").click();
+    h.run_ok();
+
+    // The second anchor moves first, so it's Image 1.
+    h.get_by_label("More for elements/cast/paka/02.png").click();
+    h.run_ok();
+    assert!(h.get_by_label("Move right").accesskit_node().is_disabled());
+    h.get_by_label("Move left").click();
+    h.run_ok();
+    assert_eq!(std::fs::read(cast("01.png")).unwrap(), second);
+
+    // Moved to the props, anchors and all; undo puts it back.
+    h.get_by_label("More for @paka").click();
+    h.run_ok();
+    h.get_by_label("Change kind").click();
+    h.run_ok();
+    h.get_by_label("Prop").click();
+    h.run_ok();
+    assert_eq!(p.element("paka").unwrap().kind, Kind::Prop);
+    assert!(p.root.join("elements/props/paka/02.png").exists());
+    assert!(!cast("01.png").exists());
+    h.get_by_label("Undo").click();
+    h.run_ok();
+    assert_eq!(p.element("paka").unwrap().kind, Kind::Cast);
+    assert_eq!(std::fs::read(cast("01.png")).unwrap(), second);
+    assert!(!p.root.join("elements/props/paka").exists());
+
+    // Deleting says which shots send it, and undo brings it all back.
+    h.get_by_label("More for @paka").click();
+    h.run_ok();
+    h.get_by_label("Delete element…").click();
+    h.run_ok();
+    h.run_ok();
+    h.get_by_label("Delete @paka?");
+    h.get_by_label_contains("It comes off 1 shot: 01-010");
+    h.get_by_label("Delete").click();
+    h.run_ok();
+    assert!(p.find_element("paka").unwrap().is_none());
+    assert!(!cast("01.png").exists());
+    assert!(
+        p.shot("01-010".parse().unwrap())
+            .unwrap()
+            .elements
+            .is_empty()
+    );
+    assert!(h.query_by_label("Delete @paka?").is_none());
+    h.get_by_label("Undo").click();
+    h.run_ok();
+    assert_eq!(std::fs::read(cast("01.png")).unwrap(), second);
+    assert_eq!(
+        p.shot("01-010".parse().unwrap()).unwrap().elements,
+        ["paka"]
+    );
+
+    // A new prop from its own +, and Cancel leaves nothing behind.
+    h.get_by_label("New prop").click();
+    h.run_ok();
+    h.run_ok();
+    h.get_by_label("Cancel").click();
+    h.run_ok();
+    assert!(h.query_by_role_and_label(Role::TextInput, "Name").is_none());
+}
+
+#[test]
 fn made_images_stay_to_pick_again() {
     let tmp = tempfile::tempdir().unwrap();
     let p = film(tmp.path());
@@ -4991,7 +5093,7 @@ fn made_images_stay_to_pick_again() {
     h.get_by_label("Show all (1 more)").click();
     h.run();
     assert_eq!(h.query_all_by_label_contains("paka side view").count(), 2);
-    // Its Throw out, then the row.
+    // Its ⋯, then the row.
     h.get_all_by_label_contains("first try")
         .last()
         .unwrap()
@@ -5004,13 +5106,21 @@ fn made_images_stay_to_pick_again() {
     h.get_by_role_and_label(Role::ComboBox, "Browse existing frames")
         .click();
     h.run();
+    // Throw out waits behind each row's ⋯, which comes before the row.
+    assert!(h.query_by_label("Throw out").is_none());
+    h.get_all_by_label_contains("first try")
+        .next()
+        .unwrap()
+        .click();
+    h.run();
     h.get_by_label("in use");
-    // Each row's Throw out comes before it.
-    let rm = h.get_all_by_label_contains("second try").next().unwrap();
-    assert!(!rm.accesskit_node().is_disabled());
-    let first = h.get_all_by_label_contains("first try").next().unwrap();
-    assert!(first.accesskit_node().is_disabled());
-    rm.click();
+    assert!(h.query_by_label("Throw out").is_none());
+    h.get_all_by_label_contains("second try")
+        .next()
+        .unwrap()
+        .click();
+    h.run();
+    h.get_by_label("Throw out").click();
     h.run();
     let left: Vec<String> = p
         .made_images()
@@ -5973,8 +6083,10 @@ fn lines_say_why_and_ask_before_adding() {
     h.run();
     h.get_by_label("@nana").click();
     h.run();
-    wait(&mut h, 0.2);
-    h.get_by_label_contains("line 2 of 01-010 is @nana's now");
+    // A toast shows from its second frame, which a slow machine can take a while to get to.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("line 2 of 01-010 is @nana's now")
+        .is_some()));
     assert_eq!(p.shot(R).unwrap().lines[1].audio, None);
 }
 
@@ -6646,4 +6758,94 @@ fn activity_look() {
     h.state_mut().command(MenuCommand::CloseFilm);
     h.run_steps(4);
     snap_shell(&mut h, "activity-close");
+}
+
+/// The Elements and Story pages, their menus and dialogs, to target/shots:
+/// `cargo test -p shotline-ui --test ui elements_look -- --ignored`.
+#[test]
+#[ignore]
+fn elements_look() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    for c in [40u8, 160] {
+        let f = tmp.path().join(format!("{c}.png"));
+        image::RgbImage::from_pixel(64, 96, image::Rgb([c, c / 2, 90]))
+            .save(&f)
+            .unwrap();
+        p.add_anchor("paka", &f).unwrap();
+    }
+    p.select_take("01-010".parse().unwrap(), "1").unwrap();
+    for brief in ["paka in the rain", "paka side view"] {
+        let mut j = Job::new(Op::ImageGenerate, "fake", "fake/image");
+        j.who = Some("paka".into());
+        j.brief = Some(brief.into());
+        let mut j = p.create_job(j).unwrap();
+        image::RgbImage::from_pixel(64, 96, image::Rgb([90, 120, 160]))
+            .save(p.job_dir(j.id).join("out.png"))
+            .unwrap();
+        j.outputs = vec!["out.png".into()];
+        j.status = JobStatus::Done;
+        p.save_job(&j).unwrap();
+    }
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_git(None)
+        .with_plugins(fal_video(), Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1280.0, 860.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run_steps(4);
+    h.get_by_label("Elements").click();
+    h.run_steps(4);
+    h.get_by_label("@paka  Paka").click();
+    h.run_steps(8);
+    h.get_by_role_and_label(Role::TextInput, "Element name")
+        .hover();
+    h.run_steps(2);
+    snap_shell(&mut h, "elements-page");
+    h.get_by_label("More for elements/cast/paka/02.png").click();
+    h.run_steps(2);
+    snap_shell(&mut h, "elements-anchor-menu");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label("More for @paka").click();
+    h.run_steps(2);
+    h.get_by_label("Change kind").click();
+    h.run_steps(2);
+    snap_shell(&mut h, "elements-menu");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label("More for @paka").click();
+    h.run_steps(2);
+    h.get_by_label("Delete element…").click();
+    h.run_steps(4);
+    snap_shell(&mut h, "elements-delete");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    h.get_by_label("New set").click();
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::TextInput, "Name")
+        .type_text("Night market");
+    h.run_steps(2);
+    snap_shell(&mut h, "elements-new");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    h.get_by_role_and_label(Role::ComboBox, "Browse existing anchors")
+        .click();
+    h.run_steps(4);
+    h.get_all_by_label_contains("paka side view")
+        .next()
+        .unwrap()
+        .click();
+    h.run_steps(4);
+    snap_shell(&mut h, "elements-browse");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label("Story").click();
+    h.run_steps(4);
+    snap_shell(&mut h, "story-page");
+    h.get_by_label("Change…").click();
+    h.run_steps(4);
+    snap_shell(&mut h, "story-format-prefs");
 }

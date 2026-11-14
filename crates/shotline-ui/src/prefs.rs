@@ -9,7 +9,7 @@ use eframe::egui::{self, RichText};
 use serde_json::Value;
 use shotline_core::dotenv;
 use shotline_core::protocol::ModelInfo;
-use shotline_core::{ModelRef, Task};
+use shotline_core::{Format, ModelRef, Task};
 
 use crate::edit::{Action, task_name};
 use crate::{Host, PluginInfo, Runs, hint, short, theme};
@@ -83,6 +83,12 @@ pub(crate) struct Prefs {
     user_dir: PathBuf,
     /// The film's limits as opened, and as typed; None with no film open.
     budget: Option<([String; 5], [String; 5])>,
+    /// The film's format as opened, and as changed; None with no film open.
+    format: Option<(Format, Format)>,
+    /// Shots with a take already, which a new format doesn't change.
+    made: usize,
+    /// OK asked whether to change the format with takes made.
+    asking: bool,
     film_currency: String,
     /// The daily limit across all films, as opened and as typed, and its currency.
     daily: (String, String),
@@ -90,9 +96,10 @@ pub(crate) struct Prefs {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Page {
+pub(crate) enum Page {
     Plugin,
     Models,
+    Format,
     Budget,
 }
 
@@ -146,9 +153,14 @@ impl Prefs {
     pub fn new(
         user_dir: &Path,
         host: Option<&Arc<dyn Host>>,
-        film: Option<&shotline_core::Config>,
+        film: Option<(&shotline_core::Config, Format, usize)>,
         plugin: Option<&str>,
     ) -> Prefs {
+        let (format, made) = match &film {
+            Some((_, f, n)) => (Some((f.clone(), f.clone())), *n),
+            None => (None, 0),
+        };
+        let film = film.map(|(c, ..)| c);
         let mut p = Prefs {
             file: dotenv::path(user_dir),
             list: vec![],
@@ -170,6 +182,9 @@ impl Prefs {
                 let t = budget_text(&c.budget);
                 (t.clone(), t)
             }),
+            format,
+            made,
+            asking: false,
             film_currency: film.map(|c| c.money.currency.clone()).unwrap_or_default(),
             daily: Default::default(),
             user_currency: String::new(),
@@ -183,6 +198,32 @@ impl Prefs {
             p.page = i;
         }
         p
+    }
+
+    /// Opens at one of the film's pages.
+    pub fn at(mut self, page: Page) -> Prefs {
+        self.on = page;
+        self
+    }
+
+    /// The format as it would be saved: with the video model picked under Default Models.
+    fn format_now(&self) -> Option<Format> {
+        let (_, f) = self.format.as_ref()?;
+        let mut f = f.clone();
+        if let Some((_, m)) = &self.models
+            && let Some(Some(v)) = m.get(&Task::Video)
+        {
+            f.plugin = v.plugin.clone();
+            f.model = v.model.clone();
+        }
+        Some(f)
+    }
+
+    fn format_changed(&self) -> bool {
+        self.format
+            .as_ref()
+            .zip(self.format_now())
+            .is_some_and(|((was, _), now)| *was != now)
     }
 
     /// The plugins and the keys as they are now; anything typed goes.
@@ -236,11 +277,17 @@ impl Prefs {
             || self.params.as_ref().is_some_and(|(was, now)| was != now)
             || self.models.as_ref().is_some_and(|(was, now)| was != now)
             || self.budget.as_ref().is_some_and(|(was, now)| was != now)
+            || self.format_changed()
             || self.daily.0 != self.daily.1
     }
 
     /// Writes the keys and the kept programs; the film's options go back to the app.
-    fn save(&mut self, host: Option<&Arc<dyn Host>>, done: &mut Done) -> bool {
+    fn save(&mut self, host: Option<&Arc<dyn Host>>, done: &mut Done, sure: bool) -> bool {
+        // Asked before anything's written.
+        if self.format_changed() && self.made > 0 && !sure {
+            self.asking = true;
+            return false;
+        }
         let mut said = vec![];
         let mut failed = None;
         // Checked before anything's written, so a typo doesn't leave half of it saved.
@@ -291,6 +338,11 @@ impl Prefs {
         }
         if let Some((was, now)) = &self.params {
             done.film.extend(param_changes(was, now));
+        }
+        if self.format_changed()
+            && let Some(f) = self.format_now()
+        {
+            done.film.push(Action::Format(f));
         }
         if let Some(b) = budget {
             done.film.push(Action::Budget(b));
@@ -355,6 +407,8 @@ impl Prefs {
                             }
                             if self.on == Page::Models {
                                 self.models_page(ui);
+                            } else if self.on == Page::Format {
+                                self.format_page(ui);
                             } else if self.on == Page::Budget {
                                 self.budget_page(ui);
                             } else if self.list.is_empty() {
@@ -389,8 +443,17 @@ impl Prefs {
             self.check(ui.ctx(), host.clone(), &p);
         }
         done.open = true;
-        if ok {
-            done.open = !self.save(host.as_ref(), &mut done);
+        let mut sure = false;
+        if self.asking {
+            let (go, back) = self.ask_format(ui.ctx());
+            if back {
+                self.asking = false;
+            }
+            sure = go;
+        }
+        if ok || sure {
+            self.asking = false;
+            done.open = !self.save(host.as_ref(), &mut done, sure);
         } else if cancel {
             done.open = false;
         } else if modal.should_close() {
@@ -442,6 +505,9 @@ impl Prefs {
             if side_item(ui, self.on == Page::Models, "Default Models").clicked() {
                 self.on = Page::Models;
             }
+            if side_item(ui, self.on == Page::Format, "Format").clicked() {
+                self.on = Page::Format;
+            }
             if side_item(ui, self.on == Page::Budget, "Budget").clicked() {
                 self.on = Page::Budget;
             }
@@ -476,6 +542,78 @@ impl Prefs {
     }
 
     /// The film's spending limits, and the daily one across all films.
+    /// What every shot is made at, unless it says otherwise.
+    fn format_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Format")
+                .font(theme::section())
+                .color(theme::PAPER),
+        );
+        ui.add_space(8.0);
+        let video = self.format_now();
+        let models: Vec<(String, ModelInfo)> = self
+            .list
+            .iter()
+            .filter_map(|p| p.description.as_ref().ok())
+            .flat_map(|d| {
+                d.models
+                    .iter()
+                    .filter(|m| m.op == shotline_core::protocol::Op::VideoGenerate)
+                    .map(|m| (d.name.clone(), m.clone()))
+            })
+            .collect();
+        let (Some((_, f)), Some(video)) = (&mut self.format, video) else {
+            hint(ui, "Each film has its own; open one to set it.");
+            return;
+        };
+        f.plugin = video.plugin;
+        f.model = video.model;
+        let about = "This film's, saved in its shotline.toml. A shot that picks its own model, \
+                     length or size keeps it.";
+        let made = self.made;
+        group(ui, "Every shot", about, |ui| {
+            crate::format_fields(ui, f, &models, made);
+        });
+        if let Some((_, m)) = &mut self.models {
+            m.insert(Task::Video, Some(ModelRef::new(&f.plugin, &f.model)));
+        }
+    }
+
+    /// Whether to change the format with takes made: (change, back).
+    fn ask_format(&self, ctx: &egui::Context) -> (bool, bool) {
+        let (mut go, mut back) = (false, false);
+        let n = self.made;
+        let f = self.format_now().unwrap_or_default();
+        let modal = crate::modal(ctx, "format sure", |ui| {
+            ui.set_width(crate::kit::modal_width(ctx, 1.0, 420.0, 420.0));
+            ui.heading("Change the whole film's format?");
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new(format!(
+                    "New takes of every shot that doesn't pick its own are made at {} {} with {}.",
+                    f.aspect, f.resolution, f.model
+                ))
+                .color(theme::PAPER),
+            );
+            ui.add_space(6.0);
+            hint(
+                ui,
+                &format!(
+                    "{n} shot{} already {} a take; takes keep the shape and size they were made \
+                     at, so the cut may mix them.",
+                    if n == 1 { "" } else { "s" },
+                    if n == 1 { "has" } else { "have" }
+                ),
+            );
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                go = crate::kit::primary_button(ui, None, "Change it").clicked();
+                back = ui.button("Back").clicked();
+            });
+        });
+        (go, back || modal.should_close())
+    }
+
     fn budget_page(&mut self, ui: &mut egui::Ui) {
         ui.label(
             RichText::new("Budget")

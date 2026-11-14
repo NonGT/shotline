@@ -478,13 +478,18 @@ pub struct App {
     /// The open element, by handle.
     element: Option<String>,
     element_form: ElementForm,
-    new_element: NewElement,
+    /// The New element dialog, while open.
+    new_element: Option<NewElement>,
+    /// Delete asked for, by handle, until it's confirmed.
+    delete_element: Option<String>,
     /// The picture shown big over everything.
     zoom: Option<PathBuf>,
     plugins: Vec<Description>,
     host: Option<Arc<dyn Host>>,
     /// A plugin's keys asked for, e.g. one that said it has none; the shell opens Preferences.
     pub(crate) wants_keys: Option<String>,
+    /// The Story page's Change… asked for the format in Preferences.
+    pub(crate) wants_format: bool,
     /// Settings pressed on the rail; the shell opens Preferences.
     pub(crate) wants_prefs: bool,
     /// Keys each plugin needs that aren't set, by plugin, worked out off the UI thread.
@@ -897,11 +902,13 @@ impl App {
             renaming: None,
             element: None,
             element_form: ElementForm::default(),
-            new_element: NewElement::default(),
+            new_element: None,
+            delete_element: None,
             zoom: None,
             plugins: vec![],
             host: None,
             wants_keys: None,
+            wants_format: false,
             wants_prefs: false,
             missing_keys: Arc::default(),
             maker: None,
@@ -2235,21 +2242,33 @@ impl App {
                     ui.set_max_width(ui.available_width().min(1080.0));
                     kit::page_title(ui, "Story", Some(&self.project.config.name));
                     ui.add_space(theme::GAP);
-                    let models = self.video_models();
-                    let format = |me: &mut Self, ui: &mut egui::Ui| {
-                        kit::card(ui, |ui| {
-                            format_fields(ui, &mut me.texts.format, &models, me.film.made)
-                        });
-                    };
                     let words = |me: &mut Self, ui: &mut egui::Ui| {
                         let t = &mut me.texts;
                         kit::card(ui, |ui| {
-                            card_field(
+                            let n = t.story.split_whitespace().count();
+                            let meta = (n > 0)
+                                .then(|| format!("{n} word{}", if n == 1 { "" } else { "s" }));
+                            let cap = kit::card_title(ui, "Story", meta.as_deref()).id;
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::TextEdit::multiline(&mut t.story)
+                                    .hint_text(
+                                        RichText::new(
+                                            "What the film is about; shot drafts read it",
+                                        )
+                                        .color(theme::DUST),
+                                    )
+                                    .desired_rows(10)
+                                    .desired_width(f32::INFINITY)
+                                    .margin(egui::vec2(10.0, 8.0)),
+                            )
+                            .labelled_by(cap);
+                            ui.add_space(4.0);
+                            hint(
                                 ui,
-                                "Story",
-                                &mut t.story,
-                                "What the film is about; shot drafts read it",
-                                10,
+                                "To break it into shots, ask the co-director (shotline mcp); a \
+                                 shot's prompt can be drafted from its plot with shotline shot \
+                                 draft.",
                             );
                         });
                         ui.add_space(theme::GAP);
@@ -2265,7 +2284,7 @@ impl App {
                             hint(ui, "Text between <!-- and --> is left out of prompts.");
                         });
                     };
-                    let side = 520.0;
+                    let side = 340.0;
                     if ui.available_width() >= 1000.0 {
                         ui.horizontal_top(|ui| {
                             ui.vertical(|ui| {
@@ -2275,16 +2294,58 @@ impl App {
                             ui.add_space(theme::GAP);
                             ui.vertical(|ui| {
                                 ui.set_width(side);
-                                format(self, ui);
+                                self.format_card(ui);
                             });
                         });
                     } else {
-                        format(self, ui);
-                        ui.add_space(theme::GAP);
                         words(self, ui);
+                        ui.add_space(theme::GAP);
+                        self.format_card(ui);
                     }
                 });
             });
+    }
+
+    /// What every shot is made at, set in Preferences.
+    fn format_card(&mut self, ui: &mut egui::Ui) {
+        let f = self.project.format();
+        let installed = self
+            .video_models()
+            .iter()
+            .any(|(p, m)| *p == f.plugin && m.id == f.model);
+        let none = self.video_models().is_empty();
+        kit::card(ui, |ui| {
+            kit::card_title(ui, "Format", None);
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!(
+                    "{} · {} · {} s a shot",
+                    shape(&f.aspect),
+                    f.resolution,
+                    f.duration
+                ))
+                .color(theme::PAPER),
+            );
+            ui.label(
+                RichText::new(format!("{} · {}", f.plugin, f.model))
+                    .small()
+                    .color(theme::DUST),
+            );
+            if none {
+                ui.label(RichText::new("No video plugin installed").color(theme::FLAG));
+            } else if !installed {
+                ui.label(RichText::new(format!("{} isn't installed", f.plugin)).color(theme::FLAG));
+            }
+            ui.add_space(8.0);
+            if ui
+                .button("Change…")
+                .on_hover_text("in Preferences; it changes every shot that doesn't pick its own")
+                .clicked()
+            {
+                self.flush();
+                self.wants_format = true;
+            }
+        });
     }
 
     fn elements(&mut self, ui: &mut egui::Ui) {
@@ -2307,9 +2368,6 @@ impl App {
                             .iter()
                             .filter(|(e, _)| e.kind == kind)
                             .collect();
-                        if els.is_empty() {
-                            continue;
-                        }
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.add_space(8.0);
@@ -2318,7 +2376,28 @@ impl App {
                                     .family(egui::FontFamily::Name(theme::SEMIBOLD.into()))
                                     .color(theme::PAPER),
                             );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let what = new_what(kind);
+                                    if kit::icon_button(ui, icon::ADD, &format!("New {what}"))
+                                        .on_hover_text(format!("New {what}…"))
+                                        .clicked()
+                                    {
+                                        self.new_element = Some(NewElement {
+                                            kind,
+                                            ..Default::default()
+                                        });
+                                    }
+                                },
+                            );
                         });
+                        if els.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.add_space(8.0);
+                                ui.label(RichText::new("none yet").small().color(theme::FAINT));
+                            });
+                        }
                         for (e, anchors) in els {
                             let here = self.element.as_ref() == Some(&e.handle);
                             let key = format!("@{}", e.handle);
@@ -2329,57 +2408,14 @@ impl App {
                         }
                         ui.add_space(8.0);
                     }
-                    ui.add_space(4.0);
-                    let n = &mut self.new_element;
-                    let label = caption(ui, "New element");
-                    ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_salt("kind")
-                            .selected_text(n.kind.to_string())
-                            .width(64.0)
-                            .show_ui(ui, |ui| {
-                                for k in Kind::ALL {
-                                    ui.selectable_value(&mut n.kind, k, k.to_string());
-                                }
-                            })
-                            .response
-                            .widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::ComboBox, true, "Kind")
-                            });
-                        ui.add(
-                            egui::TextEdit::singleline(&mut n.name)
-                                .hint_text(RichText::new("Name").color(theme::DUST))
-                                .desired_width(f32::INFINITY),
-                        )
-                        .labelled_by(label.id);
-                    });
-                    let slug = shotline_core::slug::slugify(n.name.trim());
-                    let handle = ui
-                        .horizontal(|ui| {
-                            ui.label(RichText::new("@").color(theme::DUST));
-                            ui.add(
-                                egui::TextEdit::singleline(&mut n.handle)
-                                    .hint_text(
-                                        RichText::new(if slug.is_empty() {
-                                            "handle"
-                                        } else {
-                                            slug.as_str()
-                                        })
-                                        .color(theme::DUST),
-                                    )
-                                    .desired_width(f32::INFINITY),
-                            )
-                            .on_hover_text("how prompts name it; made from the name if left empty")
-                        })
-                        .inner;
-                    let enter =
-                        handle.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let ready = !n.name.trim().is_empty();
-                    let add = ui.add_enabled(ready, egui::Button::new("Add element"));
-                    if (add.clicked() || enter) && ready {
-                        acts.push(Action::AddElement(std::mem::take(n)));
-                    }
                 });
             });
+        if let Some(a) = self.new_element_dialog(ui.ctx()) {
+            acts.push(a);
+        }
+        if let Some(a) = self.delete_element_dialog(ui.ctx()) {
+            acts.push(a);
+        }
         if !acts.is_empty() {
             self.flush();
             self.apply(acts);
@@ -2403,7 +2439,7 @@ impl App {
                         kit::empty(
                             ui,
                             icon::ELEMENTS,
-                            "Cast, sets and props that shots name as @handles. Add the first one on the left.",
+                            "Cast, sets and props that shots name as @handles. Add one with + beside Cast, Sets or Props.",
                         );
                     }
                     None => kit::empty(ui, icon::ELEMENTS, "Pick an element on the left."),
@@ -2411,16 +2447,148 @@ impl App {
             });
     }
 
+    /// The New cast member / set / prop dialog; Enter in either box adds it.
+    fn new_element_dialog(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let n = self.new_element.as_mut()?;
+        let what = new_what(n.kind);
+        let (mut add, mut cancel) = (false, false);
+        let modal = modal(ctx, "new element", |ui| {
+            ui.set_width(kit::modal_width(ctx, 1.0, 380.0, 380.0));
+            ui.heading(format!("New {what}"));
+            ui.add_space(12.0);
+            let l = caption(ui, "Name");
+            let name = ui
+                .add(
+                    egui::TextEdit::singleline(&mut n.name)
+                        .hint_text(RichText::new(new_hint(n.kind)).color(theme::DUST))
+                        .desired_width(f32::INFINITY),
+                )
+                .labelled_by(l.id);
+            if ui.memory(|m| m.focused().is_none()) {
+                name.request_focus();
+            }
+            ui.add_space(8.0);
+            let l = caption(ui, "Handle");
+            let slug = shotline_core::slug::slugify(n.name.trim());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("@").color(theme::DUST));
+                ui.add(
+                    egui::TextEdit::singleline(&mut n.handle)
+                        .hint_text(
+                            RichText::new(if slug.is_empty() { "handle" } else { &slug })
+                                .color(theme::DUST),
+                        )
+                        .desired_width(f32::INFINITY),
+                )
+                .labelled_by(l.id);
+            });
+            ui.add_space(4.0);
+            hint(ui, "How prompts name it; made from the name if left empty.");
+            ui.add_space(14.0);
+            let ready = !n.name.trim().is_empty();
+            ui.horizontal(|ui| {
+                add = ui
+                    .add_enabled_ui(ready, |ui| kit::primary_button(ui, Some(icon::ADD), "Add"))
+                    .inner
+                    .clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+            // Only this dialog takes keys while it's up.
+            add |= ready && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        });
+        if add {
+            return self.new_element.take().map(Action::AddElement);
+        }
+        if cancel || modal.should_close() {
+            self.new_element = None;
+        }
+        None
+    }
+
+    /// Asks before deleting an element, saying which shots send it.
+    fn delete_element_dialog(&mut self, ctx: &egui::Context) -> Option<Action> {
+        let handle = self.delete_element.clone()?;
+        let Some((el, anchors)) = self
+            .film
+            .elements
+            .iter()
+            .find(|(e, _)| e.handle == handle)
+            .cloned()
+        else {
+            self.delete_element = None;
+            return None;
+        };
+        let mut shots = vec![];
+        let mut lines = 0;
+        for (_, list) in &self.film.chapters {
+            for (r, s) in list {
+                if s.elements.contains(&handle) {
+                    shots.push(r.to_string());
+                }
+                lines += s.lines.iter().filter(|l| l.who == handle).count();
+            }
+        }
+        let (mut go, mut back) = (false, false);
+        let modal = modal(ctx, "delete element", |ui| {
+            ui.set_width(kit::modal_width(ctx, 1.0, 420.0, 420.0));
+            ui.heading(format!("Delete @{handle}?"));
+            ui.add_space(10.0);
+            let n = anchors.len();
+            let mut said = vec![format!(
+                "{} and its {n} anchor image{} go.",
+                el.name,
+                if n == 1 { "" } else { "s" }
+            )];
+            if !shots.is_empty() {
+                said.push(format!(
+                    "It comes off {} shot{}: {}. @{handle} in their prompts stays as text.",
+                    shots.len(),
+                    if shots.len() == 1 { "" } else { "s" },
+                    short(&shots.join(", "), 120)
+                ));
+            }
+            if lines > 0 {
+                said.push(format!(
+                    "Its {lines} line{} stay, without a voice.",
+                    if lines == 1 { "" } else { "s" }
+                ));
+            }
+            ui.label(RichText::new(said.join(" ")).color(theme::PAPER));
+            ui.add_space(6.0);
+            hint(ui, "Undo brings it all back.");
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                go = kit::danger_button(ui, "Delete").clicked();
+                back = ui.button("Cancel").clicked();
+            });
+        });
+        if go {
+            self.delete_element = None;
+            return Some(Action::RemoveElement(el));
+        }
+        if back || modal.should_close() {
+            self.delete_element = None;
+        }
+        None
+    }
+
     fn element_detail(&mut self, ui: &mut egui::Ui, el: &Element, anchors: &[PathBuf]) {
         let mut acts = vec![];
+        let mut menu = None;
         big_title(
             ui,
             &format!("@{} · {}", el.handle, el.kind),
             &mut self.element_form.name,
             "",
             "Element name",
+            |ui| menu = element_menu(ui, el),
         )
         .on_hover_text("its name; the @handle stays as prompts use it");
+        match menu {
+            Some(Some(k)) => acts.push(Action::SetKind(el.clone(), k)),
+            Some(None) => self.delete_element = Some(el.handle.clone()),
+            None => {}
+        }
         ui.add_space(theme::GAP);
         ui.vertical(|ui| {
             ui.set_max_width(ui.available_width().min(900.0));
@@ -2440,26 +2608,48 @@ impl App {
             if anchors.is_empty() {
                 hint(ui, "Pictures of it that video models are shown, to keep it the same in every shot.");
             }
-            let mut remove = None;
+            let mut picked = None;
             // Rows worked out here: horizontal_wrapped can't tell a card's width before it's drawn.
             let gap = 8.0;
             let outer = ANCHOR_CARD + 14.0;
             let per_row = (((ui.available_width() + gap) / (outer + gap)) as usize).max(1);
-            for row in anchors.chunks(per_row) {
+            for (k, row) in anchors.chunks(per_row).enumerate() {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
-                    for a in row {
-                        if self.anchor_card(ui, el, a) {
-                            remove = Some(a.clone());
+                    for (m, a) in row.iter().enumerate() {
+                        let i = k * per_row + m;
+                        if let Some(d) = self.anchor_card(ui, el, a, i, anchors.len()) {
+                            picked = Some((i, a.clone(), d));
                         }
                     }
                 });
                 ui.add_space(gap - ui.spacing().item_spacing.y);
             }
-            if let Some(a) = remove {
-                acts.push(Action::RemoveAnchor(el.clone(), a));
+            match picked {
+                Some((_, a, CardDo::Remove)) => acts.push(Action::RemoveAnchor(el.clone(), a)),
+                Some((i, _, CardDo::Left)) => acts.push(Action::SwapAnchors(el.clone(), i, i - 1)),
+                Some((i, _, CardDo::Right)) => acts.push(Action::SwapAnchors(el.clone(), i, i + 1)),
+                Some((_, a, CardDo::Details)) => {
+                    self.zoom_details = Some((a.clone(), self.project.job_that_made(&a).ok().flatten()));
+                    self.zoom = Some(a);
+                }
+                Some((_, a, CardDo::Remake)) => {
+                    let film = &self.project.config;
+                    let defaults = (
+                        film.image.aspect.clone().unwrap_or_else(|| film.aspect.clone()),
+                        film.image.resolution.clone(),
+                    );
+                    self.remake(anchor::For::Element(el.handle.clone()), &a, defaults);
+                }
+                None => {}
             }
-            let rows = self.made_rows(&browse::Near::Element(el.handle.clone()));
+            // Its own anchors are there already.
+            let mine = format!("an anchor of @{}", el.handle);
+            let rows: Vec<_> = self
+                .made_rows(&browse::Near::Element(el.handle.clone()))
+                .into_iter()
+                .filter(|(.., e)| e.used.as_ref() != Some(&mine))
+                .collect();
             ui.horizontal(|ui| {
                 match browse::dropdown(
                     ui,
@@ -2504,14 +2694,23 @@ impl App {
         }
     }
 
-    /// An anchor with its label beside it, all cards one size. True when Remove is clicked.
-    fn anchor_card(&mut self, ui: &mut egui::Ui, el: &Element, a: &Path) -> bool {
+    /// An anchor with its label beside it, all cards one size, and its ⋯. `i` of `n` says
+    /// which way it can move.
+    fn anchor_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        el: &Element,
+        a: &Path,
+        i: usize,
+        n: usize,
+    ) -> Option<CardDo> {
+        let made = self.origin(a) == Origin::Made;
         let name = self.project.rel(a);
         let file = a
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut remove = false;
+        let mut out = None;
         // The page's colour, so the label box shows as a box.
         egui::Frame::new()
             .fill(theme::BAY)
@@ -2521,9 +2720,30 @@ impl App {
             .show(ui, |ui| {
                 ui.set_width(ANCHOR_CARD);
                 ui.horizontal_top(|ui| {
+                    let corner = ui.cursor().min;
                     if self.thumbs.tile(ui, a, ANCHOR_IMAGE, &name) {
                         self.zoom = Some(a.to_path_buf());
                     }
+                    // Its place in prompts, which Move left / right changes.
+                    let text = egui::WidgetText::from(
+                        RichText::new(format!("Image {}", i + 1))
+                            .small()
+                            .color(theme::PAPER),
+                    )
+                    .into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Small,
+                    );
+                    let pill = egui::Rect::from_min_size(
+                        corner + egui::vec2(4.0, 4.0),
+                        text.size() + egui::vec2(10.0, 4.0),
+                    );
+                    ui.painter()
+                        .rect_filled(pill, 4.0, egui::Color32::from_black_alpha(170));
+                    ui.painter()
+                        .galley(pill.min + egui::vec2(5.0, 2.0), text, theme::PAPER);
                     let size = egui::vec2(ui.available_width(), ANCHOR_IMAGE.y);
                     ui.allocate_ui_with_layout(
                         size,
@@ -2564,16 +2784,14 @@ impl App {
                                 }
                             }
                             // On the bottom edge, so it lines up across cards.
-                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                                remove = remove_button(ui)
-                                    .on_hover_text(format!("take {name} off @{}", el.handle))
-                                    .clicked();
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Max), |ui| {
+                                out = anchor_menu(ui, &name, &el.handle, made, i, n);
                             });
                         },
                     );
                 });
             });
-        remove
+        out
     }
 
     /// Which TTS plugin and voice speak a cast member's lines.
@@ -2934,6 +3152,7 @@ impl App {
             &mut self.form.title,
             "Add a title",
             "Shot title",
+            |_| {},
         );
         ui.add_space(theme::GAP);
         if self.in_cut_player(ui, s) {
@@ -4964,26 +5183,182 @@ fn caption(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.label(RichText::new(text).small().color(theme::DUST))
 }
 
-/// A page's big editable title, with what it is in small above it.
+/// What an anchor card's ⋯ asked for.
+#[derive(Clone, Copy, PartialEq)]
+enum CardDo {
+    Remake,
+    Details,
+    Left,
+    Right,
+    Remove,
+}
+
+/// An anchor's ⋯: Remake… for one made here, Details, a move each way, and Remove.
+fn anchor_menu(
+    ui: &mut egui::Ui,
+    name: &str,
+    handle: &str,
+    made: bool,
+    i: usize,
+    n: usize,
+) -> Option<CardDo> {
+    let mut out = None;
+    let more = kit::icon_button(ui, icon::MORE, &format!("More for {name}")).on_hover_text("more");
+    egui::Popup::menu(&more).show(|ui| {
+        let mut item = |ui: &mut egui::Ui, on: bool, text: &str, about: &str, d: CardDo| {
+            if ui
+                .add_enabled(on, egui::Button::new(text))
+                .on_hover_text(about)
+                .clicked()
+            {
+                out = Some(d);
+            }
+        };
+        if made {
+            item(
+                ui,
+                true,
+                "Remake…",
+                "the Make panel with what it was made from",
+                CardDo::Remake,
+            );
+        }
+        item(
+            ui,
+            true,
+            "Details",
+            "shown big, with what made it",
+            CardDo::Details,
+        );
+        ui.separator();
+        item(
+            ui,
+            i > 0,
+            "Move left",
+            &format!("Image {} in prompts", i.max(1)),
+            CardDo::Left,
+        );
+        item(
+            ui,
+            i + 1 < n,
+            "Move right",
+            &format!("Image {} in prompts", i + 2),
+            CardDo::Right,
+        );
+        ui.separator();
+        if ui
+            .button(RichText::new("Remove").color(theme::FLAG))
+            .on_hover_text(format!("take {name} off @{handle}"))
+            .clicked()
+        {
+            out = Some(CardDo::Remove);
+        }
+    });
+    out
+}
+
+/// The element's ⋯: Some(Some(kind)) to move it, Some(None) to delete it.
+fn element_menu(ui: &mut egui::Ui, el: &Element) -> Option<Option<Kind>> {
+    let mut out = None;
+    let more =
+        kit::icon_button(ui, icon::MORE, &format!("More for @{}", el.handle)).on_hover_text("more");
+    egui::Popup::menu(&more).show(|ui| {
+        ui.menu_button("Change kind", |ui| {
+            for k in Kind::ALL {
+                let label = match k {
+                    Kind::Cast => "Cast",
+                    Kind::Set => "Set",
+                    Kind::Prop => "Prop",
+                };
+                if ui
+                    .add_enabled(k != el.kind, egui::Button::new(label))
+                    .clicked()
+                {
+                    out = Some(Some(k));
+                }
+            }
+        });
+        if ui
+            .add(egui::Button::new(
+                RichText::new("Delete element…").color(theme::FLAG),
+            ))
+            .clicked()
+        {
+            out = Some(None);
+        }
+    });
+    out
+}
+
+/// "cast member", "set" or "prop".
+fn new_what(k: Kind) -> &'static str {
+    match k {
+        Kind::Cast => "cast member",
+        Kind::Set => "set",
+        Kind::Prop => "prop",
+    }
+}
+
+fn new_hint(k: Kind) -> &'static str {
+    match k {
+        Kind::Cast => "e.g. Paka",
+        Kind::Set => "e.g. Night market",
+        Kind::Prop => "e.g. Red umbrella",
+    }
+}
+
+/// A page's big editable title, with what it is in small above it and `more` on its right. On
+/// hover it shows an outline and a pencil, so it reads as something to type into.
 fn big_title(
     ui: &mut egui::Ui,
     over: &str,
     text: &mut String,
     hint: &str,
     label: &str,
+    more: impl FnOnce(&mut egui::Ui),
 ) -> egui::Response {
     ui.label(RichText::new(over).small().color(theme::DUST));
-    let r = ui.add(
-        egui::TextEdit::singleline(text)
-            .font(theme::title())
-            .text_color(theme::PAPER)
-            .hint_text(hint)
-            .frame(egui::Frame::NONE)
-            .margin(egui::Margin::ZERO)
-            .desired_width(f32::INFINITY),
-    );
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
-    r
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            more(ui);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let out = egui::TextEdit::singleline(text)
+                    .font(theme::title())
+                    .text_color(theme::PAPER)
+                    .hint_text(hint)
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .desired_width(ui.available_width() - 28.0)
+                    .show(ui);
+                let r = out.response.response;
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, label));
+                let ends = out.galley_pos.x + out.galley.rect.width().max(40.0);
+                if r.hovered() && !r.has_focus() {
+                    let rect = egui::Rect::from_min_max(
+                        r.rect.min - egui::vec2(6.0, 2.0),
+                        egui::pos2(ends + 30.0, r.rect.max.y + 2.0),
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        theme::R_CONTROL,
+                        egui::Stroke::new(1.0, theme::EDGE),
+                        egui::StrokeKind::Inside,
+                    );
+                    kit::glyph(
+                        ui.painter(),
+                        egui::pos2(ends + 16.0, r.rect.center().y),
+                        icon::EDIT,
+                        16.0,
+                        theme::DUST,
+                    );
+                }
+                r
+            })
+            .inner
+        })
+        .inner
+    })
+    .inner
 }
 
 /// A text box in a card, under the card's heading as its label.
@@ -5544,14 +5919,12 @@ pub(crate) fn shape(aspect: &str) -> String {
 pub(crate) const SHAPES: [&str; 6] = ["9:16", "16:9", "1:1", "4:3", "3:4", "21:9"];
 
 /// The Format section of the Story tab: what every shot's video is made with and at.
-fn format_fields(
+pub(crate) fn format_fields(
     ui: &mut egui::Ui,
     f: &mut shotline_core::Format,
     models: &[(String, ModelInfo)],
     made: usize,
 ) {
-    kit::card_title(ui, "Format", None);
-    ui.add_space(8.0);
     let spec = models
         .iter()
         .find(|(p, m)| *p == f.plugin && m.id == f.model)
@@ -5643,7 +6016,13 @@ fn format_fields(
                 ui.label(RichText::new(format!("{} doesn't do {v}", m.id)).color(theme::FLAG));
             }
         }
-    } else if !models.is_empty() {
+    } else if models.is_empty() {
+        ui.label(RichText::new("No video plugin installed").color(theme::FLAG));
+        hint(
+            ui,
+            "One that does video.generate, like fal, shows up here once it's installed.",
+        );
+    } else {
         ui.label(RichText::new(format!("{} isn't installed", f.plugin)).color(theme::FLAG));
     }
     if made > 0 {

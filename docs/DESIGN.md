@@ -780,14 +780,20 @@ live in the system menu bar on macOS and Windows (muda) and in a menu bar inside
 Linux, where muda would need GTK; all three send the same commands.
 
 The film's format is the shape, resolution, shot length and video model in shotline.toml. A new
-film picks its shape (9:16 unless chosen); `shotline format` and the Format section at the top of
-the Story tab change it later, as an undo step like any other edit. The resolutions on offer are
-the model's own names for them. Takes already made keep the shape they were made at, so it says
-how many shots have one. A shot can use another model or resolution (`shot set --model`, or the
+film picks its shape (9:16 unless chosen); `shotline format` and the Format page under This film
+in Preferences change it later (the Story page shows it, with Change… to go there), as an undo
+step like any other edit. The video model there is the same one as Video under Default Models.
+The resolutions on offer are the model's own names for them. Takes already made keep the shape
+they were made at, so it says how many shots have one, and OK asks before changing it once any
+shot has a take. With no video plugin installed it says so. A shot can use another model or resolution (`shot set --model`, or the
 Model and Resolution rows next to the shot), kept in its `[model]` table, which goes away once
 both are back to the film's. Its shape can only be changed by hand there, and is warned about:
 the render scales every clip to the first one's size, so a shot of another shape comes out
 stretched.
+
+The Story page has the story, with its word count, and the style. Breaking the story into shots
+is the co-director's job; the page says so, and that a shot's prompt can be drafted from its plot
+with `shotline shot draft`.
 
 The Cut tab lists the shots in play order with their takes, edits timeline.toml (crossfade,
 colour matching, music tracks with start and volume; a track from outside the film is copied into
@@ -887,7 +893,14 @@ installed are shown greyed out, saying so.
 An element's page shows its anchors as cards of one size, the picture letterboxed on black with
 a label beside it (up to 40 letters, kept in the element's `[labels]` by file name, e.g.
 `"02.png" = "side view"`). The label follows the anchor's name wherever one is picked from a
-list ("@paka 2  side view") and goes when the anchor is removed.
+list ("@paka 2  side view") and goes when the anchor is removed. Each card's ⋯ has Remake… (for
+one made here), Details, Move left / right (the order is Image 1, 2.. in prompts; the files swap
+numbers, and labels, notes and left-out anchors in shots follow) and Remove. The ⋯ beside the
+element's name changes its kind (the toml and anchors move to the other folder; only cast keep a
+voice) or deletes it after saying which shots send it; it comes off those shots, its lines stay
+without a voice, and undo brings it all back. The name is typed over in place, with an outline
+and a pencil on hover. New elements come from the + beside Cast, Sets or Props, a small dialog
+where Enter adds it.
 
 Every image a model makes stays in its job folder, so making a frame or an anchor again doesn't
 lose the one before. Each job records what it was for (`shot`, `frame = true` for a storyboard
@@ -896,8 +909,9 @@ anchors, the image panel) lists them, the ones made for what's open first, newes
 frame's lists frames and the previous shot's last frames; References and anchors list pictures;
 the rest wait behind Show all. Under Takes is the last frame of each take that has
 been selected (taken once, when it's first selected, into its job folder as `last.png`, the file
-a shot continuing from it sends). Picking one copies it in. Remove beside one throws it
-out (its job is marked `discarded`, the file and the ledger line stay) and can be undone. Every box typed for a model (Prompt, Frame
+a shot continuing from it sends). Picking one copies it in. An element's own anchors aren't
+offered again. Throw out is behind each row's ⋯, so a missed click can't do it; it marks the job
+`discarded` (the file and the ledger line stay) and can be undone. One in use says so instead. Every box typed for a model (Prompt, Frame
 prompt, Make image) offers "Translate to English first" when what's in it isn't English and the
 film's translating model has its key; the price then includes the translation. Lines start with Add line; a line is its start (dragged like the
 length, or left as "after" to follow the line before), who says it, its words, whether it's
