@@ -761,9 +761,20 @@ target/shots for a look after a visual change.
 
 Shots are edited in place and saved once a field is left; every save is one undo step (Cmd+Z,
 Cmd+Shift+Z, or the buttons in the bottom bar). Undo puts the shot file back only if nothing else
-changed it since, so it never writes over the co-director's work. The bottom bar also commits the
-film with the user's own git, with a message naming the shots and elements that changed; a commit
-clears the undo steps, and anything older is git's job. Outside a film the app opens on a page to
+changed it since, so it never writes over the co-director's work. Undo names what it takes back
+("Prompt of 01-020"). On the Cut page, while an editor's sequence is shown, Undo and Cmd+Z take
+back the last change made to it from there instead. The bottom bar also commits the film with the
+user's own git, with a message naming the shots and elements that changed; a commit clears the undo
+steps, as the Commit dialog says, and anything older is git's job.
+
+The app looks at the film's TOML and Markdown files every two seconds and reads the film again
+when something else changed them, such as the co-director over MCP; what's typed in a field is
+saved first. Messages come up as toasts at the bottom right: the rest go after a few seconds,
+errors stay until closed, and Activity in the bottom bar lists everything said since the film was
+opened. The Jobs pill in the top bar shows what's being made in the app (takes, lines, bridges,
+sounds, editor changes, renders) with what it costs, and images made out of the app's way; a click
+on one goes to it. Closing the film or quitting while something paid for is being made asks first,
+and with Wait it closes by itself once that's done. Outside a film the app opens on a page to
 make one (with `git init`, like `shotline init` unless `--no-git`) or pick a recent one. File and Edit
 live in the system menu bar on macOS and Windows (muda) and in a menu bar inside the window on
 Linux, where muda would need GTK; all three send the same commands.

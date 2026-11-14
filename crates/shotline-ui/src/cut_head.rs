@@ -686,7 +686,7 @@ impl App {
         self.cut_ui.since = None;
         match got {
             Ok(f) => {
-                self.status = Some((format!("Rendered {}", self.project.rel(&f)), false));
+                self.info(format!("Rendered {}", self.project.rel(&f)));
                 self.reload();
                 self.cut_ui.rendered = Some(f);
             }

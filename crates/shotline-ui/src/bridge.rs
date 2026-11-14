@@ -45,6 +45,7 @@ pub(crate) struct BridgeWin {
 pub(crate) struct BridgeJob {
     slot: Slot<Result<PathBuf, String>>,
     stop: Arc<AtomicBool>,
+    pub price: String,
 }
 
 /// Where the bridge is in the sequence now.
@@ -1064,6 +1065,7 @@ impl App {
         w.error = None;
         let slot: Slot<_> = Arc::default();
         let stop = Arc::new(AtomicBool::new(false));
+        let held = price.clone();
         let (s, film, translate, ctx, halt) = (
             slot.clone(),
             self.project.root.clone(),
@@ -1073,12 +1075,12 @@ impl App {
         );
         std::thread::spawn(move || {
             *s.lock().unwrap() = Some(
-                host.bridge_take(&film, id, &price, translate, halt)
+                host.bridge_take(&film, id, &held, translate, halt)
                     .map_err(|e| format!("{e:#}")),
             );
             ctx.request_repaint();
         });
-        self.bridge_jobs.insert(id, BridgeJob { slot, stop });
+        self.bridge_jobs.insert(id, BridgeJob { slot, stop, price });
     }
 
     /// The bridges whose clips meet at a join of `seq`, by the editor's id of the clip after it.

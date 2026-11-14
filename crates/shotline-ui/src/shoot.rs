@@ -514,6 +514,7 @@ impl App {
         if at.is_none() {
             self.shoot_for = Some(self.built(r));
         }
+        self.shoot_held = at.clone();
         let (state, ctx, film) = (self.shoot.clone(), ctx.clone(), self.project.root.clone());
         let translate = self.translate_prompt;
         self.shoot_stop = std::sync::Arc::default();

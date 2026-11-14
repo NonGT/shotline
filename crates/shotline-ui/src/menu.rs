@@ -51,11 +51,16 @@ impl NativeMenu {
         let recent = Submenu::new("Open &Recent", true);
         let close = item("&Close Film", Some("CmdOrCtrl+W"));
         let prefs = item("&Preferences…", Some("CmdOrCtrl+,"));
+        // Not the system's Quit, which ends the app without asking it: it may be paying for
+        // something.
+        #[cfg(target_os = "macos")]
+        let quit = item("Quit shotline", Some("CmdOrCtrl+Q"));
+        #[cfg(target_os = "windows")]
+        let quit = item("E&xit", None);
         let file = Submenu::with_items("&File", true, &[&new, &open, &recent, &sep(), &close])
             .expect("file menu");
         #[cfg(target_os = "windows")]
-        file.append_items(&[&sep(), &PredefinedMenuItem::quit(Some("E&xit"))])
-            .expect("file menu");
+        file.append_items(&[&sep(), &quit]).expect("file menu");
 
         let undo = item("&Undo", Some("CmdOrCtrl+Z"));
         let redo = item("&Redo", Some(REDO));
@@ -67,6 +72,7 @@ impl NativeMenu {
             (undo.id().clone(), MenuCommand::Undo),
             (redo.id().clone(), MenuCommand::Redo),
             (prefs.id().clone(), MenuCommand::Preferences),
+            (quit.id().clone(), MenuCommand::Quit),
         ];
         // Not the system's own items: they send copy: and paste: to the window, which winit
         // doesn't answer, so these ask egui instead.
@@ -104,7 +110,7 @@ impl NativeMenu {
                     &PredefinedMenuItem::hide_others(None),
                     &PredefinedMenuItem::show_all(None),
                     &sep(),
-                    &PredefinedMenuItem::quit(None),
+                    &quit,
                 ],
             )
             .expect("app menu");

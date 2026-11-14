@@ -55,6 +55,16 @@ pub struct Shell {
     window_menu: bool,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     menu: Option<crate::menu::NativeMenu>,
+    /// Closing the film, or the app, asked for while paid work is going on.
+    leaving: Option<Leave>,
+    /// Agreed to: the window's own close goes through from now on.
+    quitting: bool,
+}
+
+enum Leave {
+    Close,
+    Quit,
+    Open(Opened),
 }
 
 enum Screen {
@@ -71,6 +81,7 @@ struct Form {
     error: Option<String>,
 }
 
+#[derive(Clone)]
 enum Opened {
     Existing(PathBuf),
     New {
@@ -105,6 +116,8 @@ impl Shell {
             window_menu: cfg!(not(any(target_os = "macos", target_os = "windows"))),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             menu: None,
+            leaving: None,
+            quitting: false,
         };
         if let Some(p) = project {
             shell.open(p, None);
@@ -172,19 +185,9 @@ impl Shell {
                 }
             }
             MenuCommand::OpenRecent(d) => self.go(Opened::Existing(d)),
-            MenuCommand::CloseFilm => {
-                if let Screen::Film(app) = &mut self.screen {
-                    app.flush();
-                    let here = app
-                        .project
-                        .root
-                        .parent()
-                        .unwrap_or(&self.here)
-                        .to_path_buf();
-                    self.screen = Screen::Start(Form::new(&here));
-                    self.dialog = None;
-                }
-            }
+            MenuCommand::CloseFilm if self.holds() => self.leaving = Some(Leave::Close),
+            MenuCommand::Quit if self.holds() => self.leaving = Some(Leave::Quit),
+            MenuCommand::CloseFilm => self.close_film(),
             MenuCommand::Preferences => self.preferences(None),
             MenuCommand::Cut
             | MenuCommand::Copy
@@ -200,6 +203,82 @@ impl Shell {
                     }
                 }
             }
+        }
+    }
+
+    /// Whether the open film has paid work going on that closing it would lose.
+    fn holds(&self) -> bool {
+        self.film().is_some_and(|a| !a.held().is_empty())
+    }
+
+    fn close_film(&mut self) {
+        if let Screen::Film(app) = &mut self.screen {
+            app.flush();
+            let here = app
+                .project
+                .root
+                .parent()
+                .unwrap_or(&self.here)
+                .to_path_buf();
+            self.screen = Screen::Start(Form::new(&here));
+            self.dialog = None;
+        }
+    }
+
+    /// Asks before going while paid work is going on; goes by itself once it's done.
+    fn leave_dialog(&mut self, ui: &mut egui::Ui) {
+        if ui.input(|i| i.viewport().close_requested()) && !self.quitting && self.holds() {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.leaving = Some(Leave::Quit);
+        }
+        let Some(leave) = &self.leaving else { return };
+        let held = self.film().map(|a| a.held()).unwrap_or_default();
+        let mut go = held.is_empty();
+        let mut wait = false;
+        if !go {
+            let quit = matches!(leave, Leave::Quit);
+            let modal = crate::modal(ui.ctx(), "leave", |ui| {
+                ui.set_width(crate::kit::modal_width(ui.ctx(), 1.0, 420.0, 420.0));
+                let n = held.len();
+                ui.heading(if n == 1 {
+                    "Something is being paid for"
+                } else {
+                    "Some things are being paid for"
+                });
+                ui.add_space(10.0);
+                ui.label(RichText::new(crate::busy::said(&held)).color(theme::PAPER));
+                ui.add_space(8.0);
+                crate::hint(
+                    ui,
+                    "Closing stops waiting for it: what's made is lost, the provider may still \
+                     charge, and the hold stays in the ledger. Wait, and it closes by itself \
+                     once it's done.",
+                );
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    wait = crate::kit::primary_button(ui, None, "Wait").clicked();
+                    let anyway = if quit { "Quit anyway" } else { "Close anyway" };
+                    go = crate::kit::danger_button(ui, anyway).clicked();
+                });
+            });
+            wait |= modal.should_close();
+        }
+        if wait {
+            self.leaving = None;
+        } else if go {
+            match self.leaving.take() {
+                Some(Leave::Close) => self.close_film(),
+                Some(Leave::Quit) => {
+                    self.quitting = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Some(Leave::Open(o)) => self.open_now(o),
+                None => {}
+            }
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
 
@@ -254,6 +333,7 @@ impl Shell {
             self.preferences(None);
         }
         self.prefs_window(ui);
+        self.leave_dialog(ui);
         let title = title(self.film().map(|a| &a.project));
         if title != self.titled {
             ui.ctx()
@@ -450,6 +530,14 @@ impl Shell {
 
     /// Opens or makes a film; a failure is shown on the form it came from.
     fn go(&mut self, o: Opened) {
+        if self.holds() {
+            self.leaving = Some(Leave::Open(o));
+            return;
+        }
+        self.open_now(o);
+    }
+
+    fn open_now(&mut self, o: Opened) {
         let made = match o {
             Opened::Existing(dir) => Project::discover(&dir).map(|p| (p, None)),
             Opened::New {

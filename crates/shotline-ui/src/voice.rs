@@ -240,7 +240,7 @@ impl App {
     /// Asks the price of line `i`, or records it at `at`. The line being added (DRAFT) is
     /// priced from `draft`'s speaker and words, as it isn't saved until it's paid for.
     fn ask(
-        &self,
+        &mut self,
         ctx: &egui::Context,
         r: ShotRef,
         i: usize,
@@ -251,6 +251,7 @@ impl App {
             return;
         };
         let (say, ctx, film) = (self.say.clone(), ctx.clone(), self.project.root.clone());
+        self.say_held = at.clone();
         *say.lock().unwrap() = match &at {
             Some(_) => Say::Recording(r, i),
             None => Say::Pricing(r, i),

@@ -5,6 +5,7 @@
 mod anchor;
 mod bridge;
 mod browse;
+mod busy;
 mod cost;
 mod cut;
 mod cut_head;
@@ -17,6 +18,7 @@ mod kit;
 mod lanes;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod menu;
+mod notes;
 mod pieces;
 mod player;
 mod prefs;
@@ -410,6 +412,11 @@ pub struct App {
     edit_fixed: Option<Result<String, String>>,
     /// How often shared/ and the editors' files are looked at for a save.
     edits_every: std::time::Duration,
+    /// How often the film's files are looked at for changes made outside, e.g. by the
+    /// co-director; None never.
+    watch_every: Option<std::time::Duration>,
+    /// When they were last looked at, and how they were.
+    watched: Option<(std::time::Instant, u64)>,
     /// A sequence's preview being made, and where to start playing it once it's there.
     seq_making: Option<crate::cut::Making>,
     /// The preview the deck plays, and the clips left out of it.
@@ -449,7 +456,7 @@ pub struct App {
     cut_follow: Option<Take>,
     sounds_win: Option<sounds::SoundsWin>,
     picks: std::collections::VecDeque<PathBuf>,
-    status: Option<(String, bool)>,
+    notes: notes::Notes,
     /// The job that made the zoomed picture, once Details is asked for.
     zoom_details: Option<(PathBuf, Option<shotline_core::Job>)>,
     /// Where pictures came from, worked out once per load: it reads every image job.
@@ -493,9 +500,12 @@ pub struct App {
     /// Ticked: a shot's prompt goes into English before its next take.
     translate_prompt: bool,
     shoot: Arc<Mutex<shoot::Shoot>>,
+    /// What the take being shot costs.
+    shoot_held: Option<String>,
     /// Set to cancel the take being shot.
     shoot_stop: Arc<std::sync::atomic::AtomicBool>,
     say: Arc<Mutex<voice::Say>>,
+    say_held: Option<String>,
     /// What each speaker in the open shot has recorded.
     voices: HashMap<String, Vec<shotline_core::Job>>,
     /// The line whose recordings dropdown is open.
@@ -533,6 +543,11 @@ pub struct App {
     /// When `repo` was last read, in egui's seconds.
     repo_at: f64,
     dialog: Option<Dialog>,
+    git_error: Option<String>,
+    /// What the editor's last change from the Cut page was, while its sequence is shown: Undo
+    /// takes that back there.
+    cut_undo: Option<String>,
+    cut_undo_asked: bool,
 }
 
 const VIEWERS: [&str; 2] = ["mpv", "ffplay"];
@@ -843,6 +858,8 @@ impl App {
             edit_fixing: None,
             edit_fixed: None,
             edits_every: std::time::Duration::from_secs(1),
+            watch_every: Some(std::time::Duration::from_secs(2)),
+            watched: None,
             seq_making: None,
             seq_playing: None,
             edit_opening: None,
@@ -866,7 +883,7 @@ impl App {
             cut_follow: None,
             sounds_win: None,
             picks: Default::default(),
-            status: None,
+            notes: notes::Notes::default(),
             zoom_details: None,
             origins: HashMap::new(),
             zoom_view: FIT,
@@ -894,8 +911,10 @@ impl App {
             shoot_for: None,
             translate_prompt: false,
             shoot: Arc::default(),
+            shoot_held: None,
             shoot_stop: Arc::default(),
             say: Arc::default(),
+            say_held: None,
             voices: HashMap::new(),
             recordings_for: None,
             show_all: false,
@@ -918,6 +937,9 @@ impl App {
             repo: Repo::None,
             repo_at: 0.0,
             dialog: None,
+            git_error: None,
+            cut_undo: None,
+            cut_undo_asked: false,
         };
         app.reload();
         let now = app.project.clock.now();
@@ -1026,7 +1048,7 @@ impl App {
             .collect();
         for (run, out) in made {
             self.flush();
-            self.status = Some((format!("{}: made and put in place", run.title), false));
+            self.info(format!("{}: made and put in place", run.title));
             self.keep(&run.target, out, &run.ask.prompt, true);
             self.drop_run(&run.id);
         }
@@ -1355,16 +1377,17 @@ impl App {
         }
     }
 
-    /// Beside Reload while anything is on the jobs list: a pill with a ring that turns while
-    /// something is being made and a count, opening the list.
+    /// Beside Reload while anything is on the jobs list or being worked on: a pill with a ring
+    /// that turns while something is being made and a count, opening the list.
     fn jobs_button(&mut self, ui: &mut egui::Ui) {
-        if self.runs.is_empty() {
+        let busy = self.busy();
+        if self.runs.is_empty() && busy.is_empty() {
             return;
         }
         let count = |f: fn(&running::State) -> bool| self.runs.iter().filter(|(_, s)| f(s)).count();
-        let going = count(|s| *s == running::State::Running);
+        let going = count(|s| *s == running::State::Running) + busy.len();
         let failed = count(|s| matches!(s, running::State::Failed(_) | running::State::Stopped));
-        let made = self.runs.len() - going - failed;
+        let made = self.runs.len() + busy.len() - going - failed;
         let said: Vec<String> = [(going, "running"), (made, "made"), (failed, "failed")]
             .iter()
             .filter(|(n, _)| *n > 0)
@@ -1401,7 +1424,8 @@ impl App {
             let c = egui::pos2(rect.left() + 18.0, rect.center().y);
             if going > 0 {
                 kit::ring(p, c, 6.5, 2.0, theme::STEEL, ui.input(|i| i.time));
-                ui.ctx().request_repaint();
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(33));
             } else if failed > 0 {
                 kit::glyph(p, c, icon::WARNING, 16.0, theme::FLAG);
             } else {
@@ -1416,15 +1440,40 @@ impl App {
             kit::badge(
                 p,
                 egui::pos2(rect.right() - 17.0, rect.center().y),
-                self.runs.len(),
+                self.runs.len() + busy.len(),
                 accent,
             );
         }
-        let r = r.on_hover_text("images being made; they carry on with the app closed");
+        let r = r.on_hover_text("what's being made, and images made out of the app's way");
         let now = jiff::Timestamp::now();
         let mut pick = None;
+        let mut go = None;
         egui::Popup::menu(&r).show(|ui| {
             ui.set_width(340.0);
+            if !busy.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Working on")
+                            .font(theme::section())
+                            .color(theme::PAPER),
+                    );
+                });
+                for b in &busy {
+                    let how = match b.held.as_deref() {
+                        Some(p) if !p.is_empty() => format!("{} · {p} held", b.how),
+                        _ => b.how.clone(),
+                    };
+                    if job_row(ui, &b.what, &how, &running::State::Running).clicked() {
+                        go = Some(b.go.clone());
+                        ui.close();
+                    }
+                }
+                if self.runs.is_empty() {
+                    return;
+                }
+                ui.add_space(6.0);
+            }
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
                 ui.label(
@@ -1459,6 +1508,9 @@ impl App {
         });
         if let Some(id) = pick {
             self.open_run(&id);
+        }
+        if let Some(g) = go {
+            self.go_to(&g);
         }
     }
 
@@ -1651,6 +1703,34 @@ impl App {
         self
     }
 
+    /// Looks for changes made outside this often, or never with None.
+    pub fn watching_every(mut self, every: Option<std::time::Duration>) -> App {
+        self.watch_every = every;
+        self
+    }
+
+    /// Reads the film again when its files were changed by something else.
+    fn watch_film(&mut self, ctx: &egui::Context) {
+        let Some(every) = self.watch_every else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        match self.watched {
+            Some((at, _)) if now.duration_since(at) < every => {}
+            Some((_, seen)) => {
+                let got = film_print(&self.project.root);
+                if got != seen {
+                    self.flush();
+                    self.reload();
+                } else {
+                    self.watched = Some((now, got));
+                }
+            }
+            None => self.watched = Some((now, film_print(&self.project.root))),
+        }
+        ctx.request_repaint_after(every);
+    }
+
     pub fn silent(mut self) -> App {
         self.audio_tried = true;
         self
@@ -1684,6 +1764,9 @@ impl App {
     }
 
     fn reload(&mut self) {
+        if self.watch_every.is_some() {
+            self.watched = Some((std::time::Instant::now(), film_print(&self.project.root)));
+        }
         self.thumbs.forget_changed();
         self.built = None;
         self.origins.clear();
@@ -1824,12 +1907,20 @@ impl App {
         self.load_recordings()
     }
 
+    /// What Undo takes back: on the Cut page, the last change made in the editor from there.
+    pub fn undo_what(&self) -> Option<String> {
+        match &self.cut_undo {
+            Some(w) if self.tab == Tab::Cut => Some(format!("{w} in the editor")),
+            _ => self.history.undo_what(),
+        }
+    }
+
     fn error(&mut self, msg: String) {
-        self.status = Some((msg, true));
+        self.notes.say(msg, true);
     }
 
     fn info(&mut self, msg: String) {
-        self.status = Some((msg, false));
+        self.notes.say(msg, false);
     }
 
     fn open_shot(&mut self, r: ShotRef) {
@@ -1876,6 +1967,7 @@ impl App {
             theme::apply(ui.ctx());
         }
         self.follow_runs(ui.ctx());
+        self.watch_film(ui.ctx());
         self.shoot_finished();
         self.said();
         self.follow_cut(ui.ctx());
@@ -1930,7 +2022,7 @@ impl App {
                             .clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::F5))
                         {
-                            self.status = None;
+                            self.notes.clear();
                             self.reload();
                         }
                         self.jobs_button(ui);
@@ -1941,7 +2033,6 @@ impl App {
                     .hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, theme::LINE));
             });
         self.stuck_jobs(ui);
-        let (msg, err) = self.status.clone().unwrap_or_default();
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -1951,6 +2042,7 @@ impl App {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_height(34.0);
+                    notes::activity_button(ui, &self.notes);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let cmd = if ui.ctx().os() == egui::os::OperatingSystem::Mac {
                             "Cmd"
@@ -1963,31 +2055,10 @@ impl App {
                         if history_button(ui, "Redo", redo, &format!("{cmd}+Shift+Z")) {
                             self.redo();
                         }
-                        let undo = self.history.undo_what();
+                        let undo = self.undo_what();
                         if history_button(ui, "Undo", undo, &format!("{cmd}+Z")) {
                             self.undo();
                         }
-                        ui.add_space(12.0);
-                        // What's left, for the message: cut short with … when it doesn't fit.
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                            if msg.is_empty() {
-                                return;
-                            }
-                            let color = if err { theme::FLAG } else { theme::GRAPHITE };
-                            ui.scope(|ui| {
-                                ui.set_max_width(ui.available_width() - 30.0);
-                                ui.add(
-                                    egui::Label::new(RichText::new(&msg).color(color)).truncate(),
-                                )
-                                .on_hover_text(&msg);
-                            });
-                            if icon_button(ui, "Copy the message", copy_icon)
-                                .on_hover_text("Copy")
-                                .clicked()
-                            {
-                                ui.ctx().copy_text(msg.clone());
-                            }
-                        });
                     });
                 });
             });
@@ -2010,6 +2081,7 @@ impl App {
         {
             d.pause(self.audio.as_ref());
         }
+        self.cut_undo = None;
         match self.tab {
             Tab::Story => self.story(ui),
             Tab::Elements => self.elements(ui),
@@ -2018,6 +2090,7 @@ impl App {
             Tab::Cost => self.costs(ui),
         }
         self.git_dialog(ui);
+        self.notes.toasts(ui.ctx());
         self.zoomed(ui);
         self.watched(ui);
         self.splicing(ui);
@@ -4729,6 +4802,8 @@ pub(crate) fn modal<R>(
             spread: 0,
             color: egui::Color32::from_black_alpha(140),
         });
+    let frame_nr = ctx.cumulative_frame_nr();
+    ctx.data_mut(|d| d.insert_temp(notes::modal_mark(), frame_nr));
     let r = egui::Modal::new(egui::Id::unique(name))
         .frame(frame)
         .backdrop_color(egui::Color32::from_rgba_unmultiplied(8, 8, 10, 170))
@@ -4825,15 +4900,6 @@ pub(crate) fn close_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke)
 }
 
 /// Two sheets, one over the other.
-fn copy_icon(p: &egui::Painter, s: egui::Rect, stroke: egui::Stroke) {
-    let s = s.expand(1.0);
-    let back = egui::Rect::from_min_size(s.min, s.size() * 0.72);
-    let front = egui::Rect::from_min_max(s.max - s.size() * 0.72, s.max);
-    p.rect_stroke(back, 1.5, stroke, egui::StrokeKind::Middle);
-    p.rect_filled(front, 1.5, theme::RACK);
-    p.rect_stroke(front, 1.5, stroke, egui::StrokeKind::Middle);
-}
-
 /// One job in the jobs list: what for on top, how it's going under it.
 fn job_row(ui: &mut egui::Ui, title: &str, how: &str, s: &running::State) -> egui::Response {
     let failed = matches!(s, running::State::Failed(_) | running::State::Stopped);
@@ -4963,6 +5029,39 @@ fn explained_field(
     .labelled_by(cap)
 }
 
+/// Every TOML and Markdown file of the film by name, size and time, folded into one number
+/// that changes when any of them does.
+fn film_print(root: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn walk(dir: &Path, h: &mut std::collections::hash_map::DefaultHasher) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut kids: Vec<_> = rd.flatten().collect();
+        kids.sort_by_key(|e| e.file_name());
+        for e in kids {
+            let path = e.path();
+            let name = e.file_name();
+            let Ok(kind) = e.file_type() else { continue };
+            if kind.is_dir() {
+                if name != ".shotline" && name != ".git" {
+                    walk(&path, h);
+                }
+                continue;
+            }
+            let wanted = path.extension().is_some_and(|x| x == "toml" || x == "md");
+            if let (true, Ok(m)) = (wanted, e.metadata()) {
+                path.hash(h);
+                m.len().hash(h);
+                m.modified().ok().hash(h);
+            }
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    walk(root, &mut h);
+    h.finish()
+}
+
 /// What to do about something missing.
 pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).color(theme::DUST));
@@ -4974,11 +5073,15 @@ fn history_button(ui: &mut egui::Ui, text: &str, what: Option<String>, keys: &st
     } else {
         icon::REDO
     };
-    what.is_some_and(|w| {
-        kit::icon_button(ui, icon, text)
-            .on_hover_text(format!("{text} {w} ({keys})"))
-            .clicked()
-    })
+    let hover = match &what {
+        Some(w) => format!("{text} {w} ({keys})"),
+        None => format!("Nothing to {} ({keys})", text.to_lowercase()),
+    };
+    ui.add_enabled_ui(what.is_some(), |ui| kit::icon_button(ui, icon, text))
+        .inner
+        .on_hover_text(&hover)
+        .on_disabled_hover_text(&hover)
+        .clicked()
 }
 
 /// What a voice's ▶ asked for.
