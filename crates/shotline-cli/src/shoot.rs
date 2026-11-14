@@ -766,6 +766,8 @@ pub struct For<'a> {
     pub who: Option<&'a str>,
     /// A shot's storyboard frame rather than a picture it sends along.
     pub frame: bool,
+    /// Set from elsewhere to have the provider cancel it.
+    pub stop: Option<&'a Arc<AtomicBool>>,
 }
 
 pub fn spend(
@@ -801,6 +803,18 @@ pub fn spend(
     }
     let plugin = opened.plugin(plugin_name)?;
     let opts = options();
+    if let Some(stop) = to.stop {
+        if stop.load(Ordering::Relaxed) {
+            bail!("stopped before it started; nothing spent");
+        }
+        let (stop, cancel) = (Arc::clone(stop), Arc::clone(&opts.cancel));
+        rt.spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            cancel.notify_one();
+        });
+    }
     let (job, err) = rt.block_on(async {
         on_ctrl_c(&opts);
         shotline_engine::run_once(
