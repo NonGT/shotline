@@ -186,6 +186,7 @@ pub trait Host: Send + Sync {
         _bridge: shotline_core::Ulid,
         _at: &str,
         _translate: bool,
+        _stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> anyhow::Result<PathBuf> {
         anyhow::bail!("bridges can't be made from here")
     }
@@ -390,8 +391,10 @@ pub struct App {
     edit_takes: HashMap<PathBuf, Take>,
     edit_bridges: bridge::BridgeTakes,
     bridge_win: Option<bridge::BridgeWin>,
+    /// Bridge takes being made, by bridge; they go on with the window closed.
+    bridge_jobs: HashMap<shotline_core::Ulid, bridge::BridgeJob>,
     /// Joins of the sequence shown that have a bridge, by the clip after them.
-    bridged: Vec<String>,
+    bridged: Vec<(String, shotline_core::Ulid)>,
     /// The film's bridges, read again after the sequences are.
     bridges_seen: Option<Vec<(shotline_core::Ulid, shotline_core::Bridge)>>,
     /// Each shot of the cut with the take it would go in the editor's sequence with.
@@ -830,6 +833,7 @@ impl App {
             edit_takes: HashMap::new(),
             edit_bridges: HashMap::new(),
             bridge_win: None,
+            bridge_jobs: HashMap::new(),
             bridged: vec![],
             bridges_seen: None,
             cut_takes: None,
@@ -1875,6 +1879,7 @@ impl App {
         self.shoot_finished();
         self.said();
         self.follow_cut(ui.ctx());
+        self.bridge_jobs_done(ui.ctx());
         self.sounds_window(ui.ctx());
         self.maker_popup(ui.ctx());
         let tab = self.tab;

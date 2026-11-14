@@ -698,9 +698,10 @@ impl shotline_ui::Host for Plugins {
         id: shotline_core::Ulid,
         at: &str,
         translate: bool,
+        stop: Arc<AtomicBool>,
     ) -> Result<PathBuf> {
         let p = Project::open(film)?;
-        let job = bridge::take_at(&p, id, at, translate)?;
+        let job = bridge::take_at(&p, id, at, translate, Some(&stop))?;
         p.bridge_video(&job)
             .with_context(|| format!("job {} made no video", job.id))
     }
@@ -1547,7 +1548,7 @@ fn run(cli: Cli) -> Result<()> {
                         println!("nothing spent");
                         return Ok(());
                     }
-                    let job = bridge::take_at(&p, id, &cost, !no_translate)?;
+                    let job = bridge::take_at(&p, id, &cost, !no_translate, None)?;
                     println!("done · {} · job {}", shoot::job_cost(&job), job.id);
                 }
             }

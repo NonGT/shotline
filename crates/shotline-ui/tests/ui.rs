@@ -703,8 +703,16 @@ impl Host for TestHost {
         bridge: shotline_core::Ulid,
         at: &str,
         _translate: bool,
+        stop: Arc<std::sync::atomic::AtomicBool>,
     ) -> anyhow::Result<PathBuf> {
         assert_eq!(at, "0.40 USD");
+        // Runs until it's cancelled.
+        if film.join("slow-bridge").exists() {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            anyhow::bail!("cancelled");
+        }
         let p = Project::open(film)?;
         let b = p.bridge(bridge)?;
         let mut j = Job::new(Op::VideoGenerate, "fal", &b.model);
@@ -2987,12 +2995,16 @@ fn bridges_a_join_in_an_editor() {
     h.get_by_label("Join 01-010#1 to 01-010#3").click();
     wait(&mut h, 0.1);
     h.get_by_label("Bridge…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take…")
+        .is_some_and(|b| !b.accesskit_node().is_disabled())));
+    // Nothing's written to the film until the price is asked.
+    assert!(p.bridges().unwrap().is_empty());
+    h.get_by_label("Make a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take for 0.40 USD")
+        .is_some()));
     // The frames either side of the join, taken from the clips' files.
-    assert!(wait_for(&mut h, |_| p
-        .bridges()
-        .unwrap()
-        .first()
-        .is_some_and(|(_, b)| !b.end.is_empty())));
     let (id, b) = p.bridges().unwrap().remove(0);
     assert_eq!(
         (b.from.file.as_str(), b.to.file.as_str()),
@@ -3010,12 +3022,8 @@ fn bridges_a_join_in_an_editor() {
         ("Main edit", "fal")
     );
     assert_eq!((b.length, b.resolution.as_deref()), (2.0, Some("768P")));
+    assert!(b.start.starts_with("bridges/"), "{}", b.start);
     h.get_by_label("Bridge 01-010#1 to 01-010#3");
-
-    h.get_by_label("Make a take…").click();
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Make a take for 0.40 USD")
-        .is_some()));
     h.get_by_label("Make a take for 0.40 USD").click();
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Use in the cut #1")
@@ -3037,7 +3045,8 @@ fn bridges_a_join_in_an_editor() {
             sound: false,
         }
     );
-    assert_eq!(p.bridge(id).unwrap().used, Some(job.id));
+    // In use once the editor says it has it.
+    assert!(wait_for(&mut h, |_| p.bridge(id).unwrap().used == Some(job.id)));
 
     // Once the editor has it in, the window says so and the clip is named for it.
     let mut bridge = editor_clip("9", &made, 1.0);
@@ -3066,8 +3075,11 @@ fn bridges_a_join_in_an_editor() {
     assert!(h.get_by_label("Remove #1").accesskit_node().is_disabled());
 
     // Its picture opens it in a popup of its own; Esc closes just that.
-    // The monitor has a Save frame of its own, so the popup's is the second.
-    let saves = |h: &Harness<App>| h.query_all_by_label("Save frame").count();
+    // What made it is said on its row and again in the popup.
+    let saves = |h: &Harness<App>| {
+        h.query_all_by_label_contains("minimax/h3-max/reference-to-video")
+            .count()
+    };
     wait(&mut h, 0.2);
     let before = saves(&h);
     h.get_by_label("bridge #1 poster").click();
@@ -5409,11 +5421,7 @@ fn a_frame_opened_from_the_bridge_shows_above_it() {
     h.get_by_label("Join 01-010#1 to 01-010#3").click();
     wait(&mut h, 0.1);
     h.get_by_label("Bridge…").click();
-    assert!(wait_for(&mut h, |_| p
-        .bridges()
-        .unwrap()
-        .first()
-        .is_some_and(|(_, b)| !b.end.is_empty())));
+    ask_bridge_price(&mut h);
     let end = p.bridges().unwrap()[0].1.end.clone();
     let big = format!("{end} big");
     // Twice, with a click on the bridge's own window in between, which raises it.
@@ -5451,11 +5459,7 @@ fn the_bridges_takes_get_the_room_the_window_has() {
     h.get_by_label("Join 01-010#1 to 01-010#3").click();
     wait(&mut h, 0.1);
     h.get_by_label("Bridge…").click();
-    assert!(wait_for(&mut h, |_| p
-        .bridges()
-        .unwrap()
-        .first()
-        .is_some_and(|(_, b)| !b.end.is_empty())));
+    ask_bridge_price(&mut h);
     let id = p.bridges().unwrap()[0].0;
     for _ in 0..6 {
         let mut j = Job::new(
@@ -6376,4 +6380,63 @@ fn timeline_look() {
     h.get_by_label("Fold A2").click();
     wait(&mut h, 0.2);
     snap(&mut h, "timeline-folded");
+}
+
+#[test]
+fn a_bridge_take_goes_on_with_its_window_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let (video, third) = another_take(&p);
+    if !real_video(&video) || !real_video(&third) {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    }
+    std::fs::write(p.root.join("slow-bridge"), "").unwrap();
+    write_edits(
+        &p,
+        vec![editor_clip("7", &video, 0.0), editor_clip("8", &third, 1.0)],
+        vec![],
+    );
+    let (mut h, _) = on_main_edit(tmp.path(), &p);
+    let join = "Join 01-010#1 to 01-010#3";
+    h.get_by_label(join).click();
+    wait(&mut h, 0.1);
+    h.get_by_label("Bridge…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take…")
+        .is_some_and(|b| !b.accesskit_node().is_disabled())));
+    h.get_by_label("Make a take…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("Make a take for 0.40 USD")
+        .is_some()));
+    h.get_by_label("Make a take for 0.40 USD").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("making the take…")
+        .is_some()));
+    // It can close while the take is made, and the bridge stays.
+    h.get_by_label("Close").click();
+    wait(&mut h, 0.1);
+    assert!(h.query_by_label("Bridge 01-010#1 to 01-010#3").is_none());
+    assert_eq!(p.bridges().unwrap().len(), 1);
+    // Opened again, it's still being made, and can be cancelled.
+    h.get_by_label("Bridge…").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("making the take…")
+        .is_some()));
+    h.get_by_label("Cancel").click();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("bridge take cancelled")
+        .is_some()));
+    assert!(h.query_by_label("making the take…").is_none());
+}
+
+/// Asks the bridge window's price, which is when the bridge is written to the film.
+fn ask_bridge_price(h: &mut Harness<App>) {
+    assert!(wait_for(h, |h| h
+        .query_by_label("Make a take…")
+        .is_some_and(|b| !b.accesskit_node().is_disabled())));
+    h.get_by_label("Make a take…").click();
+    assert!(wait_for(h, |h| h
+        .query_by_label("Make a take for 0.40 USD")
+        .is_some()));
 }

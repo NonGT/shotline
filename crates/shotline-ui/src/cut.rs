@@ -204,6 +204,7 @@ impl App {
                     fade: (xfade > 0.0).then_some((end - xfade / 2.0, xfade)),
                     continues: c.transition == Transition::Continue,
                     matched: c.colormatch(at, false),
+                    busy: false,
                 });
             }
             before = Some(take.to_string());

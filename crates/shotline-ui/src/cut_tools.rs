@@ -39,6 +39,8 @@ pub(crate) struct Changing {
     ask: EditParams,
     plugin: String,
     slot: Arc<Mutex<Option<Result<Edited, String>>>>,
+    /// A bridge and its take, marked as in the cut once the editor has it.
+    pub then_use: Option<(shotline_core::Ulid, shotline_core::Ulid)>,
 }
 
 fn undo_file(film: &Path) -> PathBuf {
@@ -199,7 +201,10 @@ impl App {
                 id: w[1].id.clone(),
                 name: format!("{} to {}", name(w[0]), name(w[1])),
                 picked: self.join_pick.as_ref() == Some(&w[1].id),
-                bridged: bridged.contains(&w[1].id),
+                bridged: bridged.iter().any(|(after, _)| *after == w[1].id),
+                busy: bridged
+                    .iter()
+                    .any(|(after, b)| *after == w[1].id && self.bridge_making(*b)),
                 continues: w[1]
                     .file
                     .as_ref()
@@ -656,6 +661,7 @@ impl App {
             ask,
             plugin: plugin.to_string(),
             slot,
+            then_use: None,
         });
     }
 
@@ -691,6 +697,7 @@ impl App {
             ask,
             plugin: plugin.to_string(),
             slot,
+            then_use: None,
         });
     }
 
@@ -729,6 +736,9 @@ impl App {
                 }
                 let list = list.clone();
                 save_undo(&root, &list);
+                if let Some((bridge, take)) = c.then_use {
+                    self.bridge_used(bridge, take);
+                }
                 if !done.saved {
                     self.status = Some((
                         "Changed in the editor, not saved there yet: it shows here once it is."
@@ -1265,6 +1275,7 @@ impl App {
             ask: p.ask,
             plugin: p.editor,
             slot,
+            then_use: None,
         });
     }
 }

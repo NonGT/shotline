@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
@@ -21,14 +22,16 @@ type Slot<T> = Arc<Mutex<Option<T>>>;
 type Framed = (Point, Point, String, String);
 
 pub(crate) struct BridgeWin {
-    id: Ulid,
+    /// None until the price is first asked: only then is the bridge written to the film.
+    id: Option<Ulid>,
     form: Bridge,
     /// As last saved.
     saved: Bridge,
     edited: f64,
     price: Option<(Bridge, Result<String, String>)>,
     pricing: Option<(Bridge, Slot<Result<String, String>>)>,
-    making: Option<Slot<Result<PathBuf, String>>>,
+    /// Put the prompt into English first, for this bridge.
+    translate: bool,
     framing: Option<Slot<Result<Framed, String>>>,
     takes: Vec<(usize, Job)>,
     /// A take open in its own popup: the job, its number, its player.
@@ -36,6 +39,12 @@ pub(crate) struct BridgeWin {
     error: Option<String>,
     /// The shots of the ends' files, looked up once per pair of files.
     shots: Option<(String, String, [Option<ShotRef>; 2])>,
+}
+
+/// A take of a bridge being made. It goes on with the window closed.
+pub(crate) struct BridgeJob {
+    slot: Slot<Result<PathBuf, String>>,
+    stop: Arc<AtomicBool>,
 }
 
 /// Where the bridge is in the sequence now.
@@ -173,14 +182,23 @@ fn resolution_for(m: &ModelInfo, seq: &SequenceInfo) -> Option<String> {
         .cloned()
 }
 
+/// Where a bridge's frames go: its own folder, or the cache while it isn't saved yet.
+fn frames_dir(project: &Project, id: Option<Ulid>) -> PathBuf {
+    match id {
+        Some(id) => project.bridge_dir(id),
+        None => project.root.join(".shotline/cache/bridge-frames"),
+    }
+}
+
 fn take_frames(
     ff: &Ffmpeg,
     project: &Project,
-    id: Ulid,
+    id: Option<Ulid>,
     (from, to): (Point, Point),
 ) -> Result<Framed, String> {
     let ms = jiff::Timestamp::now().as_millisecond();
-    let dir = project.bridge_dir(id);
+    let dir = frames_dir(project, id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let start = dir.join(format!("start-{ms}.png"));
     let end = dir.join(format!("end-{ms}.png"));
     ff.frame_at(&project.point_file(&from), from.at, &start)
@@ -190,16 +208,18 @@ fn take_frames(
 }
 
 impl BridgeWin {
-    fn new(project: &Project, id: Ulid, b: Bridge) -> BridgeWin {
+    fn new(project: &Project, id: Option<Ulid>, b: Bridge) -> BridgeWin {
         BridgeWin {
             id,
-            takes: project.bridge_takes(id).unwrap_or_default(),
+            takes: id
+                .map(|id| project.bridge_takes(id).unwrap_or_default())
+                .unwrap_or_default(),
             form: b.clone(),
             saved: b,
             edited: 0.0,
             price: None,
             pricing: None,
-            making: None,
+            translate: false,
             framing: None,
             deck: None,
             error: None,
@@ -229,7 +249,7 @@ impl App {
                     && same(&self.project, &x.to, b.file.as_ref())
             });
         if let Some((id, x)) = found {
-            self.bridge_win = Some(BridgeWin::new(&self.project, id, x));
+            self.bridge_win = Some(BridgeWin::new(&self.project, Some(id), x));
             return;
         }
         let all = models(&self.plugins);
@@ -256,11 +276,7 @@ impl App {
             model: model.id.clone(),
             ..Bridge::default()
         };
-        let id = match self.project.new_bridge(&bridge) {
-            Ok(id) => id,
-            Err(e) => return self.error(format!("can't make a bridge: {e}")),
-        };
-        let mut w = BridgeWin::new(&self.project, id, bridge);
+        let mut w = BridgeWin::new(&self.project, None, bridge);
         self.frames(ctx, &mut w, (from, to));
         self.bridge_win = Some(w);
     }
@@ -268,7 +284,7 @@ impl App {
     /// The bridge a take in the sequence belongs to.
     pub(crate) fn open_bridge_of(&mut self, id: Ulid) {
         match self.project.bridge(id) {
-            Ok(b) => self.bridge_win = Some(BridgeWin::new(&self.project, id, b)),
+            Ok(b) => self.bridge_win = Some(BridgeWin::new(&self.project, Some(id), b)),
             Err(e) => self.error(e.to_string()),
         }
     }
@@ -313,7 +329,7 @@ impl App {
         let place = place(
             &self.project,
             &self.edit_bridges,
-            w.id,
+            w.id.unwrap_or_default(),
             &w.form,
             seq,
             Some((&self.edit_takes, shots)),
@@ -323,7 +339,10 @@ impl App {
             .iter()
             .find(|(p, m)| *p == w.form.plugin && m.id == w.form.model)
             .map(|(_, m)| m.clone());
-        let busy = w.making.is_some() || w.framing.is_some();
+        let job = w.id.and_then(|id| self.bridge_jobs.get(&id));
+        let making = job.is_some();
+        let stopping = job.is_some_and(|j| j.stop.load(Ordering::Relaxed));
+        let busy = w.framing.is_some();
         let wide = crate::kit::modal_width(&ctx, 0.6, 480.0, 860.0);
         let mut close = false;
         let mut go = None;
@@ -358,13 +377,12 @@ impl App {
             ui.horizontal(|ui| {
                 ui.heading(&title);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    close = ui
-                        .add_enabled_ui(!busy, |ui| {
-                            crate::icon_button(ui, "Close", crate::close_icon)
+                    close = crate::icon_button(ui, "Close", crate::close_icon)
+                        .on_hover_text(if making {
+                            "Close; the take is made on, and shows here when it's done"
+                        } else {
+                            "Close"
                         })
-                        .inner
-                        .on_hover_text("Close")
-                        .on_disabled_hover_text("still making it")
                         .clicked();
                 });
             });
@@ -444,10 +462,9 @@ impl App {
                     Some(_) => "Put into English (done)",
                     None => "Put into English first",
                 };
-                ui.checkbox(&mut self.translate_prompt, label)
-                    .on_hover_text(
-                        "the text model translates it once and it's kept with the bridge",
-                    );
+                ui.checkbox(&mut w.translate, label).on_hover_text(
+                    "the text model translates it once and it's kept with the bridge",
+                );
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -520,22 +537,25 @@ impl App {
                 .filter(|(f, _)| *f == w.form)
                 .map(|(_, p)| p.clone());
             let asking = w.pricing.as_ref().is_some_and(|(f, _)| *f == w.form);
-            let shown = match (&w.making, &priced) {
-                (Some(_), _) => Price::Working("making the take…"),
-                (None, _) if asking => Price::Asking,
-                (None, Some(Ok(price))) => Price::Priced(price),
-                (None, Some(Err(e))) => Price::Failed(e),
-                (None, None) => Price::Idle,
+            let shown = match (making, &priced) {
+                (true, _) if stopping => Price::Working("cancelling…"),
+                (true, _) => Price::Working("making the take…"),
+                (false, _) if asking => Price::Asking,
+                (false, Some(Ok(price))) => Price::Priced(price),
+                (false, Some(Err(e))) => Price::Failed(e),
+                (false, None) => Price::Idle,
             };
             let blocked = if model.is_none() {
                 Some("pick a model first".to_string())
-            } else if busy || w.framing.is_some() {
+            } else if busy {
                 Some("busy with the frames".to_string())
             } else {
                 None
             };
             let keys = self.needs_keys(&w.form.plugin);
-            match PriceRow::new("Make a take")
+            let row = PriceRow::new("Make a take");
+            let row = if stopping { row } else { row.stoppable() };
+            match row
                 .keys(keys)
                 .blocked(blocked)
                 .go_hover("makes another take of the bridge")
@@ -549,7 +569,12 @@ impl App {
                 }
                 Some(Pressed::Cancel) => w.price = None,
                 Some(Pressed::Keys) => self.wants_keys = Some(w.form.plugin.clone()),
-                Some(Pressed::Stop) | None => {}
+                Some(Pressed::Stop) => {
+                    if let Some(j) = w.id.and_then(|id| self.bridge_jobs.get(&id)) {
+                        j.stop.store(true, Ordering::Relaxed);
+                    }
+                }
+                None => {}
             }
             if let Some(e) = &w.error {
                 ui.label(RichText::new(short(e, 200)).color(theme::FLAG))
@@ -761,8 +786,8 @@ impl App {
         }
         let popup = w.deck.is_some();
         self.bridge_take_popup(&ctx, &mut w);
-        if let Some(take) = remove {
-            match self.project.remove_bridge_take(w.id, take) {
+        if let Some((take, id)) = remove.zip(w.id) {
+            match self.project.remove_bridge_take(id, take) {
                 Ok(()) => {
                     if w.deck.as_ref().is_some_and(|(id, _, _)| *id == take)
                         && let Some((_, _, d)) = &mut w.deck
@@ -770,8 +795,8 @@ impl App {
                         d.pause(self.audio.as_ref());
                         w.deck = None;
                     }
-                    w.takes = self.project.bridge_takes(w.id).unwrap_or_default();
-                    if let Ok(b) = self.project.bridge(w.id) {
+                    w.takes = self.project.bridge_takes(id).unwrap_or_default();
+                    if let Ok(b) = self.project.bridge(id) {
                         w.form.used = b.used;
                         w.saved.used = b.used;
                     }
@@ -821,19 +846,20 @@ impl App {
                 steps: serde_json::Value::Null,
             };
             self.start_change(&ctx, plugin, what, ask, Some(undo));
-            w.form.used = Some(take);
-            w.saved.used = Some(take);
-            if let Err(e) = self.project.save_bridge(w.id, &w.saved) {
-                w.error = Some(e.to_string());
+            // Marked as used once the editor has it.
+            if let (Some(c), Some(id)) = (&mut self.changing, w.id) {
+                c.then_use = Some((id, take));
             }
         }
         // Esc closes the take's popup first.
-        if (close || modal.should_close()) && !busy && !popup {
-            if w.form != w.saved {
-                let _ = self.project.save_bridge(w.id, &w.form);
-            }
-            if w.takes.is_empty() {
-                let _ = self.project.remove_bridge(w.id);
+        if (close || modal.should_close()) && !popup {
+            if let Some(id) = w.id {
+                if w.form != w.saved {
+                    let _ = self.project.save_bridge(id, &w.form);
+                }
+                if w.takes.is_empty() && !making {
+                    let _ = self.project.remove_bridge(id);
+                }
             }
             self.bridges_seen = None;
             return;
@@ -865,7 +891,95 @@ impl App {
         }
     }
 
-    /// Picks up frames, prices and takes that came back.
+    /// Takes of bridges that finished, whether their window is open or not.
+    pub(crate) fn bridge_jobs_done(&mut self, ctx: &egui::Context) {
+        let done: Vec<(Ulid, Result<PathBuf, String>)> = self
+            .bridge_jobs
+            .iter()
+            .filter_map(|(id, j)| Some((*id, j.slot.lock().unwrap().take()?)))
+            .collect();
+        for (id, got) in done {
+            let stopped = self
+                .bridge_jobs
+                .remove(&id)
+                .is_some_and(|j| j.stop.load(Ordering::Relaxed));
+            let takes = self.project.bridge_takes(id).unwrap_or_default();
+            if let Some(w) = self.bridge_win.as_mut().filter(|w| w.id == Some(id)) {
+                w.takes = takes.clone();
+                if let Ok(b) = self.project.bridge(id) {
+                    w.form.english = b.english.clone();
+                    w.saved = b;
+                }
+                w.price = None;
+                if let Err(e) = &got {
+                    w.error = Some(e.clone());
+                }
+            }
+            match got {
+                Ok(_) => {
+                    if let Some((n, _)) = takes.last() {
+                        self.info(format!("bridge #{n} made"));
+                    }
+                }
+                Err(_) if stopped => self.info("bridge take cancelled".into()),
+                Err(e) => self.error(format!("bridge take: {}", short(&e, 300))),
+            }
+            self.bridges_seen = None;
+            ctx.request_repaint();
+        }
+    }
+
+    pub(crate) fn bridge_making(&self, id: Ulid) -> bool {
+        self.bridge_jobs.contains_key(&id)
+    }
+
+    /// The editor took the bridge's take in: it's the one in the cut now.
+    pub(crate) fn bridge_used(&mut self, id: Ulid, take: Ulid) {
+        let saved = self.project.bridge(id).and_then(|mut b| {
+            b.used = Some(take);
+            self.project.save_bridge(id, &b)
+        });
+        if let Err(e) = saved {
+            return self.error(format!("can't mark the bridge take used: {e}"));
+        }
+        if let Some(w) = self.bridge_win.as_mut().filter(|w| w.id == Some(id)) {
+            w.form.used = Some(take);
+            w.saved.used = Some(take);
+        }
+    }
+
+    /// Writes a bridge first opened just now, its frames moved in with it. Its id.
+    fn bridge_saved(&self, w: &mut BridgeWin) -> Result<Ulid, String> {
+        if let Some(id) = w.id {
+            self.save_form(w)?;
+            return Ok(id);
+        }
+        let id = self
+            .project
+            .new_bridge(&w.form)
+            .map_err(|e| format!("can't make a bridge: {e}"))?;
+        let dir = self.project.bridge_dir(id);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for png in [&mut w.form.start, &mut w.form.end] {
+            let from = self.project.root.join(&*png);
+            if png.is_empty() || !from.is_file() {
+                continue;
+            }
+            let to = dir.join(from.file_name().unwrap_or_default());
+            std::fs::rename(&from, &to)
+                .or_else(|_| std::fs::copy(&from, &to).map(|_| ()))
+                .map_err(|e| e.to_string())?;
+            *png = self.project.rel(&to);
+        }
+        w.id = Some(id);
+        self.project
+            .save_bridge(id, &w.form)
+            .map_err(|e| e.to_string())?;
+        w.saved = w.form.clone();
+        Ok(id)
+    }
+
+    /// Picks up frames and prices that came back.
     fn bridge_news(&mut self, ctx: &egui::Context, w: &mut BridgeWin) {
         if let Some(got) = w.framing.as_ref().and_then(|s| s.lock().unwrap().take()) {
             w.framing = None;
@@ -876,7 +990,10 @@ impl App {
                     w.form.start = start;
                     w.form.end = end;
                     w.edited = 0.0;
-                    if let Err(e) = self.save_form(w) {
+                    // Not written until the price is asked.
+                    if w.id.is_some()
+                        && let Err(e) = self.save_form(w)
+                    {
                         w.error = Some(e);
                     }
                 }
@@ -891,32 +1008,18 @@ impl App {
             w.price = Some(got);
             w.pricing = None;
         }
-        if let Some(got) = w.making.as_ref().and_then(|s| s.lock().unwrap().take()) {
-            w.making = None;
-            w.takes = self.project.bridge_takes(w.id).unwrap_or_default();
-            if let Ok(b) = self.project.bridge(w.id) {
-                w.form.english = b.english.clone();
-                w.saved = b;
-            }
-            w.price = None;
-            match got {
-                Ok(_) => {
-                    if let Some((n, _)) = w.takes.last() {
-                        self.info(format!("bridge #{n} made"));
-                    }
-                }
-                Err(e) => w.error = Some(e),
-            }
-            ctx.request_repaint();
-        }
+        let _ = ctx;
     }
 
     fn save_form(&self, w: &mut BridgeWin) -> Result<(), String> {
+        let Some(id) = w.id else {
+            return Ok(());
+        };
         if w.form == w.saved {
             return Ok(());
         }
         self.project
-            .save_bridge(w.id, &w.form)
+            .save_bridge(id, &w.form)
             .map_err(|e| e.to_string())?;
         w.saved = w.form.clone();
         Ok(())
@@ -926,16 +1029,18 @@ impl App {
         let Some(host) = self.host.clone() else {
             return;
         };
-        if let Err(e) = self.save_form(w) {
-            w.price = Some((w.form.clone(), Err(e)));
-            return;
-        }
+        let id = match self.bridge_saved(w) {
+            Ok(id) => id,
+            Err(e) => {
+                w.price = Some((w.form.clone(), Err(e)));
+                return;
+            }
+        };
         let slot: Slot<_> = Arc::default();
-        let (s, film, id, translate, ctx) = (
+        let (s, film, translate, ctx) = (
             slot.clone(),
             self.project.root.clone(),
-            w.id,
-            self.translate_prompt,
+            w.translate,
             ctx.clone(),
         );
         std::thread::spawn(move || {
@@ -948,31 +1053,36 @@ impl App {
         w.pricing = Some((w.form.clone(), slot));
     }
 
-    fn make_bridge(&self, ctx: &egui::Context, w: &mut BridgeWin, price: String) {
+    fn make_bridge(&mut self, ctx: &egui::Context, w: &mut BridgeWin, price: String) {
         let Some(host) = self.host.clone() else {
             return;
         };
+        let id = match self.bridge_saved(w) {
+            Ok(id) => id,
+            Err(e) => return w.error = Some(e),
+        };
         w.error = None;
         let slot: Slot<_> = Arc::default();
-        let (s, film, id, translate, ctx) = (
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s, film, translate, ctx, halt) = (
             slot.clone(),
             self.project.root.clone(),
-            w.id,
-            self.translate_prompt,
+            w.translate,
             ctx.clone(),
+            stop.clone(),
         );
         std::thread::spawn(move || {
             *s.lock().unwrap() = Some(
-                host.bridge_take(&film, id, &price, translate)
+                host.bridge_take(&film, id, &price, translate, halt)
                     .map_err(|e| format!("{e:#}")),
             );
             ctx.request_repaint();
         });
-        w.making = Some(slot);
+        self.bridge_jobs.insert(id, BridgeJob { slot, stop });
     }
 
     /// The bridges whose clips meet at a join of `seq`, by the editor's id of the clip after it.
-    pub(crate) fn bridged_joins(&mut self, seq: &SequenceInfo) -> Vec<String> {
+    pub(crate) fn bridged_joins(&mut self, seq: &SequenceInfo) -> Vec<(String, Ulid)> {
         let bridges = self
             .bridges_seen
             .get_or_insert_with(|| self.project.bridges().unwrap_or_default())
@@ -981,7 +1091,7 @@ impl App {
         let mut out = vec![];
         for (id, b) in bridges.iter().filter(|(_, b)| b.sequence == seq.name) {
             if let Place::Join(_, after) = place(&self.project, &none, *id, b, seq, None) {
-                out.push(after.id);
+                out.push((after.id, *id));
             }
         }
         out

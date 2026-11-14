@@ -576,7 +576,10 @@ moves later; another take later goes in its place with `replace`. Bridges are si
 own sound stays where it was. When a trim moves either clip's end, the window says so and offers
 to take the frames again for the next takes. A join with a bridge not yet in is marked on the
 timeline, a bridge in the sequence is named `bridge #n`, and picking either opens the window
-again. One closed with no takes is thrown away. `shotline bridge ls` lists them and
+again. The bridge is written to the film when its price is first asked, and one closed with no
+takes is thrown away. The window can close while a take is made: the take goes on, the join's
+mark spins, and opening it again shows it running with Cancel (which only stops it before the
+provider has started). Use in the cut marks the take used once the editor has taken it in. `shotline bridge ls` lists them and
 `shotline bridge take <id>` makes another take.
 
 ## Money

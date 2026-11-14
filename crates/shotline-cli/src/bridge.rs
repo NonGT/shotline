@@ -1,5 +1,8 @@
 //! Takes of a bridge: one video job from the frame before a join to the frame after it.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
 use anyhow::{Context as _, Result, bail};
 use shotline_core::protocol::{Op, Request};
 use shotline_core::{Bridge, Job, Project, Translated, Ulid, finish_draft, looks_english};
@@ -59,7 +62,15 @@ pub fn quote(p: &Project, id: Ulid, translate: bool) -> Result<String> {
 }
 
 /// Makes a take if it still costs `at`; the finished job.
-pub fn take_at(p: &Project, id: Ulid, at: &str, translate: bool) -> Result<Job> {
+/// Makes a take of the bridge at the price agreed. Once `stop` is set the provider is asked to
+/// cancel it.
+pub fn take_at(
+    p: &Project,
+    id: Ulid,
+    at: &str,
+    translate: bool,
+    stop: Option<&Arc<AtomicBool>>,
+) -> Result<Job> {
     let b = p.bridge(id)?;
     if let Some((tp, treq)) = translation(p, &b, translate)? {
         let total = quote(p, id, translate)?;
@@ -90,19 +101,27 @@ pub fn take_at(p: &Project, id: Ulid, at: &str, translate: bool) -> Result<Job> 
         p.save_bridge(id, &b)?;
         let (plugin, req) = request(p, &b)?;
         let cost = shoot::quote_once(p, &plugin, &req)?;
-        return spend(p, id, &plugin, &req, &cost);
+        return spend(p, id, &plugin, &req, &cost, stop);
     }
     let (plugin, req) = request(p, &b)?;
-    spend(p, id, &plugin, &req, at)
+    spend(p, id, &plugin, &req, at, stop)
 }
 
-fn spend(p: &Project, id: Ulid, plugin: &str, req: &Request, at: &str) -> Result<Job> {
+fn spend(
+    p: &Project,
+    id: Ulid,
+    plugin: &str,
+    req: &Request,
+    at: &str,
+    stop: Option<&Arc<AtomicBool>>,
+) -> Result<Job> {
     shoot::spend(
         p,
         plugin,
         req,
         shoot::For {
             bridge: Some(id),
+            stop,
             ..shoot::For::default()
         },
         "bridge",

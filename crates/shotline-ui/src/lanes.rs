@@ -38,6 +38,8 @@ pub(crate) struct Join {
     pub continues: bool,
     /// Colour matched to the clip before when rendered.
     pub matched: bool,
+    /// A take of a bridge for it is being made.
+    pub busy: bool,
 }
 
 pub(crate) struct Block {
@@ -529,6 +531,17 @@ pub(crate) fn show(
                     Stroke::new(1.0, theme::LINE),
                 ));
             }
+            if j.busy {
+                crate::kit::ring(
+                    &lp,
+                    pos2(c.x, row.top() + 10.0),
+                    6.0,
+                    2.0,
+                    theme::STEEL,
+                    ui.input(|i| i.time),
+                );
+                ui.ctx().request_repaint();
+            }
             if j.matched {
                 // A small dot above it: colour matched.
                 lp.circle_filled(pos2(c.x + 7.0, c.y - 7.0), 2.5, theme::GO);
@@ -546,7 +559,9 @@ pub(crate) fn show(
             if j.matched {
                 says.push("colour matched".into());
             }
-            if j.bridged {
+            if j.busy {
+                says.push("making a bridge take".into());
+            } else if j.bridged {
                 says.push("has a bridge".into());
             }
             let resp = resp.on_hover_text(says.join("; "));
