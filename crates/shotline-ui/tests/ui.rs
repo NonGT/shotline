@@ -2545,7 +2545,8 @@ fn dissolves_a_join_in_an_editor() {
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     assert_eq!(lines()[0].clip, "8");
     assert_eq!(lines()[0].change, Change::Crossfade { frames: 12 });
-    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref() == Some("12-frame dissolve into 01-010#3 in the editor")));
+    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref()
+        == Some("12-frame dissolve into 01-010#3 in the editor")));
     // Once the editor has it, it can come off again.
     let fade = TransitionInfo {
         id: "10".into(),
@@ -3395,7 +3396,8 @@ fn processes_the_used_part_of_a_clip() {
             length: None,
         }
     );
-    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref() == Some("ffmpeg/minterpolate on 01-010#1 in the editor")));
+    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref()
+        == Some("ffmpeg/minterpolate on 01-010#1 in the editor")));
 }
 
 #[test]
@@ -3429,7 +3431,8 @@ fn matches_a_join_with_shotlines_lut() {
             .unwrap()
             .contains("LUT_3D_SIZE 33")
     );
-    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref() == Some("shotline's colour match on 01-010#3 in the editor")));
+    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref()
+        == Some("shotline's colour match on 01-010#3 in the editor")));
 }
 
 #[test]
@@ -6519,7 +6522,12 @@ fn toasts_go_and_errors_stay() {
         .with_max_steps(16)
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run();
-    assert!(h.query_by_label("Undo").unwrap().accesskit_node().is_disabled());
+    assert!(
+        h.query_by_label("Undo")
+            .unwrap()
+            .accesskit_node()
+            .is_disabled()
+    );
     h.get_by_label_contains("01-010  Paka walks in").click();
     h.run();
     let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
