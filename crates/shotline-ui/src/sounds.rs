@@ -20,7 +20,8 @@ enum Speak {
     Idle,
     Asking(Slot),
     Priced(String),
-    Making(Slot),
+    /// At this price.
+    Making(Slot, String),
     /// Asking the price didn't work.
     Failed(String),
     /// Making it didn't work.
@@ -74,6 +75,18 @@ impl SoundsWin {
         }
     }
 
+    /// Speech or an effect being made, at what price.
+    pub fn making(&self) -> Vec<(&'static str, String)> {
+        let mut out = vec![];
+        if let Speak::Making(_, cost) = &self.speak {
+            out.push(("A voice-over", cost.clone()));
+        }
+        if let Speak::Making(_, cost) = &self.effect {
+            out.push(("A sound effect", cost.clone()));
+        }
+        out
+    }
+
     fn busy(&self) -> bool {
         self.holds().is_some()
             || [&self.speak, &self.effect]
@@ -84,9 +97,9 @@ impl SoundsWin {
     /// What has to finish before the window can close: something paid for, or the editor
     /// taking the old sound out.
     fn holds(&self) -> Option<&'static str> {
-        if matches!(self.speak, Speak::Making(_)) {
+        if matches!(self.speak, Speak::Making(..)) {
             Some("the voice-over is made")
-        } else if matches!(self.effect, Speak::Making(_)) {
+        } else if matches!(self.effect, Speak::Making(..)) {
             Some("the sound effect is made")
         } else if self.lift.is_some() {
             Some("the editor has taken the old sound out")
@@ -530,8 +543,8 @@ impl App {
                 w.effect = Speak::Asking(self.ask_effect(ui.ctx(), w, &models[w.model], None));
             }
             Some(Ask::Go(cost)) => {
-                let slot = self.ask_effect(ui.ctx(), w, &models[w.model], Some(cost));
-                w.effect = Speak::Making(slot);
+                let slot = self.ask_effect(ui.ctx(), w, &models[w.model], Some(cost.clone()));
+                w.effect = Speak::Making(slot, cost);
             }
             Some(Ask::Cancel) => {
                 w.effect = Speak::Idle;
@@ -622,7 +635,7 @@ impl App {
             Some(Ask::Keys(p)) => self.wants_keys = Some(p),
             Some(Ask::Price) => w.speak = Speak::Asking(self.ask_speech(ui.ctx(), w, None)),
             Some(Ask::Go(cost)) => {
-                w.speak = Speak::Making(self.ask_speech(ui.ctx(), w, Some(cost)));
+                w.speak = Speak::Making(self.ask_speech(ui.ctx(), w, Some(cost.clone())), cost);
             }
             Some(Ask::Cancel) => {
                 w.speak = Speak::Idle;
@@ -938,7 +951,7 @@ fn go_buttons(
 ) -> Option<Ask> {
     let shown = match state {
         Speak::Asking(_) => Price::Asking,
-        Speak::Making(_) => Price::Working("making it…"),
+        Speak::Making(..) => Price::Working("making it…"),
         Speak::Priced(cost) => Price::Priced(cost),
         Speak::Failed(e) => Price::Failed(e),
         Speak::Idle | Speak::Unmade(_) => Price::Idle,
@@ -972,11 +985,11 @@ fn go_buttons(
 /// A price that came back is kept; a job that came back made is handed on.
 fn news(state: &mut Speak) -> Option<String> {
     let slot = match state {
-        Speak::Asking(s) | Speak::Making(s) => s.clone(),
+        Speak::Asking(s) | Speak::Making(s, _) => s.clone(),
         _ => return None,
     };
     let got = slot.lock().unwrap().take()?;
-    let making = matches!(state, Speak::Making(_));
+    let making = matches!(state, Speak::Making(..));
     match got {
         Err(e) if making => {
             *state = Speak::Unmade(e);

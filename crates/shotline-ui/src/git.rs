@@ -39,18 +39,22 @@ impl App {
                     .on_hover_text("start a git repository for this film")
                     .clicked()
                 {
-                    self.status = None;
+                    self.git_error = None;
                     self.dialog = Some(Dialog::Start);
                 }
             }
-            Repo::Changes(c) if c.is_empty() => {}
+            Repo::Changes(c) if c.is_empty() => {
+                ui.add_enabled_ui(false, |ui| {
+                    crate::kit::ghost_button(ui, crate::icon::GIT, "Nothing to commit")
+                });
+            }
             Repo::Changes(c) => {
                 let n = c.len();
                 let text = format!("Commit {n} change{}", if n == 1 { "" } else { "s" });
                 if crate::kit::ghost_button(ui, crate::icon::GIT, &text).clicked() {
                     self.flush();
                     self.refresh_repo();
-                    self.status = None;
+                    self.git_error = None;
                     if let Repo::Changes(c) = &self.repo {
                         self.dialog = Some(Dialog::Commit(change_summary(c)));
                     }
@@ -70,6 +74,7 @@ impl App {
             _ => &[],
         };
         let film = self.project.root.display().to_string();
+        let has_undo = self.history.undo_what().is_some();
         let modal = crate::modal(ui.ctx(), "git", |ui| {
             ui.set_width(crate::kit::modal_width(ui.ctx(), 1.0, 440.0, 440.0));
             match dialog {
@@ -104,7 +109,14 @@ impl App {
                     ));
                 }
             }
-            if let Some((e, true)) = &self.status {
+            if matches!(dialog, Dialog::Commit(_)) && has_undo {
+                ui.add_space(8.0);
+                crate::hint(
+                    ui,
+                    "Undo starts again from this commit; going further back is git's job.",
+                );
+            }
+            if let Some(e) = &self.git_error {
                 ui.add_space(8.0);
                 ui.label(RichText::new(e).color(theme::FLAG));
             }
@@ -149,7 +161,7 @@ impl App {
                 self.history = History::default();
             }
             Err(e) => {
-                self.error(e.to_string());
+                self.git_error = Some(e.to_string());
                 self.dialog = Some(dialog);
             }
         }

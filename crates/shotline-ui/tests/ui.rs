@@ -1662,7 +1662,7 @@ fn edit_elements() {
     assert_eq!(p.element("paka").unwrap().labels["01.png"], "side view");
 
     // And so can adding the element, after the edits to it.
-    while h.query_by_label("Undo").is_some() {
+    while h.state().undo_what().is_some() {
         h.get_by_label("Undo").click();
         h.run();
     }
@@ -1701,8 +1701,8 @@ fn undo_and_redo() {
     assert_eq!(s.plot, "ผกาเดินเข้าป่า");
     assert_eq!(s.prompt, "@paka walks into the trees");
     assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาเดินเข้าป่า");
-    h.get_by_label("undid the change to 01-010");
-    assert!(h.query_by_label("Undo").is_none());
+    h.get_by_label("undid Plot and Prompt of 01-010");
+    assert!(h.state().undo_what().is_none());
 
     h.key_press_modifiers(
         egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -1711,7 +1711,7 @@ fn undo_and_redo() {
     h.run();
     h.run();
     assert_eq!(p.shot(R).unwrap(), edited);
-    h.get_by_label("redid the change to 01-010");
+    h.get_by_label("redid Plot and Prompt of 01-010");
 
     h.get_by_label("Use in the cut #1").click();
     h.run();
@@ -1728,7 +1728,7 @@ fn undo_and_redo() {
     h.run();
     h.run();
     assert_eq!(p.shot(R).unwrap(), s);
-    h.get_by_label("01-010 was changed outside the app since");
+    h.get_by_label("Plot and Prompt of 01-010 was changed outside the app since");
 }
 
 #[test]
@@ -1776,7 +1776,7 @@ fn keeps_history_with_git() {
     h.get_by_label_contains(": edit 01-010");
     assert!(git.changes(&dir).unwrap().is_empty());
     // Committed is the new starting point.
-    assert!(h.query_by_label("Undo").is_none());
+    assert!(h.state().undo_what().is_none());
     assert!(h.query_by_label_contains("Commit").is_none());
 }
 
@@ -2499,11 +2499,11 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
         Some(l) => assert!(real && (l - 1.75).abs() < 0.05, "{l}"),
         None => assert!(!real),
     }
-    let undo = "Undo swap 01-010#1 for 01-010#3";
-    assert!(wait_for(&mut h, |h| h.query_by_label(undo).is_some()));
+    let undo = Some("swap 01-010#1 for 01-010#3 in the editor".to_string());
+    assert!(wait_for(&mut h, |h| h.state().undo_what() == undo));
     // The timeline's panel grows a frame later to fit it.
     wait(&mut h, 0.1);
-    h.get_by_label(undo).click();
+    h.get_by_label("Undo").click();
     assert!(wait_for(&mut h, |_| lines().len() == 2));
     assert_eq!(
         lines()[1].change,
@@ -2511,7 +2511,7 @@ fn swaps_a_take_in_an_editor_and_takes_it_back() {
             steps: serde_json::json!(["back"])
         }
     );
-    assert!(wait_for(&mut h, |h| h.query_by_label(undo).is_none()));
+    assert!(wait_for(&mut h, |h| h.state().undo_what() != undo));
 
     // Keep length fills the same time, so nothing after it moves.
     h.get_by_label("Swap take").click();
@@ -2545,9 +2545,8 @@ fn dissolves_a_join_in_an_editor() {
     assert!(wait_for(&mut h, |_| lines().len() == 1));
     assert_eq!(lines()[0].clip, "8");
     assert_eq!(lines()[0].change, Change::Crossfade { frames: 12 });
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Undo 12-frame dissolve into 01-010#3")
-        .is_some()));
+    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref()
+        == Some("12-frame dissolve into 01-010#3 in the editor")));
     // Once the editor has it, it can come off again.
     let fade = TransitionInfo {
         id: "10".into(),
@@ -3397,9 +3396,8 @@ fn processes_the_used_part_of_a_clip() {
             length: None,
         }
     );
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Undo ffmpeg/minterpolate on 01-010#1")
-        .is_some()));
+    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref()
+        == Some("ffmpeg/minterpolate on 01-010#1 in the editor")));
 }
 
 #[test]
@@ -3433,9 +3431,8 @@ fn matches_a_join_with_shotlines_lut() {
             .unwrap()
             .contains("LUT_3D_SIZE 33")
     );
-    assert!(wait_for(&mut h, |h| h
-        .query_by_label("Undo shotline's colour match on 01-010#3")
-        .is_some()));
+    assert!(wait_for(&mut h, |h| h.state().undo_what().as_deref()
+        == Some("shotline's colour match on 01-010#3 in the editor")));
 }
 
 #[test]
@@ -5563,7 +5560,7 @@ fn shots() {
     );
     let mut h = Harness::builder()
         .with_max_steps(64)
-        .with_size(egui::vec2(1280.0, 800.0))
+        .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run_steps(4);
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -5621,7 +5618,7 @@ fn pages() {
         .testing();
     let mut h = Harness::builder()
         .with_max_steps(64)
-        .with_size(egui::vec2(1280.0, 800.0))
+        .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run_steps(4);
     for page in ["Story", "Elements", "Cut", "Cost"] {
@@ -5705,6 +5702,8 @@ fn a_running_take_can_be_cancelled() {
     assert!(wait_for(&mut h, |h| h
         .query_by_label("Shoot a take…")
         .is_some()));
+    // A toast shows from its second frame, once it knows its size.
+    h.run();
     h.get_by_label_contains("01-010: cancelled");
     assert!(h.query_by_label("Cancel").is_none());
     assert_eq!(p.takes(R).unwrap().len(), before);
@@ -6085,7 +6084,7 @@ fn lines_look() {
     app.set_plugins(vec![], Some(Arc::new(TestHost)));
     let mut h = Harness::builder()
         .with_max_steps(64)
-        .with_size(egui::vec2(1280.0, 800.0))
+        .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run_steps(4);
     h.get_by_label_contains("01-010  Paka walks in").click();
@@ -6195,7 +6194,7 @@ fn cut_look() {
         .silent();
     let mut h = Harness::builder()
         .with_max_steps(64)
-        .with_size(egui::vec2(1280.0, 800.0))
+        .with_size(egui::vec2(1280.0, 900.0))
         .build_ui_state(|ui, app: &mut App| app.show(ui), app);
     h.run_steps(4);
     h.get_by_label("Cut").click();
@@ -6439,4 +6438,212 @@ fn ask_bridge_price(h: &mut Harness<App>) {
     assert!(wait_for(h, |h| h
         .query_by_label("Make a take for 0.40 USD")
         .is_some()));
+}
+
+fn fal_video() -> Vec<Description> {
+    vec![Description {
+        name: "fal".into(),
+        version: "1".into(),
+        protocol: 1,
+        editor: false,
+        app: String::new(),
+        env: vec![],
+        models: vec![ModelInfo {
+            id: "minimax/h3-max/reference-to-video".into(),
+            op: Op::VideoGenerate,
+            ref_image: Some("Image {n}".into()),
+            ..ModelInfo::default()
+        }],
+    }]
+}
+
+#[test]
+fn closing_asks_while_a_take_is_paid_for() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut s = p.shot(R).unwrap();
+    s.prompt = "@paka walks into the trees [hold]".into();
+    p.save_shot(R, &s).unwrap();
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_git(None)
+        .with_plugins(fal_video(), Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1200.0, 2400.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run_steps(4);
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    h.get_by_label("Shoot a take…").click();
+    assert!(wait_for_shell(&mut h, |h| h
+        .query_by_label("Shoot a take for 0.40 USD")
+        .is_some()));
+    h.get_by_label("Shoot a take for 0.40 USD").click();
+    assert!(wait_for_shell(&mut h, |h| h
+        .query_by_label_contains("running (40%)")
+        .is_some()));
+
+    // The Jobs pill has it from any page, and goes back to it.
+    h.get_by_label("Cost").click();
+    h.run_steps(4);
+    h.get_by_label("Jobs: 1 running").click();
+    h.run_steps(4);
+    h.get_by_label("A take of 01-010 · running (40%) · 0.40 USD held")
+        .click();
+    h.run_steps(4);
+    assert_eq!(h.state().film().unwrap().tab(), Tab::Shots);
+
+    // Closing asks; Wait keeps it open.
+    h.state_mut().command(MenuCommand::CloseFilm);
+    h.run_steps(4);
+    h.get_by_label("A take of 01-010 (0.40 USD held)");
+    h.get_by_label("Wait").click();
+    h.run_steps(4);
+    assert!(h.state().film().is_some());
+    assert!(h.query_by_label("Close anyway").is_none());
+
+    h.state_mut().command(MenuCommand::CloseFilm);
+    h.run_steps(4);
+    h.get_by_label("Close anyway").click();
+    h.run_steps(4);
+    assert!(h.state().film().is_none());
+}
+
+#[test]
+fn toasts_go_and_errors_stay() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    assert!(
+        h.query_by_label("Undo")
+            .unwrap()
+            .accesskit_node()
+            .is_disabled()
+    );
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
+    plot.focus();
+    plot.type_text("!");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    h.get_by_label("Undo").click();
+    h.run();
+    h.run();
+    h.get_by_label("undid Plot of 01-010");
+    // Gone after a few seconds.
+    wait(&mut h, 4.5);
+    assert!(h.query_by_label("undid Plot of 01-010").is_none());
+
+    // An error stays until closed.
+    let mut s = p.shot(R).unwrap();
+    s.title = "Paka runs".into();
+    p.save_shot(R, &s).unwrap();
+    h.get_by_label("Redo").click();
+    h.run();
+    h.run();
+    let err = "Plot of 01-010 was changed outside the app since";
+    h.get_by_label(err);
+    wait(&mut h, 4.5);
+    h.get_by_label(err);
+    h.get_by_label("Close the message").click();
+    h.run();
+    assert!(h.query_by_label(err).is_none());
+
+    // Activity keeps both, newest first.
+    h.get_by_label("Activity").click();
+    h.run();
+    h.get_by_label(err);
+    h.get_by_label("undid Plot of 01-010");
+}
+
+#[test]
+fn reads_the_film_again_when_it_changes_outside() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .watching_every(Some(Duration::from_millis(50)))
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run();
+    wait(&mut h, 0.2);
+    // As the co-director would.
+    let mut s = p.shot(R).unwrap();
+    s.title = "Paka runs".into();
+    s.plot = "ผกาวิ่ง".into();
+    p.save_shot(R, &s).unwrap();
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("01-010  Paka runs")
+        .is_some()));
+    assert_eq!(field(&h, Role::MultilineTextInput, "Plot"), "ผกาวิ่ง");
+    // Nothing of its own was written over it.
+    assert_eq!(p.shot(R).unwrap(), s);
+}
+
+/// The Jobs pill, a toast, Activity and the close dialog, to look at:
+/// `cargo test -p shotline-ui --test ui activity_look -- --ignored`.
+#[test]
+#[ignore]
+fn activity_look() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let mut s = p.shot(R).unwrap();
+    s.prompt = "@paka walks into the trees [hold]".into();
+    p.save_shot(R, &s).unwrap();
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_git(None)
+        .with_plugins(fal_video(), Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1280.0, 2400.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run_steps(4);
+    h.get_by_label_contains("01-010  Paka walks in").click();
+    h.run_steps(4);
+    let plot = h.get_by_role_and_label(Role::MultilineTextInput, "Plot");
+    plot.focus();
+    plot.type_text("!");
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(4);
+    h.get_by_label("Shoot a take…").click();
+    assert!(wait_for_shell(&mut h, |h| h
+        .query_by_label("Shoot a take for 0.40 USD")
+        .is_some()));
+    h.get_by_label("Shoot a take for 0.40 USD").click();
+    assert!(wait_for_shell(&mut h, |h| h
+        .query_by_label_contains("running (40%)")
+        .is_some()));
+    h.set_size(egui::vec2(1280.0, 860.0));
+    h.run_steps(4);
+    snap_shell(&mut h, "activity-toast");
+    h.get_by_label("Jobs: 1 running").click();
+    h.run_steps(4);
+    snap_shell(&mut h, "activity-jobs");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label("Activity").click();
+    h.run_steps(4);
+    snap_shell(&mut h, "activity-list");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.state_mut().command(MenuCommand::CloseFilm);
+    h.run_steps(4);
+    snap_shell(&mut h, "activity-close");
 }

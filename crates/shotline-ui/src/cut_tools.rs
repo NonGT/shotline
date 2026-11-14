@@ -34,11 +34,13 @@ pub(crate) struct Undo {
 
 /// A change on its way: what it is, and how it went.
 pub(crate) struct Changing {
-    what: String,
+    pub what: String,
     undo: Option<Undo>,
     ask: EditParams,
     plugin: String,
     slot: Arc<Mutex<Option<Result<Edited, String>>>>,
+    /// What it costs, when a provider makes something for it first.
+    pub held: Option<String>,
     /// A bridge and its take, marked as in the cut once the editor has it.
     pub then_use: Option<(shotline_core::Ulid, shotline_core::Ulid)>,
 }
@@ -148,32 +150,25 @@ impl App {
             .rev()
             .find(|u| u.file == file && u.sequence == seq.name)
             .cloned();
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(u) = undo {
-                let label = format!("Undo {}", u.what);
-                if ui
-                    .add_enabled(
-                        busy.is_none() && self.edit_rendering.is_none(),
-                        egui::Button::new(label),
-                    )
-                    .on_hover_text(
-                        "takes back the last change made from here; what was done in the editor \
-                     since stays",
-                    )
-                    .clicked()
-                {
-                    let ask = EditParams {
-                        film: self.project.root.clone(),
-                        file: file.to_path_buf(),
-                        sequence: seq.name.clone(),
-                        clip: String::new(),
-                        change: Change::Undo {
-                            steps: u.steps.clone(),
-                        },
-                    };
-                    self.start_change(ui.ctx(), &plugin, format!("undoing {}", u.what), ask, None);
-                }
+        // Undo in the bar and Cmd+Z take this back while it's here.
+        if let Some(u) = undo {
+            let free = busy.is_none() && self.edit_rendering.is_none();
+            if free && std::mem::take(&mut self.cut_undo_asked) {
+                let ask = EditParams {
+                    film: self.project.root.clone(),
+                    file: file.to_path_buf(),
+                    sequence: seq.name.clone(),
+                    clip: String::new(),
+                    change: Change::Undo {
+                        steps: u.steps.clone(),
+                    },
+                };
+                self.start_change(ui.ctx(), &plugin, format!("undoing {}", u.what), ask, None);
             }
+            self.cut_undo = Some(u.what);
+        }
+        self.cut_undo_asked = false;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(what) = &busy {
                 ui.weak(short(what, 60));
                 ui.spinner();
@@ -661,6 +656,7 @@ impl App {
             ask,
             plugin: plugin.to_string(),
             slot,
+            held: None,
             then_use: None,
         });
     }
@@ -697,6 +693,7 @@ impl App {
             ask,
             plugin: plugin.to_string(),
             slot,
+            held: None,
             then_use: None,
         });
     }
@@ -740,11 +737,10 @@ impl App {
                     self.bridge_used(bridge, take);
                 }
                 if !done.saved {
-                    self.status = Some((
+                    self.info(
                         "Changed in the editor, not saved there yet: it shows here once it is."
                             .into(),
-                        false,
-                    ));
+                    );
                 }
             }
         }
@@ -1240,6 +1236,7 @@ impl App {
         }
         let p = self.process.take().unwrap();
         let (req, price) = p.priced.unwrap();
+        let held = Some(price.clone());
         let slot: Arc<Mutex<Option<_>>> = Arc::default();
         let (s, host, film, ctx) = (
             slot.clone(),
@@ -1275,6 +1272,7 @@ impl App {
             ask: p.ask,
             plugin: p.editor,
             slot,
+            held,
             then_use: None,
         });
     }

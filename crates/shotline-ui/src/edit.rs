@@ -195,6 +195,23 @@ pub(crate) enum Field {
     Resolution(Option<String>),
 }
 
+impl Field {
+    fn name(&self) -> &'static str {
+        match self {
+            Field::Title(_) => "Title",
+            Field::Plot(_) => "Plot",
+            Field::Prompt(_) => "Prompt",
+            Field::FramePrompt(_) => "Frame prompt",
+            Field::Duration(_) => "Length",
+            Field::Transition(_) => "Transition",
+            Field::ContinueFrom(_) => "Continue from",
+            Field::Recipe(_) => "Recipe",
+            Field::Model(_) => "Model",
+            Field::Resolution(_) => "Resolution",
+        }
+    }
+}
+
 pub(crate) enum Action {
     Set(ShotRef, Field),
     AddLine(ShotRef, LineForm),
@@ -269,50 +286,50 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    /// What it's about, as the undo button names it.
+    /// What it did, as Undo names it: "Prompt of 01-020".
     fn name(&self) -> String {
         match self {
-            Action::Set(r, _)
-            | Action::AddLine(r, _)
-            | Action::ImportLine(r, ..)
-            | Action::ImportRecording(r, ..)
-            | Action::SetLine(r, ..)
-            | Action::RemoveLine(r, _)
-            | Action::PickRecording(r, ..)
-            | Action::DeleteRecording(r, _)
-            | Action::MoveLine(r, ..)
-            | Action::AddShotImage(r, _)
+            Action::Set(r, f) => format!("{} of {r}", f.name()),
+            Action::AddLine(r, _) | Action::ImportLine(r, ..) => format!("New line of {r}"),
+            Action::ImportRecording(r, ..) | Action::PickRecording(r, ..) => {
+                format!("Recording of {r}")
+            }
+            Action::DeleteRecording(r, _) => format!("Deleted recording of {r}"),
+            Action::SetLine(r, ..) | Action::MoveLine(r, ..) => format!("Line of {r}"),
+            Action::RemoveLine(r, _) => format!("Removed line of {r}"),
+            Action::AddShotImage(r, _)
             | Action::RemoveShotImage(r, _)
-            | Action::ReplaceShotImage(r, ..)
-            | Action::ShotImageNote(r, ..)
-            | Action::AnchorNote(r, ..)
-            | Action::SetFrame(r, _)
-            | Action::LeaveOut(r, ..)
-            | Action::SendAnchor(r, ..) => r.to_string(),
-            Action::Select(t) | Action::RemoveTake(t) => t.shot.to_string(),
-            Action::AddSound(u, ..)
-            | Action::AddSoundJob(u, ..)
-            | Action::RemoveSound(u, _)
-            | Action::SetSound(u, _) => under_name(*u),
-            Action::Story(_) => "the story".into(),
-            Action::Style(_) => "the style".into(),
-            Action::Format(_) => "the format".into(),
-            Action::Param { model, key, .. } => format!("{key} for {model}"),
-            Action::Model(task, _) => format!("the {} model", task_name(*task)),
-            Action::Budget(_) => "the budget".into(),
-            Action::AddChapter(t) => format!("chapter {t}"),
-            Action::RenameChapter(n, _) => format!("chapter {n:02}'s title"),
-            Action::AddShot(..) => "a new shot".into(),
-            Action::MoveShot(r, ..) | Action::DuplicateShot(r) | Action::RemoveShot(r) => {
-                r.to_string()
+            | Action::ReplaceShotImage(r, ..) => format!("Pictures of {r}"),
+            Action::ShotImageNote(r, ..) | Action::AnchorNote(r, ..) => format!("Note of {r}"),
+            Action::SetFrame(r, _) => format!("Frame of {r}"),
+            Action::LeaveOut(r, ..) | Action::SendAnchor(r, ..) => format!("Anchors of {r}"),
+            Action::Select(t) => format!("Take in the cut of {}", t.shot),
+            Action::RemoveTake(t) => format!("Removed take of {}", t.shot),
+            Action::AddSound(u, ..) | Action::AddSoundJob(u, ..) => {
+                format!("New sound of {}", under_name(*u))
             }
-            Action::AddElement(n) => format!("new {}", n.kind),
-            Action::SaveElement(el) | Action::AddAnchor(el, _) | Action::RemoveAnchor(el, _) => {
-                format!("@{}", el.handle)
+            Action::RemoveSound(u, _) => format!("Removed sound of {}", under_name(*u)),
+            Action::SetSound(u, _) => format!("Sound of {}", under_name(*u)),
+            Action::Story(_) => "Story".into(),
+            Action::Style(_) => "Style".into(),
+            Action::Format(_) => "Format".into(),
+            Action::Param { model, key, .. } => format!("{key} of {model}"),
+            Action::Model(task, _) => format!("{} model", first_up(task_name(*task))),
+            Action::Budget(_) => "Budget".into(),
+            Action::AddChapter(t) => format!("New chapter {t}"),
+            Action::RenameChapter(n, _) => format!("Title of chapter {n:02}"),
+            Action::AddShot(..) => "New shot".into(),
+            Action::MoveShot(r, ..) => format!("Moved {r}"),
+            Action::DuplicateShot(r) => format!("Copy of {r}"),
+            Action::RemoveShot(r) => format!("Deleted {r}"),
+            Action::AddElement(n) => format!("New {}", n.kind),
+            Action::SaveElement(el) => format!("@{}", el.handle),
+            Action::AddAnchor(el, _) | Action::RemoveAnchor(el, _) => {
+                format!("Anchors of @{}", el.handle)
             }
-            Action::ForgetImage(_) => "a made image".into(),
-            Action::Timeline(_) => "the cut".into(),
-            Action::AddTrack(_) => "music".into(),
+            Action::ForgetImage(_) => "Forgot a made image".into(),
+            Action::Timeline(_) => "Cut".into(),
+            Action::AddTrack(_) => "Music".into(),
         }
     }
 
@@ -495,7 +512,7 @@ struct Step {
 
 impl Step {
     fn what(&self) -> String {
-        format!("the change to {}", self.names.join(" and "))
+        joined(&self.names)
     }
 
     fn record(&mut self, path: PathBuf, before: State) {
@@ -744,6 +761,10 @@ impl App {
     }
 
     pub(crate) fn undo(&mut self) {
+        if self.tab == crate::Tab::Cut && self.cut_undo.is_some() {
+            self.cut_undo_asked = true;
+            return;
+        }
         self.travel(true);
     }
 
@@ -1225,10 +1246,7 @@ fn restore(step: &Step, back: bool) -> anyhow::Result<()> {
                     .flatten()
                     .any(|e| !step.changes.iter().any(|c| c.path == e.path())));
         if moved {
-            anyhow::bail!(
-                "{} was changed outside the app since",
-                step.names.join(" and ")
-            );
+            anyhow::bail!("{} was changed outside the app since", joined(&step.names));
         }
     }
     let mut changes: Vec<&Change> = step.changes.iter().collect();
@@ -1270,6 +1288,28 @@ pub(crate) fn task_name(t: Task) -> &'static str {
         Task::LipSync => "lip sync",
         Task::Assistant => "assistant",
     }
+}
+
+/// "Plot of 01-010" and "Prompt of 01-010" as "Plot and Prompt of 01-010".
+fn joined(names: &[String]) -> String {
+    let of = |n: &String| {
+        n.split_once(" of ")
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+    };
+    let parts: Option<Vec<(String, String)>> = names.iter().map(of).collect();
+    match parts {
+        Some(p) if p.len() > 1 && p.iter().all(|(_, b)| *b == p[0].1) => {
+            let heads: Vec<&str> = p.iter().map(|(a, _)| a.as_str()).collect();
+            format!("{} of {}", heads.join(" and "), p[0].1)
+        }
+        _ => names.join(" and "),
+    }
+}
+
+pub(crate) fn first_up(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
 }
 
 fn under_name(u: Under) -> String {
