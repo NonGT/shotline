@@ -4029,6 +4029,7 @@ fn set_the_format_in_preferences() {
     p.select_take("01-010".parse().unwrap(), "1").unwrap();
     let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
         .with_plugins(vec![], Some(Arc::new(TestHost)))
+        .with_window_menu()
         .testing();
     let mut h = Harness::builder()
         .with_max_steps(16)
@@ -4039,6 +4040,9 @@ fn set_the_format_in_preferences() {
     h.run();
     // The Story page says what it is and sends Change… to Preferences.
     h.get_by_label_contains("9:16");
+    // Under Linux's menu bar in the window it starts below the fold.
+    h.get_by_label("Change…").scroll_to_me();
+    h.run();
     h.get_by_label("Change…").click();
     h.run();
     h.run();
@@ -6079,8 +6083,10 @@ fn lines_say_why_and_ask_before_adding() {
     h.run();
     h.get_by_label("@nana").click();
     h.run();
-    wait(&mut h, 0.2);
-    h.get_by_label_contains("line 2 of 01-010 is @nana's now");
+    // A toast shows from its second frame, which a slow machine can take a while to get to.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label_contains("line 2 of 01-010 is @nana's now")
+        .is_some()));
     assert_eq!(p.shot(R).unwrap().lines[1].audio, None);
 }
 
