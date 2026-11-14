@@ -113,6 +113,105 @@ fn an_anchor_s_label_goes_with_it() {
 }
 
 #[test]
+fn an_element_is_deleted_off_its_shots() {
+    let (dir, p) = new_project();
+    p.add_element(Kind::Cast, "Paka", None, "").unwrap();
+    p.add_element(Kind::Cast, "Mali", None, "").unwrap();
+    let img = dir.path().join("face.png");
+    fs::write(&img, b"png").unwrap();
+    let a = p.add_anchor("paka", &img).unwrap();
+    p.add_chapter("One").unwrap();
+    let mut s = Shot {
+        prompt: "@paka and @mali".into(),
+        ..Default::default()
+    };
+    s.leave_out.push(p.rel(&a));
+    let r = p.add_shot("1", None, s).unwrap();
+    assert_eq!(p.shots_naming("@paka").unwrap(), vec![r]);
+
+    p.remove_element("paka").unwrap();
+    assert!(p.find_element("paka").unwrap().is_none());
+    assert!(!a.exists());
+    let s = p.shot(r).unwrap();
+    assert_eq!(s.elements, vec!["mali".to_string()]);
+    assert!(s.leave_out.is_empty());
+    assert!(p.shots_naming("paka").unwrap().is_empty());
+}
+
+#[test]
+fn an_element_changes_kind_with_its_anchors() {
+    let (dir, p) = new_project();
+    p.add_element(Kind::Cast, "Lamp", None, "").unwrap();
+    p.set_voice(
+        "lamp",
+        shotline_core::Voice {
+            plugin: "x".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let img = dir.path().join("lamp.png");
+    fs::write(&img, b"png").unwrap();
+    let a = p.add_anchor("lamp", &img).unwrap();
+    p.add_chapter("One").unwrap();
+    let r = p
+        .add_shot(
+            "1",
+            None,
+            Shot {
+                prompt: "@lamp".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut s = p.shot(r).unwrap();
+    s.anchor_notes.insert(p.rel(&a), "lit".into());
+    p.save_shot(r, &s).unwrap();
+
+    let el = p.set_kind("lamp", Kind::Prop).unwrap();
+    assert_eq!(el.kind, Kind::Prop);
+    assert!(el.voice.is_none());
+    assert!(!a.exists());
+    assert!(!dir.path().join("elements/cast/lamp.toml").exists());
+    assert_eq!(p.element("lamp").unwrap().kind, Kind::Prop);
+    let moved = dir.path().join("elements/props/lamp/01.png");
+    assert!(moved.exists());
+    let s = p.shot(r).unwrap();
+    assert_eq!(
+        s.anchor_notes
+            .get("elements/props/lamp/01.png")
+            .map(String::as_str),
+        Some("lit")
+    );
+}
+
+#[test]
+fn anchors_swap_with_their_labels() {
+    let (dir, p) = new_project();
+    p.add_element(Kind::Cast, "Paka", None, "").unwrap();
+    let (png, jpg) = (dir.path().join("a.png"), dir.path().join("b.jpg"));
+    fs::write(&png, b"front").unwrap();
+    fs::write(&jpg, b"side").unwrap();
+    p.add_anchor("paka", &png).unwrap();
+    p.add_anchor("paka", &jpg).unwrap();
+    let mut el = p.element("paka").unwrap();
+    el.labels.insert("01.png".into(), "front".into());
+    p.save_element(&el).unwrap();
+
+    p.swap_anchors("paka", 0, 1).unwrap();
+    let el = p.element("paka").unwrap();
+    let list = p.anchors(&el).unwrap();
+    let names: Vec<_> = list
+        .iter()
+        .map(|a| a.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["01.jpg", "02.png"]);
+    assert_eq!(fs::read(&list[0]).unwrap(), b"side");
+    assert_eq!(el.label(&list[1]), Some("front"));
+    assert!(p.swap_anchors("paka", 1, 2).is_err());
+}
+
+#[test]
 fn budgets_are_set_and_cleared() {
     let (dir, mut p) = new_project();
     assert_eq!(p.config.budget.per_day, Some(10.0));

@@ -76,38 +76,48 @@ pub(crate) fn dropdown(
                             let (rect, _) = ui
                                 .allocate_exact_size(egui::vec2(44.0, 28.0), egui::Sense::hover());
                             grouped::letterbox(ui, thumbs, &e.path, &e.name, rect);
-                            // Throw out at the right edge; the name takes what's left.
+                            // ⋯ at the right edge, then Throw out once it's asked for, so a
+                            // slightly missed click doesn't throw anything out.
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if let Some(id) = &e.made {
-                                        let rm = ui
-                                            .add_enabled_ui(e.used.is_none(), |ui| {
-                                                crate::delete_button(
-                                                    ui,
-                                                    &format!("Throw out {}", e.name),
-                                                )
-                                            })
-                                            .inner;
-                                        if let Some(at) = &e.used {
-                                            ui.label(
-                                                egui::RichText::new("in use")
-                                                    .small()
-                                                    .color(crate::theme::DUST),
-                                            )
-                                            .on_hover_text(format!("it's {at}"));
+                                        let armed_id = egui::Id::unique(("throw out", id));
+                                        let armed = ui.data(|d| d.get_temp::<bool>(armed_id))
+                                            .unwrap_or(false);
+                                        let more = crate::kit::icon_button(
+                                            ui,
+                                            crate::icon::MORE,
+                                            &format!("More for {}", e.name),
+                                        )
+                                        .on_hover_text(if armed { "never mind" } else { "more" });
+                                        if more.clicked() {
+                                            ui.data_mut(|d| d.insert_temp(armed_id, !armed));
                                         }
-                                        if rm
-                                            .on_hover_text(
-                                                "off this list; what it cost stays in the ledger",
-                                            )
-                                            .on_disabled_hover_text(format!(
-                                                "it's {}; take it off there first",
-                                                e.used.as_deref().unwrap_or_default()
-                                            ))
-                                            .clicked()
-                                        {
-                                            out = Some(Browsed::Forget(id.clone()));
+                                        if armed {
+                                            match &e.used {
+                                                Some(at) => {
+                                                    ui.label(
+                                                        egui::RichText::new("in use")
+                                                            .small()
+                                                            .color(crate::theme::DUST),
+                                                    )
+                                                    .on_hover_text(format!(
+                                                        "it's {at}; take it off there to throw it out"
+                                                    ));
+                                                }
+                                                None => {
+                                                    if crate::kit::danger_button(ui, "Throw out")
+                                                    .on_hover_text(
+                                                        "off this list; what it cost stays in the ledger",
+                                                    )
+                                                    .clicked()
+                                                    {
+                                                        ui.data_mut(|d| d.remove::<bool>(armed_id));
+                                                        out = Some(Browsed::Forget(id.clone()));
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     let room = ui.available_width();

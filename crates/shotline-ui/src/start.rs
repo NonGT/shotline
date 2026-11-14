@@ -332,6 +332,12 @@ impl Shell {
         {
             self.preferences(None);
         }
+        if let Screen::Film(app) = &mut self.screen
+            && std::mem::take(&mut app.wants_format)
+        {
+            self.preferences(None);
+            self.prefs = self.prefs.take().map(|p| p.at(crate::prefs::Page::Format));
+        }
         self.prefs_window(ui);
         self.leave_dialog(ui);
         let title = title(self.film().map(|a| &a.project));
@@ -345,7 +351,7 @@ impl Shell {
     /// Opens Preferences, at `plugin`'s page if given.
     fn preferences(&mut self, plugin: Option<&str>) {
         let film = match &self.screen {
-            Screen::Film(app) => Some(&app.project.config),
+            Screen::Film(app) => Some((&app.project.config, app.project.format(), app.film.made)),
             Screen::Start(_) => None,
         };
         self.prefs = Some(Prefs::new(&self.user_dir, self.host.as_ref(), film, plugin));

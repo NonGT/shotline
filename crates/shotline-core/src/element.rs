@@ -6,7 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::invalid;
-use crate::{Error, Project, Result, fsx, handle, slug};
+use crate::{Error, Project, Result, ShotRef, fsx, handle, slug};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -252,6 +252,139 @@ impl Project {
             && el.labels.remove(name).is_some()
         {
             self.save_element(&el)?;
+        }
+        Ok(())
+    }
+
+    /// Shots that send the element or give it lines.
+    pub fn shots_naming(&self, handle: &str) -> Result<Vec<ShotRef>> {
+        let handle = handle.trim_start_matches('@');
+        Ok(self
+            .shots(None)?
+            .into_iter()
+            .filter(|(_, s)| {
+                s.elements.iter().any(|h| h == handle) || s.lines.iter().any(|l| l.who == handle)
+            })
+            .map(|(r, _)| r)
+            .collect())
+    }
+
+    /// Deletes an element with its anchors and takes it off the shots that send it. Lines it
+    /// speaks stay, without a voice.
+    pub fn remove_element(&self, handle: &str) -> Result<Element> {
+        let el = self.element(handle)?;
+        let dir = self.anchor_dir(&el);
+        let under = format!("{}/", self.rel(&dir));
+        for (r, mut s) in self.shots(None)? {
+            let was = s.clone();
+            s.elements.retain(|h| *h != el.handle);
+            s.leave_out.retain(|p| !p.starts_with(&under));
+            s.anchor_notes.retain(|p, _| !p.starts_with(&under));
+            if s != was {
+                self.save_shot(r, &s)?;
+            }
+        }
+        if dir.exists() {
+            fsx::remove_dir(&dir)?;
+        }
+        fsx::remove(&self.element_file(el.kind, &el.handle))?;
+        Ok(el)
+    }
+
+    /// Moves an element to another kind, anchors and all. Only cast keep a voice.
+    pub fn set_kind(&self, handle: &str, kind: Kind) -> Result<Element> {
+        let mut el = self.element(handle)?;
+        if el.kind == kind {
+            return Ok(el);
+        }
+        let (file, dir) = (self.element_file(el.kind, &el.handle), self.anchor_dir(&el));
+        let from = format!("{}/", self.rel(&dir));
+        el.kind = kind;
+        if kind != Kind::Cast {
+            el.voice = None;
+        }
+        let new_dir = self.anchor_dir(&el);
+        let to = format!("{}/", self.rel(&new_dir));
+        if dir.exists() {
+            fsx::rename(&dir, &new_dir)?;
+        }
+        self.save_element(&el)?;
+        fsx::remove(&file)?;
+        self.repoint_anchors(|p| p.strip_prefix(&from).map(|rest| format!("{to}{rest}")))?;
+        Ok(el)
+    }
+
+    /// Swaps anchors `i` and `j`, which sets which is Image 1 in prompts. Labels and what
+    /// shots say about them go along.
+    pub fn swap_anchors(&self, handle: &str, i: usize, j: usize) -> Result<()> {
+        let mut el = self.element(handle)?;
+        let [(a, a_to), (b, b_to)] = self.anchor_swap(&el, i, j)?;
+        if i == j {
+            return Ok(());
+        }
+        let (a, b) = (&a, &b);
+        let held = a.with_extension("swapping");
+        fsx::rename(a, &held)?;
+        fsx::rename(b, &b_to)?;
+        fsx::rename(&held, &a_to)?;
+        let name = |p: &Path| {
+            p.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let (la, lb) = (el.labels.remove(&name(a)), el.labels.remove(&name(b)));
+        if let Some(l) = la {
+            el.labels.insert(name(&a_to), l);
+        }
+        if let Some(l) = lb {
+            el.labels.insert(name(&b_to), l);
+        }
+        self.save_element(&el)?;
+        let moves = [
+            (self.rel(a), self.rel(&a_to)),
+            (self.rel(b), self.rel(&b_to)),
+        ];
+        self.repoint_anchors(|p| moves.iter().find(|(f, _)| f == p).map(|(_, t)| t.clone()))
+    }
+
+    /// Where anchors `i` and `j` go when swapped: each takes the other's number, keeping its
+    /// own extension.
+    pub fn anchor_swap(&self, el: &Element, i: usize, j: usize) -> Result<[(PathBuf, PathBuf); 2]> {
+        let list = self.anchors(el)?;
+        let (Some(a), Some(b)) = (list.get(i), list.get(j)) else {
+            return invalid(format!("@{} has {} anchors", el.handle, list.len()));
+        };
+        let renamed = |x: &Path, y: &Path| {
+            let ext = x.extension().unwrap_or_default().to_string_lossy();
+            let stem = y.file_stem().unwrap_or_default().to_string_lossy();
+            x.with_file_name(format!("{stem}.{ext}"))
+        };
+        let (a_to, b_to) = (renamed(a, b), renamed(b, a));
+        for t in [&a_to, &b_to] {
+            if t.exists() && t != a && t != b {
+                return invalid(format!("{} is in the way", self.rel(t)));
+            }
+        }
+        Ok([(a.clone(), a_to), (b.clone(), b_to)])
+    }
+
+    /// Anchor paths shots keep, left out or with a note, moved where `to` says.
+    fn repoint_anchors(&self, to: impl Fn(&str) -> Option<String>) -> Result<()> {
+        for (r, mut s) in self.shots(None)? {
+            let was = s.clone();
+            for p in &mut s.leave_out {
+                if let Some(n) = to(p) {
+                    *p = n;
+                }
+            }
+            s.anchor_notes = std::mem::take(&mut s.anchor_notes)
+                .into_iter()
+                .map(|(p, n)| (to(&p).unwrap_or(p), n))
+                .collect();
+            if s != was {
+                self.save_shot(r, &s)?;
+            }
         }
         Ok(())
     }

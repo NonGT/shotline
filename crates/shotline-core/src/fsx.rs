@@ -40,6 +40,13 @@ pub fn remove_dir(path: &Path) -> Result<()> {
     fs::remove_dir_all(path).map_err(io(path))
 }
 
+pub fn rename(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        mkdir(parent)?;
+    }
+    fs::rename(from, to).map_err(io(from))
+}
+
 pub fn copy(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {
         mkdir(parent)?;

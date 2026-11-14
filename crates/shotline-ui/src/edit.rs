@@ -260,6 +260,12 @@ pub(crate) enum Action {
     RemoveShot(ShotRef),
     SaveElement(Element),
     AddElement(NewElement),
+    /// Gone with its anchors, and off the shots that send it.
+    RemoveElement(Element),
+    /// Moved to another kind, anchors and all.
+    SetKind(Element, Kind),
+    /// Anchors i and j trade places, which sets which is Image 1.
+    SwapAnchors(Element, usize, usize),
     /// An image file copied in as the element's next anchor.
     AddAnchor(Element, PathBuf),
     RemoveAnchor(Element, PathBuf),
@@ -324,7 +330,11 @@ impl Action {
             Action::RemoveShot(r) => format!("Deleted {r}"),
             Action::AddElement(n) => format!("New {}", n.kind),
             Action::SaveElement(el) => format!("@{}", el.handle),
-            Action::AddAnchor(el, _) | Action::RemoveAnchor(el, _) => {
+            Action::RemoveElement(el) => format!("Deleted @{}", el.handle),
+            Action::SetKind(el, _) => format!("Kind of @{}", el.handle),
+            Action::AddAnchor(el, _)
+            | Action::RemoveAnchor(el, _)
+            | Action::SwapAnchors(el, ..) => {
                 format!("Anchors of @{}", el.handle)
             }
             Action::ForgetImage(_) => "Forgot a made image".into(),
@@ -414,6 +424,41 @@ impl Action {
             }
             Action::SaveElement(el) => vec![p.element_file(el.kind, &el.handle)],
             Action::RemoveAnchor(el, f) => vec![f.clone(), p.element_file(el.kind, &el.handle)],
+            Action::RemoveElement(el) => {
+                let mut out = vec![p.element_file(el.kind, &el.handle)];
+                tree(&p.anchor_dir(el), &mut out);
+                out.extend(naming(p, &el.handle));
+                out
+            }
+            Action::SetKind(el, k) => {
+                let mut out = vec![p.element_file(el.kind, &el.handle)];
+                let dir = p.anchor_dir(el);
+                tree(&dir, &mut out);
+                let moved = Element {
+                    kind: *k,
+                    ..el.clone()
+                };
+                let to = p.anchor_dir(&moved);
+                let there: Vec<PathBuf> = out[1..]
+                    .iter()
+                    .filter_map(|f| f.strip_prefix(&dir).ok().map(|r| to.join(r)))
+                    .collect();
+                out.push(p.element_file(*k, &el.handle));
+                out.extend(there);
+                out.extend(naming(p, &el.handle));
+                out
+            }
+            Action::SwapAnchors(el, i, j) => {
+                let mut out = vec![p.element_file(el.kind, &el.handle)];
+                if let Ok(pairs) = p.anchor_swap(el, *i, *j) {
+                    for (a, b) in pairs {
+                        out.push(a);
+                        out.push(b);
+                    }
+                }
+                out.extend(naming(p, &el.handle));
+                out
+            }
             Action::ForgetImage(id) => p
                 .job(id)
                 .map(|j| p.job_dir(j.id).join("job.toml"))
@@ -561,7 +606,6 @@ impl History {
 pub(crate) struct Texts {
     pub story: String,
     pub style: String,
-    pub format: Format,
 }
 
 impl Form {
@@ -660,7 +704,6 @@ impl App {
         self.texts = Texts {
             story: self.film.story.clone(),
             style: self.film.style.clone(),
-            format: self.project.format(),
         };
         self.timeline_form = self.film.timeline.clone();
         self.element_form = self
@@ -682,9 +725,6 @@ impl App {
         }
         if self.texts.style != self.film.style {
             acts.push(Action::Style(self.texts.style.clone()));
-        }
-        if self.texts.format != self.project.format() {
-            acts.push(Action::Format(self.texts.format.clone()));
         }
         if self.timeline_form != self.film.timeline {
             acts.push(Action::Timeline(self.timeline_form.clone()));
@@ -1087,6 +1127,26 @@ impl App {
                     made: vec![if new_dir { dir } else { dest }],
                 }
             }
+            Action::RemoveElement(el) => {
+                p.remove_element(&el.handle)?;
+                if self.element.as_deref() == Some(el.handle.as_str()) {
+                    self.element = None;
+                }
+                format!("@{} deleted; undo brings it back", el.handle).into()
+            }
+            Action::SetKind(el, k) => {
+                let new = p.set_kind(&el.handle, k)?;
+                let voice = if el.voice.is_some() && new.voice.is_none() {
+                    ", without its voice"
+                } else {
+                    ""
+                };
+                format!("@{} is a {k} now{voice}", el.handle).into()
+            }
+            Action::SwapAnchors(el, i, j) => {
+                p.swap_anchors(&el.handle, i, j)?;
+                format!("@{}'s anchor {} is now {}", el.handle, i + 1, j + 1).into()
+            }
             Action::RemoveAnchor(el, file) => {
                 p.remove_anchor(&el.handle, &file)?;
                 format!("{} taken off @{}", p.rel(&file), el.handle).into()
@@ -1253,10 +1313,27 @@ fn restore(step: &Step, back: bool) -> anyhow::Result<()> {
     if back {
         changes.reverse();
     }
+    // Folders are made before what goes in them, and emptied before they go.
+    changes.sort_by_key(|c| {
+        let depth = c.path.components().count();
+        match c.ends(back).1 {
+            State::Gone => (1, usize::MAX - depth),
+            _ => (0, depth),
+        }
+    });
     for c in changes {
         c.ends(back).1.put(&c.path)?;
     }
     Ok(())
+}
+
+/// The shot files of shots that send or give lines to `handle`.
+fn naming(p: &Project, handle: &str) -> Vec<PathBuf> {
+    p.shots_naming(handle)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|r| p.shot_path(r).ok())
+        .collect()
 }
 
 /// What a new or moved shot made, for undo: its files beside the toml, and its pictures' folder.
