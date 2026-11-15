@@ -41,6 +41,17 @@ pub(crate) struct Cost {
     charges: Vec<Charged>,
     /// Money held for jobs nothing has closed, oldest first.
     held: Vec<Held>,
+    /// Nothing in the ledger yet.
+    empty: bool,
+    /// Limits that are set, with how much of each is used.
+    limits: Vec<Limit>,
+}
+
+struct Limit {
+    name: &'static str,
+    used: f64,
+    limit: f64,
+    currency: String,
 }
 
 struct Held {
@@ -54,6 +65,8 @@ struct Held {
     time: Timestamp,
     model: String,
     held: String,
+    /// In the film's currency.
+    amount: f64,
 }
 
 #[derive(Clone)]
@@ -189,8 +202,11 @@ impl Cost {
                     time: e.time,
                     model: e.model.clone().unwrap_or_else(|| "job".into()),
                     held: format!("{} {}", money(e.amount), e.unit),
+                    amount: e.base,
                 })
                 .collect(),
+            empty: entries.is_empty(),
+            limits: vec![],
         })
     }
 
@@ -244,6 +260,9 @@ pub(crate) struct View {
     pick: Option<usize>,
     all: bool,
     tool: Tool,
+    /// A write to the ledger, asked in a dialog.
+    dialog: Option<Write>,
+    balances: Arc<Mutex<Ask<Vec<Balance>>>>,
     /// The ledger check needs doing again.
     stale: bool,
     verified: Vec<(String, bool, Vec<String>)>,
@@ -260,6 +279,13 @@ enum Tool {
     Verify,
     Rates,
     Reconcile,
+}
+
+/// A plugin's name and what it says is left.
+type Balance = (String, Result<String, String>);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Write {
     Adjust,
     Refund,
     Release,
@@ -329,7 +355,7 @@ impl App {
         if review {
             self.tab = crate::Tab::Cost;
             let v = &mut self.cost_view;
-            v.tool = Tool::Release;
+            v.dialog = Some(Write::Release);
             v.release = Form {
                 job: Some(first),
                 ..Form::default()
@@ -341,67 +367,188 @@ impl App {
     }
 
     pub(crate) fn costs(&mut self, ui: &mut egui::Ui) {
+        let mut go = None;
+        let mut release = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BAY))
             .show(ui, |ui| {
                 page(ui, PAGE, |ui| {
                     let Some(c) = &self.film.cost else {
-                        kit::empty(
-                            ui,
-                            icon::COST,
-                            "Nothing spent yet. Paid jobs show up here, by day and model.",
-                        );
+                        kit::empty(ui, icon::COST, "The ledger can't be read; see the message.");
                         return;
                     };
                     ui.set_max_width(ui.available_width().min(1080.0));
                     let v = &mut self.cost_view;
-                    // Grow the bars again each time the tab is opened.
+                    // Grow the bars again each time the tab is opened, and ask for balances.
                     let frame = ui.ctx().cumulative_frame_nr();
                     if frame > v.last_frame + 1 {
                         v.since = None;
                         v.stale = true;
+                        let names: Vec<String> =
+                            self.plugins.iter().map(|d| d.name.clone()).collect();
+                        if !names.is_empty() {
+                            ask(&v.balances, self.host.clone(), ui.ctx().clone(), move |h| {
+                                Ok(names
+                                    .into_iter()
+                                    .map(|n| {
+                                        let b = h.balance(&n).map_err(|e| format!("{e:#}"));
+                                        (n, b)
+                                    })
+                                    .collect())
+                            });
+                        }
                     }
                     v.last_frame = frame;
 
-                    summary(ui, &c.summary);
+                    let stuck: Vec<usize> = {
+                        let ids = c.stuck(self.project.clock.now());
+                        (0..c.held.len())
+                            .filter(|i| ids.contains(&c.held[*i].job))
+                            .collect()
+                    };
+                    if c.empty {
+                        kit::page_title(ui, "Nothing spent yet", Some("Spent on this film"));
+                        ui.add_space(4.0);
+                        hint(ui, "Paid jobs show up here, by day, model and shot.");
+                    } else if summary(ui, &c.summary, &c.held, &stuck) {
+                        release = stuck.first().copied();
+                    }
                     ui.add_space(theme::GAP);
-                    kit::card(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            kit::card_title(ui, "Spent per day", None);
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    for (s, name) in [
-                                        (Span::All, "All"),
-                                        (Span::Month, "30 days"),
-                                        (Span::Week, "7 days"),
-                                    ] {
-                                        if ui.selectable_label(v.span == s, name).clicked()
-                                            && v.span != s
-                                        {
-                                            v.span = s;
-                                            v.since = None;
+                    accounts(ui, c, v);
+                    if !c.empty {
+                        ui.add_space(theme::GAP);
+                        kit::card(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                kit::card_title(ui, "Spent per day", None);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        for (s, name) in [
+                                            (Span::All, "All"),
+                                            (Span::Month, "30 days"),
+                                            (Span::Week, "7 days"),
+                                        ] {
+                                            if ui.selectable_label(v.span == s, name).clicked()
+                                                && v.span != s
+                                            {
+                                                v.span = s;
+                                                v.since = None;
+                                            }
                                         }
-                                    }
-                                },
-                            );
+                                    },
+                                );
+                            });
+                            ui.add_space(6.0);
+                            let hovered = chart(ui, c, v);
+                            ui.add_space(14.0);
+                            models(ui, c, v, hovered);
                         });
-                        ui.add_space(6.0);
-                        let hovered = chart(ui, c, v);
-                        ui.add_space(14.0);
-                        models(ui, c, v, hovered);
-                    });
-                    ui.add_space(theme::GAP);
-                    kit::card(ui, |ui| by_shot(ui, c));
+                        ui.add_space(theme::GAP);
+                        go = kit::card(ui, |ui| by_shot(ui, c));
+                    }
                     ui.add_space(theme::GAP);
                     kit::card(ui, |ui| self.ledger(ui));
                 });
             });
+        if let Some(i) = release {
+            let v = &mut self.cost_view;
+            v.dialog = Some(Write::Release);
+            v.release = Form {
+                job: Some(i),
+                ..Form::default()
+            };
+        }
+        self.write_dialog(ui.ctx());
+        if let Some(r) = go {
+            self.tab = crate::Tab::Shots;
+            self.open_shot(r);
+        }
     }
 }
 
+/// Each provider's balance, and how much of each limit is used.
+fn accounts(ui: &mut egui::Ui, c: &Cost, v: &View) {
+    kit::card(ui, |ui| {
+        ui.columns(2, |cols| {
+            let ui = &mut cols[0];
+            kit::card_title(ui, "Balances", None);
+            ui.add_space(4.0);
+            busy(ui, &v.balances, "asking each provider", |ui, all| {
+                egui::Grid::new("balances")
+                    .num_columns(2)
+                    .spacing(egui::vec2(18.0, 6.0))
+                    .show(ui, |ui| {
+                        for (name, b) in all {
+                            ui.label(RichText::new(name).color(theme::DUST));
+                            match b {
+                                Ok(left) => {
+                                    ui.label(RichText::new(left).color(theme::PAPER));
+                                }
+                                Err(e) if e.contains("no free way") => {
+                                    ui.weak("can't tell").on_hover_text(e);
+                                }
+                                Err(e) => {
+                                    ui.label(RichText::new("can't check").color(theme::FLAG))
+                                        .on_hover_text(e);
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+            if matches!(*v.balances.lock().unwrap(), Ask::Idle) {
+                hint(ui, "No plugins to ask.");
+            }
+            let ui = &mut cols[1];
+            kit::card_title(ui, "Limits", None);
+            ui.add_space(4.0);
+            if c.limits.is_empty() {
+                hint(
+                    ui,
+                    "No spending limits. Film settings and Preferences set them.",
+                );
+            }
+            for l in &c.limits {
+                let part = (l.used / l.limit).clamp(0.0, 1.0) as f32;
+                let colour = if part >= 0.9 {
+                    theme::FLAG
+                } else if part >= 0.7 {
+                    theme::WARN
+                } else {
+                    theme::TUNGSTEN
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(l.name).color(theme::DUST));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} of {} {}",
+                                money(l.used),
+                                money(l.limit),
+                                l.currency
+                            ))
+                            .color(theme::PAPER),
+                        );
+                    });
+                });
+                let (r, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 6.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().rect_filled(r, 3.0, theme::LINE);
+                let mut done = r;
+                done.set_width(r.width() * part);
+                ui.painter().rect_filled(done, 3.0, colour);
+                ui.add_space(6.0);
+            }
+        });
+    });
+}
+
 /// The total big, then where it went: in the cut (amber, as everywhere), thrown away, other.
-fn summary(ui: &mut egui::Ui, s: &Summary) {
+/// Below it, money held: by jobs still running, and by ones that look stuck. True if Release…
+/// was clicked for those.
+fn summary(ui: &mut egui::Ui, s: &Summary, held: &[Held], stuck: &[usize]) -> bool {
     let cur = &s.currency;
     kit::page_title(
         ui,
@@ -439,15 +586,36 @@ fn summary(ui: &mut egui::Ui, s: &Summary) {
                 });
         }
     });
-    if s.held > 0.0 {
+    let stuck_amount: f64 = stuck.iter().map(|&i| held[i].amount).sum();
+    let running = s.held - stuck_amount;
+    if running > 0.005 {
         ui.label(
             RichText::new(format!(
                 "{} {cur} held for jobs still running",
-                money(s.held)
+                money(running)
             ))
             .color(theme::PAPER),
         );
     }
+    let mut release = false;
+    if !stuck.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} {cur} held by {} stuck",
+                    money(stuck_amount),
+                    if stuck.len() == 1 {
+                        "a job that looks".to_string()
+                    } else {
+                        format!("{} jobs that look", stuck.len())
+                    }
+                ))
+                .color(theme::WARN),
+            );
+            release = ui.button("Release…").clicked();
+        });
+    }
+    release
 }
 
 /// Stacked bars, one per day, growing in from the left. Returns the model under the pointer.
@@ -707,9 +875,11 @@ fn models(ui: &mut egui::Ui, c: &Cost, v: &mut View, hovered: Option<usize>) {
     }
 }
 
-fn by_shot(ui: &mut egui::Ui, c: &Cost) {
+/// Spent per shot; a click on one opens it.
+fn by_shot(ui: &mut egui::Ui, c: &Cost) -> Option<shotline_core::ShotRef> {
     kit::card_title(ui, "Per shot", None);
     ui.add_space(4.0);
+    let mut go = None;
     egui::Grid::new("by shot")
         .striped(true)
         .num_columns(3)
@@ -720,16 +890,26 @@ fn by_shot(ui: &mut egui::Ui, c: &Cost) {
             ui.weak("Jobs");
             ui.end_row();
             for r in &c.by_shot {
-                ui.label(if r.key == "-" {
-                    "outside shots"
-                } else {
-                    &r.key
-                });
+                match r.key.parse::<shotline_core::ShotRef>() {
+                    Ok(shot) => {
+                        if ui.link(&r.key).on_hover_text("open the shot").clicked() {
+                            go = Some(shot);
+                        }
+                    }
+                    Err(_) => {
+                        ui.label(if r.key == "-" {
+                            "outside shots"
+                        } else {
+                            &r.key
+                        });
+                    }
+                }
                 ui.label(money(r.spent));
                 ui.label(r.jobs.to_string());
                 ui.end_row();
             }
         });
+    go
 }
 
 /// Loads the film's spending, or None if there's nothing yet.
@@ -740,30 +920,94 @@ pub(crate) fn load(
     let user = shotline_core::UserConfig::load(user_dir)?;
     let b = p.books(user_dir, &user, &[])?;
     let entries = b.ledger.entries()?;
-    if entries.is_empty() {
-        return Ok(None);
-    }
     let s = report::summary(&entries, &b.currency, &b.rates, &p.selected_take_ids()?)?;
     let rows = report::group(&entries, By::Shot, &b.currency, &b.rates, &b.tz)?;
     let held = p.held(&b)?;
-    Ok(Some(Cost::new(
-        held,
-        &entries,
-        s,
-        rows,
-        &b.rates,
-        &b.tz,
-        p.clock.now(),
-    )?))
+    let now = p.clock.now();
+    let mut c = Cost::new(held, &entries, s, rows, &b.rates, &b.tz, now)?;
+    let today = now.to_zoned(b.tz.clone()).date();
+    let same_day = |e: &Entry| e.time.to_zoned(b.tz.clone()).date() == today;
+    let mut limit = |name, limit: Option<f64>, used: f64, currency: &str| {
+        if let Some(limit) = limit.filter(|l| *l > 0.0) {
+            c.limits.push(Limit {
+                name,
+                used,
+                limit,
+                currency: currency.to_string(),
+            });
+        }
+    };
+    use shotline_core::ledger::exposure;
+    limit(
+        "Today, this film",
+        b.budgets.per_day,
+        exposure(&entries, same_day),
+        &b.currency,
+    );
+    limit(
+        "This film in all",
+        b.budgets.total,
+        exposure(&entries, |_| true),
+        &b.currency,
+    );
+    if let Some(g) = &b.global {
+        let ges = g.ledger.entries()?;
+        limit(
+            "Today, all films",
+            g.per_day,
+            exposure(&ges, same_day),
+            &g.currency,
+        );
+    }
+    Ok(Some(c))
 }
 
 impl App {
-    /// Checks on the books, and corrections to them.
+    /// Checks on the books; corrections to them go through a dialog.
     fn ledger(&mut self, ui: &mut egui::Ui) {
         let Some(c) = &self.film.cost else { return };
-        kit::card_title(ui, "Ledger", None);
-        ui.add_space(4.0);
         let v = &mut self.cost_view;
+        ui.horizontal(|ui| {
+            kit::card_title(ui, "Ledger", None);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                for (w, name, tip, can) in [
+                    (
+                        Write::Release,
+                        "Release…",
+                        "let go of money held for a job that will never finish",
+                        !c.held.is_empty(),
+                    ),
+                    (
+                        Write::Refund,
+                        "Refund…",
+                        "record money back for a job",
+                        !c.charges.is_empty(),
+                    ),
+                    (
+                        Write::Adjust,
+                        "Adjust…",
+                        "record a fee, or a promo credit as a negative",
+                        true,
+                    ),
+                ] {
+                    if ui
+                        .add_enabled(can, egui::Button::new(name))
+                        .on_hover_text(tip)
+                        .on_disabled_hover_text(match w {
+                            Write::Release => "nothing is held",
+                            _ => "no charged jobs",
+                        })
+                        .clicked()
+                    {
+                        v.dialog = Some(w);
+                        if w == Write::Adjust && v.adjust.unit.is_empty() {
+                            v.adjust.unit = c.units[0].clone();
+                        }
+                    }
+                }
+            });
+        });
+        ui.add_space(4.0);
         let mut open = v.tool;
         ui.horizontal(|ui| {
             for (t, name, tip) in [
@@ -781,17 +1025,6 @@ impl App {
                     Tool::Reconcile,
                     "Compare with providers",
                     "the ledger against what providers say they charged; free",
-                ),
-                (
-                    Tool::Adjust,
-                    "Adjust…",
-                    "record a fee, or a promo credit as a negative",
-                ),
-                (Tool::Refund, "Refund…", "record money back for a job"),
-                (
-                    Tool::Release,
-                    "Release…",
-                    "let go of money held for a job that will never finish",
                 ),
             ] {
                 if ui
@@ -816,12 +1049,10 @@ impl App {
             match open {
                 Tool::Rates => ask(&v.rates, host, ctx, move |h| h.rates(&film)),
                 Tool::Reconcile => ask(&v.checks, host, ctx, move |h| h.reconcile(&film)),
-                Tool::Adjust if v.adjust.unit.is_empty() => v.adjust.unit = c.units[0].clone(),
-                _ => {}
+                Tool::Verify => {}
             }
         }
         ui.add_space(6.0);
-        let mut book = false;
         egui::Frame::new()
             .stroke(egui::Stroke::new(1.0, theme::LINE))
             .corner_radius(theme::R_ROW)
@@ -836,30 +1067,66 @@ impl App {
                     }
                     Tool::Rates => rates(ui, &v.rates),
                     Tool::Reconcile => checks(ui, &v.checks),
-                    Tool::Adjust => book = adjust(ui, &mut v.adjust, &c.units),
-                    Tool::Refund => book = refund(ui, &mut v.refund, &c.charges),
-                    Tool::Release => book = release(ui, &mut v.release, &c.held),
                 }
             });
-        if book {
-            self.book(open);
+    }
+
+    /// Adjust, Refund or Release, with what it will write before it's written.
+    fn write_dialog(&mut self, ctx: &egui::Context) {
+        let Some(w) = self.cost_view.dialog else {
+            return;
+        };
+        let Some(c) = &self.film.cost else { return };
+        let v = &mut self.cost_view;
+        let (mut go, mut cancel) = (false, false);
+        let modal = crate::modal(ctx, "ledger write", |ui| {
+            ui.set_width(kit::modal_width(ctx, 1.0, 520.0, 520.0));
+            ui.heading(match w {
+                Write::Adjust => "Record an adjustment",
+                Write::Refund => "Record a refund",
+                Write::Release => "Release held money",
+            });
+            ui.add_space(10.0);
+            let (main, what) = match w {
+                Write::Adjust => ("Record adjustment", adjust(ui, &mut v.adjust, &c.units)),
+                Write::Refund => ("Record refund", refund(ui, &mut v.refund, &c.charges)),
+                Write::Release => ("Release", release(ui, &mut v.release, &c.held)),
+            };
+            ui.add_space(10.0);
+            if let Some(what) = &what {
+                egui::Frame::new()
+                    .fill(theme::RAISED)
+                    .corner_radius(theme::R_ROW)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(RichText::new(what).color(theme::PAPER));
+                    });
+                ui.add_space(14.0);
+            }
+            (go, cancel) = kit::footer(ui, main, kit::Main::Primary, what.is_some(), "Cancel");
+        });
+        if go {
+            self.book(w);
+        } else if cancel || modal.should_close() {
+            self.cost_view.dialog = None;
         }
     }
 
     /// Writes the adjustment or refund in the form to the ledger.
-    fn book(&mut self, t: Tool) {
+    fn book(&mut self, t: Write) {
         let Some(c) = &self.film.cost else { return };
         let v = &self.cost_view;
         let done = (|| -> anyhow::Result<String> {
             let user = shotline_core::UserConfig::load(&self.user_dir)?;
             let b: Books = self.project.books(&self.user_dir, &user, &[])?;
             let now = self.project.clock.now();
-            Ok(if t == Tool::Adjust {
+            Ok(if t == Write::Adjust {
                 let f = &v.adjust;
                 let q = quote(f.amount.trim().parse()?, &f.unit);
                 let e = b.adjust(now, &q, f.note.trim())?;
                 format!("adjusted {} {}", money(e.base), e.base_currency)
-            } else if t == Tool::Release {
+            } else if t == Write::Release {
                 let f = &v.release;
                 let h = &c.held[f.job.unwrap_or_default()];
                 self.project.release_held(&b, &h.job, &f.note, f.sure)?;
@@ -878,6 +1145,7 @@ impl App {
                 v.adjust = Form::default();
                 v.refund = Form::default();
                 v.release = Form::default();
+                v.dialog = None;
                 v.since = None;
                 v.stale = true;
                 self.reload();
@@ -1027,15 +1295,14 @@ fn checks(ui: &mut egui::Ui, slot: &Arc<Mutex<Ask<Vec<Check>>>>) {
     );
 }
 
-/// The adjustment form. True once it's to be booked.
-fn adjust(ui: &mut egui::Ui, f: &mut Form, units: &[String]) -> bool {
+/// The adjustment form, and what it will write once it's filled in.
+fn adjust(ui: &mut egui::Ui, f: &mut Form, units: &[String]) -> Option<String> {
     hint(
         ui,
         "A fee the jobs didn't show, or a promo credit as a negative. The ledger only grows: to \
          take one back, record the opposite.",
     );
     ui.add_space(6.0);
-    let mut go = false;
     egui::Grid::new("adjust")
         .num_columns(2)
         .spacing(egui::vec2(12.0, 8.0))
@@ -1067,30 +1334,30 @@ fn adjust(ui: &mut egui::Ui, f: &mut Form, units: &[String]) -> bool {
             )
             .labelled_by(l.id);
             ui.end_row();
-            ui.label("");
-            let amount = f.amount.trim().parse::<f64>().ok().filter(|a| *a != 0.0);
-            let ok = amount.is_some() && !f.note.trim().is_empty();
-            go = ui
-                .add_enabled(ok, egui::Button::new("Record adjustment"))
-                .on_disabled_hover_text("an amount other than 0, and a note")
-                .clicked();
-            ui.end_row();
         });
-    go
+    let amount = f.amount.trim().parse::<f64>().ok().filter(|a| *a != 0.0)?;
+    let note = f.note.trim();
+    if note.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Adds {} {} to this film's ledger, noted as \"{note}\".",
+        money(amount),
+        f.unit
+    ))
 }
 
-/// The refund form. True once it's to be booked.
-fn refund(ui: &mut egui::Ui, f: &mut Form, charges: &[Charged]) -> bool {
+/// The refund form, and what it will write once it's filled in.
+fn refund(ui: &mut egui::Ui, f: &mut Form, charges: &[Charged]) -> Option<String> {
     if charges.is_empty() {
         hint(ui, "No charged jobs to refund.");
-        return false;
+        return None;
     }
     hint(
         ui,
         "Money a provider gave back for a job, e.g. one that failed but was charged.",
     );
     ui.add_space(6.0);
-    let mut go = false;
     egui::Grid::new("refund")
         .num_columns(2)
         .spacing(egui::vec2(12.0, 8.0))
@@ -1134,22 +1401,22 @@ fn refund(ui: &mut egui::Ui, f: &mut Form, charges: &[Charged]) -> bool {
             )
             .labelled_by(l.id);
             ui.end_row();
-            ui.label("");
-            let ok = f.job.is_some() && f.amount.trim().parse::<f64>().is_ok_and(|a| a > 0.0);
-            go = ui
-                .add_enabled(ok, egui::Button::new("Record refund"))
-                .on_disabled_hover_text("a job, and an amount above 0")
-                .clicked();
-            ui.end_row();
         });
-    go
+    let ch = &charges[f.job?];
+    let amount = f.amount.trim().parse::<f64>().ok().filter(|a| *a > 0.0)?;
+    Some(format!(
+        "Records {} {} back for job {}; it counts against what was spent.",
+        money(amount),
+        ch.unit,
+        ch.job
+    ))
 }
 
-/// The release form. True once it's to be booked.
-fn release(ui: &mut egui::Ui, f: &mut Form, held: &[Held]) -> bool {
+/// The release form, and what it will write once it's filled in.
+fn release(ui: &mut egui::Ui, f: &mut Form, held: &[Held]) -> Option<String> {
     if held.is_empty() {
         hint(ui, "Nothing is held.");
-        return false;
+        return None;
     }
     hint(
         ui,
@@ -1158,7 +1425,6 @@ fn release(ui: &mut egui::Ui, f: &mut Form, held: &[Held]) -> bool {
          shows it.",
     );
     ui.add_space(6.0);
-    let mut go = false;
     egui::Grid::new("release")
         .num_columns(2)
         .spacing(egui::vec2(12.0, 8.0))
@@ -1181,13 +1447,20 @@ fn release(ui: &mut egui::Ui, f: &mut Form, held: &[Held]) -> bool {
                 ui.weak("Status");
                 match &h.status {
                     Some(s) if !h.finished => {
-                        ui.label(
-                            RichText::new(format!(
-                                "still {s} as far as its job.toml says; if it is running \
-                                 somewhere, its charge would have nothing to close"
-                            ))
-                            .color(theme::FLAG),
-                        );
+                        ui.vertical(|ui| {
+                            ui.set_max_width(360.0);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(format!(
+                                        "still {s} as far as its job.toml says; if it is \
+                                         running somewhere, its charge would have nothing to \
+                                         close"
+                                    ))
+                                    .color(theme::FLAG),
+                                )
+                                .wrap(),
+                            );
+                        });
                     }
                     Some(s) => {
                         ui.label(s.as_str());
@@ -1211,13 +1484,13 @@ fn release(ui: &mut egui::Ui, f: &mut Form, held: &[Held]) -> bool {
             )
             .labelled_by(l.id);
             ui.end_row();
-            ui.label("");
-            let ok = pick.is_some_and(|h| h.finished || f.sure);
-            go = ui
-                .add_enabled(ok, egui::Button::new("Release"))
-                .on_disabled_hover_text("a job, and for one that hasn't ended, that you're sure")
-                .clicked();
-            ui.end_row();
         });
-    go
+    let h = &held[f.job?];
+    if !(h.finished || f.sure) {
+        return None;
+    }
+    Some(format!(
+        "Lets go of the {} held for this {} job and marks it cancelled. Nothing is spent.",
+        h.held, h.model
+    ))
 }

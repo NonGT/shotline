@@ -418,8 +418,11 @@ impl Host for TestHost {
     }
 
     fn balance(&self, plugin: &str) -> anyhow::Result<String> {
-        assert_eq!(plugin, "elevenlabs");
-        Ok("3.5 USD left".into())
+        match plugin {
+            "elevenlabs" => Ok("3.5 USD left".into()),
+            "fake" => Ok("12.5 USD left".into()),
+            _ => anyhow::bail!("{plugin} has no free way to check its key"),
+        }
     }
 
     fn say_quote(&self, film: &Path, shot: ShotRef, line: usize) -> anyhow::Result<String> {
@@ -6992,4 +6995,157 @@ fn desktop_look() {
         .click();
     h.run_steps(2);
     snap_shell(&mut h, "desktop-film-settings");
+}
+
+#[test]
+fn cost_page_reads_and_asks_before_writing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = film(tmp.path());
+    let mut b = p.config.budget.clone();
+    b.total = Some(5.0);
+    p.set_budget(&b).unwrap();
+    let ledger = p.root.join(".shotline/ledger.jsonl");
+    let lines = || std::fs::read_to_string(&ledger).unwrap().lines().count();
+    let before = lines();
+    let mut voices = fal_video();
+    voices.push(Description {
+        name: "elevenlabs".into(),
+        ..voices[0].clone()
+    });
+    let mut app = App::new(p.clone(), tmp.path().join("home"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(voices, Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 2400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cost").click();
+    h.run();
+
+    // Each provider's balance, asked on opening, and the limits that are set.
+    assert!(wait_for(&mut h, |h| h
+        .query_by_label("3.5 USD left")
+        .is_some()));
+    h.get_by_label("can't tell");
+    h.get_by_label("This film in all");
+    h.get_by_label("0.4 of 5 USD");
+
+    // Writing to the ledger goes through a dialog that says what it will write.
+    h.get_by_label("Adjust…").click();
+    h.run();
+    h.get_by_label("Record an adjustment");
+    assert!(
+        h.get_by_label("Record adjustment")
+            .accesskit_node()
+            .is_disabled()
+    );
+    let f = h.get_by_role_and_label(Role::TextInput, "Amount");
+    f.focus();
+    f.type_text("-0.1");
+    h.run();
+    let f = h.get_by_role_and_label(Role::TextInput, "Note");
+    f.focus();
+    f.type_text("promo");
+    h.run();
+    h.run();
+    h.get_by_label("Adds -0.1 USD to this film's ledger, noted as \"promo\".");
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(h.query_by_label("Record an adjustment").is_none());
+    assert_eq!(lines(), before);
+    // Nothing is held, so there's nothing to release.
+    assert!(h.get_by_label("Release…").accesskit_node().is_disabled());
+
+    // A shot in the table opens it.
+    h.get_by_label("01-010").click();
+    h.run();
+    assert_eq!(h.state().tab(), Tab::Shots);
+
+    // With nothing spent the tools are still there.
+    std::fs::remove_file(&ledger).unwrap();
+    let app = App::new(p.clone(), tmp.path().join("home2"))
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 2400.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Cost").click();
+    h.run();
+    h.get_by_label("Nothing spent yet");
+    h.get_by_label("Check the ledger");
+    h.get_by_label("Adjust…");
+}
+
+/// The Cost page with balances, limits and a stuck job, and the Release dialog, to
+/// target/shots: `cargo test -p shotline-ui --test ui cost_look -- --ignored`.
+#[test]
+#[ignore]
+fn cost_look() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut p = film(tmp.path());
+    let home = tmp.path().join("home");
+    let mut b = p.config.budget.clone();
+    b.total = Some(5.0);
+    b.per_day = Some(1.0);
+    p.set_budget(&b).unwrap();
+    let j = p
+        .create_job(Job::new(
+            shotline_core::protocol::Op::ImageGenerate,
+            "fake",
+            "fake/image",
+        ))
+        .unwrap();
+    let books = p
+        .books(&home, &UserConfig::load(&home).unwrap(), &[])
+        .unwrap();
+    let ctx = Context {
+        job: j.id.to_string(),
+        take: None,
+        shot: None,
+        chapter: None,
+        op: "image.generate".into(),
+        plugin: "fake".into(),
+        model: "fake/image".into(),
+    };
+    let quote = Quote {
+        amount: 0.05,
+        unit: "USD".into(),
+        units: None,
+        unit_name: None,
+    };
+    let at = jiff::Timestamp::now() - jiff::SignedDuration::from_mins(30);
+    books.reserve(at, &ctx, &quote).unwrap();
+    let mut voices = fal_video();
+    voices.push(Description {
+        name: "elevenlabs".into(),
+        ..voices[0].clone()
+    });
+    let mut app = App::new(p.clone(), home)
+        .with_viewer(None)
+        .checking_edits_every(EDITS_EVERY)
+        .silent();
+    app.set_plugins(voices, Some(Arc::new(TestHost)));
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1280.0, 1300.0))
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    h.get_by_label("Dismiss").click();
+    h.run();
+    h.get_by_label("Cost").click();
+    h.run();
+    wait_for(&mut h, |h| h.query_by_label("3.5 USD left").is_some());
+    h.run_steps(30);
+    snap(&mut h, "cost-page");
+    h.get_all_by_label("Release…").next().unwrap().click();
+    h.run_steps(4);
+    h.get_by_label("Nothing is running it any more").click();
+    h.run_steps(4);
+    snap(&mut h, "cost-release");
 }

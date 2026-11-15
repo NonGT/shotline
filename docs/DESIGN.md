@@ -829,17 +829,22 @@ Past a few tracks the lanes scroll, and an audio lane folds to a strip when its 
 Zoom with a pinch, the - and + buttons or Shift+Z to fit; ticks go down to single frames and the
 playhead snaps to edits (Alt stops it). Esc or a click on empty space lets go of what's picked.
 
-The Cost tab charts spending per day as stacked bars, one colour per model (last 7 or 30 days,
-or all of it), with a table of models under it (usage, jobs, money) and the spend per shot. Under
-that, the Ledger row does what `cost verify`, `cost rates`, `cost reconcile`, `cost adjust`,
-`cost refund` and `cost release` do; rates and reconcile ask the plugins on another thread.
+The Cost tab is for reading. Under the total it splits money held into jobs still running and
+ones that look stuck (with Release… for those), then shows each plugin's balance (asked each time
+the tab opens, free) next to every limit that's set with how much of it is used. It charts
+spending per day as stacked bars, one colour per model (last 7 or 30 days, or all of it), with a
+table of models under it (usage, jobs, money) and the spend per shot, where a shot opens it. The
+Ledger card does what `cost verify`, `cost rates` and `cost reconcile` do; rates and reconcile ask
+the plugins on another thread. Adjust…, Refund… and Release… (`cost adjust`, `cost refund`,
+`cost release`) are the only things that write, each in a dialog that says what it will write
+before it does. With nothing spent the balances, limits and ledger tools are still there.
 
 A reservation stays open when the process running its job dies (the app was closed mid-take, say).
 `cost release` closes it with nothing spent and marks the job cancelled. It refuses a job whose
 job.toml still says pending or running unless `--sure`, since a job that really is running would
 then find no reservation to charge against. When a film opens, the app shows a strip under the tabs for jobs
 that look like that: still not sent after five minutes, not done after an hour, or done by their
-job.toml yet never closed in the ledger. Review opens the release form on the first one.
+job.toml yet never closed in the ledger. Review opens the release dialog on the first one.
 
 The UI only goes through shotline-core, same as the CLI and MCP, so all three always agree on what's
 in the project folder. Every paid action looks the same: "Make…" (or Shoot a take…, Record…)
