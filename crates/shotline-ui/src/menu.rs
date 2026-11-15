@@ -20,6 +20,8 @@ pub(crate) struct NativeMenu {
     undo: MenuItem,
     redo: MenuItem,
     close: MenuItem,
+    /// Items that need a film open.
+    film_items: Vec<MenuItem>,
     recent: Submenu,
     /// What the menu shows now, to touch it only on change.
     shown: (bool, bool, bool, Vec<PathBuf>),
@@ -89,6 +91,33 @@ impl NativeMenu {
         #[cfg(target_os = "windows")]
         edit.append_items(&[&sep(), &prefs]).expect("edit menu");
 
+        let mut film_items = vec![];
+        let view = Submenu::new("&View", true);
+        for (i, name) in ["&Story", "&Elements", "S&hots", "&Cut", "C&ost"]
+            .iter()
+            .enumerate()
+        {
+            let it = item(name, Some(&format!("CmdOrCtrl+{}", i + 1)));
+            view.append(&it).expect("view menu");
+            commands.push((it.id().clone(), MenuCommand::View(i)));
+            film_items.push(it);
+        }
+        let reload = item("&Reload", Some("F5"));
+        view.append_items(&[&sep(), &reload]).expect("view menu");
+        commands.push((reload.id().clone(), MenuCommand::Reload));
+        film_items.push(reload);
+        let film = Submenu::new("F&ilm", true);
+        for (text, cmd) in [
+            ("&Commit…", MenuCommand::Commit),
+            ("Film &Settings…", MenuCommand::FilmSettings),
+            (crate::REVEAL, MenuCommand::ShowFilm),
+        ] {
+            let it = item(text, None);
+            film.append(&it).expect("film menu");
+            commands.push((it.id().clone(), cmd));
+            film_items.push(it);
+        }
+
         #[cfg(target_os = "macos")]
         let menu = {
             let about = muda::AboutMetadata {
@@ -125,7 +154,8 @@ impl NativeMenu {
                 ],
             )
             .expect("window menu");
-            let menu = Menu::with_items(&[&app, &file, &edit, &window]).expect("menu bar");
+            let menu =
+                Menu::with_items(&[&app, &file, &edit, &view, &film, &window]).expect("menu bar");
             menu.init_for_nsapp();
             window.set_as_windows_menu_for_nsapp();
             menu
@@ -133,7 +163,7 @@ impl NativeMenu {
         #[cfg(target_os = "windows")]
         let menu = {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            let menu = Menu::with_items(&[&file, &edit]).expect("menu bar");
+            let menu = Menu::with_items(&[&file, &edit, &view, &film]).expect("menu bar");
             if let Ok(RawWindowHandle::Win32(h)) = cc.window_handle().map(|h| h.as_raw()) {
                 // SAFETY: eframe's own window, open for as long as the app is.
                 let _ =
@@ -149,6 +179,7 @@ impl NativeMenu {
             undo,
             redo,
             close,
+            film_items,
             recent,
             shown: (true, true, true, vec![PathBuf::new()]),
         };
@@ -178,6 +209,9 @@ impl NativeMenu {
         }
         if self.shown.2 != film {
             self.close.set_enabled(film);
+            for i in &self.film_items {
+                i.set_enabled(film);
+            }
         }
         let dirs: Vec<PathBuf> = recent.iter().map(|(d, _)| d.clone()).collect();
         if self.shown.3 != dirs {

@@ -68,6 +68,8 @@ pub(crate) struct Prefs {
     page: usize,
     /// Which page is open: a plugin's, or one of the film's.
     on: Page,
+    /// Film settings: the open film's pages, and no plugins. Preferences otherwise.
+    for_film: bool,
     /// The film's default models as opened, and as changed; None with no film open.
     models: Option<(Models, Models)>,
     /// By plugin, in the order it lists them.
@@ -98,8 +100,11 @@ pub(crate) struct Prefs {
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Page {
     Plugin,
+    /// Every film's daily limit.
+    Limits,
     Models,
     Format,
+    Options,
     Budget,
 }
 
@@ -161,12 +166,14 @@ impl Prefs {
             None => (None, 0),
         };
         let film = film.map(|(c, ..)| c);
+        let for_film = film.is_some();
         let mut p = Prefs {
             file: dotenv::path(user_dir),
             list: vec![],
             problems: vec![],
             page: 0,
-            on: Page::Plugin,
+            on: if for_film { Page::Format } else { Page::Plugin },
+            for_film,
             models: film.map(|c| {
                 let m: Models = Task::ALL.iter().map(|t| (*t, c.model_set(*t))).collect();
                 (m.clone(), m)
@@ -360,6 +367,30 @@ impl Prefs {
         }
     }
 
+    /// Writes one plugin's changed keys to .env, so a check uses them. False if it couldn't.
+    fn save_keys(&mut self, plugin: &str) -> bool {
+        let Some(keys) = self.keys.get_mut(plugin) else {
+            return true;
+        };
+        for k in keys.iter_mut() {
+            if let Some(value) = k.change() {
+                if let Err(e) = dotenv::set(&self.file, &k.var, value.as_deref()) {
+                    self.note = Some((e.to_string(), true));
+                    return false;
+                }
+                k.saved = k.typed.trim().to_string();
+                if k.source != Source::Environment {
+                    k.source = if k.saved.is_empty() {
+                        Source::Missing
+                    } else {
+                        Source::File
+                    };
+                }
+            }
+        }
+        true
+    }
+
     fn bad(&mut self, e: String) -> bool {
         self.note = Some((e, true));
         false
@@ -386,12 +417,17 @@ impl Prefs {
         let mut done = Done::default();
         let (mut ok, mut cancel) = (false, false);
         let mut check = None;
+        let mut side = Side::None;
         let modal = crate::modal(ui.ctx(), "preferences", |ui| {
             ui.set_width(crate::kit::modal_width(ui.ctx(), 0.8, 720.0, 960.0));
-            ui.heading("Preferences");
+            ui.heading(if self.for_film {
+                "Film settings"
+            } else {
+                "Preferences"
+            });
             ui.add_space(8.0);
             let row = ui.horizontal_top(|ui| {
-                self.side(ui);
+                side = self.side(ui);
                 // Drawn after: a separator in a row grows to whatever height it's given.
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
@@ -405,16 +441,16 @@ impl Prefs {
                             for p in &self.problems {
                                 ui.label(RichText::new(p).color(theme::FLAG));
                             }
-                            if self.on == Page::Models {
-                                self.models_page(ui);
-                            } else if self.on == Page::Format {
-                                self.format_page(ui);
-                            } else if self.on == Page::Budget {
-                                self.budget_page(ui);
-                            } else if self.list.is_empty() {
-                                hint(ui, "No plugins found.");
-                            } else {
-                                check = self.page(ui);
+                            match self.on {
+                                Page::Models => self.models_page(ui),
+                                Page::Format => self.format_page(ui),
+                                Page::Options => self.options_page(ui),
+                                Page::Budget => self.budget_page(ui),
+                                Page::Limits => self.limits_page(ui),
+                                Page::Plugin if self.list.is_empty() => {
+                                    hint(ui, "No plugins found.")
+                                }
+                                Page::Plugin => check = self.page(ui),
                             }
                         });
                 });
@@ -431,16 +467,32 @@ impl Prefs {
                     let c = if *bad { theme::FLAG } else { theme::DUST };
                     ui.label(RichText::new(n).color(c));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ok = ui
-                        .add(egui::Button::new("OK").min_size(egui::vec2(64.0, 0.0)))
-                        .clicked();
-                    cancel = ui.button("Cancel").clicked();
-                });
+                (ok, cancel) =
+                    crate::kit::footer(ui, "OK", crate::kit::Main::Primary, true, "Cancel");
             });
         });
+        // Enter is the question's while it's up.
+        ok &= !self.asking;
+        match side {
+            Side::Again => {
+                self.read(host.as_ref());
+                done.plugins_changed = true;
+            }
+            Side::Folder => {
+                let dir = self.user_dir.join("plugins");
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(e) = crate::reveal(&dir) {
+                    self.note = Some((format!("can't show {}: {e}", dir.display()), true));
+                }
+            }
+            Side::None => {}
+        }
         if let Some(p) = check {
-            self.check(ui.ctx(), host.clone(), &p);
+            // What's typed is what's checked.
+            if self.save_keys(&p) {
+                done.keys_changed = true;
+                self.check(ui.ctx(), host.clone(), &p);
+            }
         }
         done.open = true;
         let mut sure = false;
@@ -471,9 +523,25 @@ impl Prefs {
     }
 
     /// The list of pages, a plugin that wants attention marked.
-    fn side(&mut self, ui: &mut egui::Ui) {
+    fn side(&mut self, ui: &mut egui::Ui) -> Side {
+        let mut out = Side::None;
         ui.vertical(|ui| {
             ui.set_width(170.0);
+            if self.for_film {
+                ui.label(RichText::new("This film").small().color(theme::DUST));
+                ui.add_space(2.0);
+                for (page, name) in [
+                    (Page::Format, "Format"),
+                    (Page::Models, "Default Models"),
+                    (Page::Options, "Model options"),
+                    (Page::Budget, "Budget"),
+                ] {
+                    if side_item(ui, self.on == page, name).clicked() {
+                        self.on = page;
+                    }
+                }
+                return;
+            }
             ui.label(RichText::new("Plugins").small().color(theme::DUST));
             ui.add_space(2.0);
             for (i, p) in self.list.iter().enumerate() {
@@ -499,19 +567,85 @@ impl Prefs {
                     self.on = Page::Plugin;
                 }
             }
-            ui.add_space(12.0);
-            ui.label(RichText::new("This film").small().color(theme::DUST));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if ui
+                    .small_button("Check again")
+                    .on_hover_text("looks for plugins again, on PATH and in your plugins folder")
+                    .clicked()
+                {
+                    out = Side::Again;
+                }
+            });
             ui.add_space(2.0);
-            if side_item(ui, self.on == Page::Models, "Default Models").clicked() {
-                self.on = Page::Models;
-            }
-            if side_item(ui, self.on == Page::Format, "Format").clicked() {
-                self.on = Page::Format;
-            }
-            if side_item(ui, self.on == Page::Budget, "Budget").clicked() {
-                self.on = Page::Budget;
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                if ui
+                    .small_button("Open plugins folder")
+                    .on_hover_text(format!(
+                        "your plugins folder, {}",
+                        self.user_dir.join("plugins").display()
+                    ))
+                    .clicked()
+                {
+                    out = Side::Folder;
+                }
+            });
+            ui.add_space(12.0);
+            ui.label(RichText::new("All films").small().color(theme::DUST));
+            ui.add_space(2.0);
+            if side_item(ui, self.on == Page::Limits, "Spending limit").clicked() {
+                self.on = Page::Limits;
             }
         });
+        out
+    }
+
+    /// Each model's options for this film, plugin by plugin.
+    fn options_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Model options")
+                .font(theme::section())
+                .color(theme::PAPER),
+        );
+        ui.add_space(8.0);
+        let mut any = false;
+        for p in &self.list {
+            let Ok(d) = &p.description else { continue };
+            let with: Vec<&ModelInfo> = d
+                .models
+                .iter()
+                .filter(|m| {
+                    m.params_schema
+                        .as_ref()
+                        .and_then(|s| s.get("properties"))
+                        .and_then(Value::as_object)
+                        .is_some_and(|p| !p.is_empty())
+                })
+                .collect();
+            if with.is_empty() {
+                continue;
+            }
+            any = true;
+            group(
+                ui,
+                &p.name,
+                "This film's, saved in its shotline.toml; a shot's own win over them.",
+                |ui| {
+                    for (i, m) in with.iter().enumerate() {
+                        if i > 0 {
+                            ui.add_space(8.0);
+                        }
+                        let params = self.params.as_mut().map(|(_, now)| now);
+                        model(ui, &p.name, m, params, &mut self.typed);
+                    }
+                },
+            );
+        }
+        if !any {
+            hint(ui, "No installed model has options to set.");
+        }
     }
 
     /// Which model the film uses for each job, with how each is charged.
@@ -606,10 +740,8 @@ impl Prefs {
                 ),
             );
             ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                go = crate::kit::primary_button(ui, None, "Change it").clicked();
-                back = ui.button("Back").clicked();
-            });
+            (go, back) =
+                crate::kit::footer(ui, "Change it", crate::kit::Main::Primary, true, "Back");
         });
         (go, back || modal.should_close())
     }
@@ -637,9 +769,20 @@ impl Prefs {
             }
             None => hint(ui, "Each film has its own; open one to set them."),
         }
+        hint(ui, "The daily limit across all films is in Preferences.");
+    }
+
+    fn limits_page(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Spending limit")
+                .font(theme::section())
+                .color(theme::PAPER),
+        );
+        ui.add_space(8.0);
         let about = format!(
             "Saved in config.toml in your shotline folder, in {}. Stops spending on every film \
-             once a day's total would pass it, since they all draw on the same accounts.",
+             once a day's total would pass it, since they all draw on the same accounts. Each \
+             film's own limits are in its Film settings.",
             self.user_currency
         );
         let (daily, cur) = (&mut self.daily.1, &self.user_currency);
@@ -692,16 +835,23 @@ impl Prefs {
                     ui.horizontal(|ui| {
                         ui.add_space(LABEL + ui.spacing().item_spacing.x);
                         let changed = keys.iter().any(|k| k.change().is_some());
-                        let ready = keys.iter().all(|k| k.source != Source::Missing);
+                        let ready = keys
+                            .iter()
+                            .all(|k| k.source == Source::Environment || !k.typed.trim().is_empty());
                         let running = matches!(checks.get(&p.name), Some(Check::Running));
+                        let (text, about) = if changed {
+                            (
+                                "Save and check",
+                                "saves the key to .env now, then asks the provider for the \
+                                 account's balance; free",
+                            )
+                        } else {
+                            ("Check", "asks the provider for the account's balance; free")
+                        };
                         if ui
-                            .add_enabled(ready && !changed && !running, egui::Button::new("Check"))
-                            .on_hover_text("asks the provider for the account's balance; free")
-                            .on_disabled_hover_text(if changed {
-                                "OK first, to save the key"
-                            } else {
-                                "set the key first"
-                            })
+                            .add_enabled(ready && !running, egui::Button::new(text))
+                            .on_hover_text(about)
+                            .on_disabled_hover_text("paste the key first")
                             .clicked()
                         {
                             check = Some(p.name.clone());
@@ -728,8 +878,8 @@ impl Prefs {
         group(
             ui,
             "Program",
-            "Found in your plugins folder or on PATH; the first one on PATH wins. Keep one to use \
-             it whatever PATH says.",
+            "Found in your plugins folder or on PATH; the first one on PATH is used unless you \
+             pick another.",
             |ui| program(ui, p, &mut self.pins),
         );
         match &p.description {
@@ -740,7 +890,7 @@ impl Prefs {
                 let about = if self.params.is_some() {
                     "This film's options, saved in its shotline.toml; a shot's own win over them."
                 } else {
-                    "Each film keeps its own options; open one to set them."
+                    "Each film keeps its own options, in Film settings."
                 };
                 group(ui, "Models", about, |ui| {
                     for (i, m) in d.models.iter().enumerate() {
@@ -787,6 +937,13 @@ fn param_changes(was: &Params, now: &Params) -> Vec<Action> {
             })
         })
         .collect()
+}
+
+/// What the side list asked for besides a page.
+enum Side {
+    None,
+    Again,
+    Folder,
 }
 
 /// A titled box of settings.
@@ -844,10 +1001,16 @@ fn amount_row(ui: &mut egui::Ui, name: &str, what: &str, text: &mut String, curr
     });
 }
 
-/// One key: its name, a hidden box to type it, and where it's set now.
+/// One key: its name, a hidden box to type it, and where it's set now. One set in the shell
+/// wins over .env, so it's shown as that and can't be typed over here.
 fn key_row(ui: &mut egui::Ui, k: &mut Key) {
     ui.horizontal(|ui| {
         label(ui, &k.var, "");
+        if k.source == Source::Environment {
+            ui.label(RichText::new(format!("set by ${} in your shell", k.var)).color(theme::PAPER))
+                .on_hover_text("it wins over .env; unset it there to keep one here instead");
+            return;
+        }
         let field = ui.add(
             egui::TextEdit::singleline(&mut k.typed)
                 .password(!k.shown)
@@ -879,62 +1042,67 @@ fn key_row(ui: &mut egui::Ui, k: &mut Key) {
     });
 }
 
-/// Where the plugin runs from, and the other copies found.
+/// Where the plugin runs from: built in, its own folder, or a pick between the first one on PATH
+/// and each copy found, kept in the plugins folder on OK.
 fn program(ui: &mut egui::Ui, p: &PluginInfo, pins: &mut BTreeMap<String, Option<PathBuf>>) {
-    if let Some(pin) = pins.get(&p.name).cloned() {
+    let fixed = match &p.runs {
+        Runs::Builtin => Some("built into shotline".to_string()),
+        Runs::Folder(d) => Some(d.display().to_string()),
+        _ => None,
+    };
+    if let Some(place) = fixed {
         ui.horizontal(|ui| {
-            label(ui, "On OK", "");
-            let text = match &pin {
-                Some(e) => format!("keeps {}", e.display()),
-                None => "PATH decides".into(),
-            };
-            ui.label(RichText::new(text).color(theme::PAPER));
-            if ui.small_button("Leave as is").clicked() {
-                pins.remove(&p.name);
-            }
+            label(ui, "Runs from", "");
+            ui.label(RichText::new(place).color(theme::PAPER));
         });
         return;
     }
-    let (place, kept) = match &p.runs {
-        Runs::Builtin => ("built into shotline".to_string(), false),
-        Runs::Path(e) => (e.display().to_string(), false),
-        Runs::Pinned(e) => (e.display().to_string(), true),
-        Runs::Folder(d) => (d.display().to_string(), false),
+    // Every copy known: the one used now, then the ones skipped.
+    let mut copies: Vec<PathBuf> = match &p.runs {
+        Runs::Path(e) | Runs::Pinned(e) => vec![e.clone()],
+        _ => vec![],
     };
+    copies.extend(p.skipped.iter().cloned());
+    let saved: Option<PathBuf> = match &p.runs {
+        Runs::Pinned(e) => Some(e.clone()),
+        _ => None,
+    };
+    let now = pins.get(&p.name).cloned().unwrap_or_else(|| saved.clone());
+    let first = match &p.runs {
+        Runs::Path(e) => format!("First on PATH ({})", e.display()),
+        _ => "First on PATH".to_string(),
+    };
+    let shown = match &now {
+        Some(e) => e.display().to_string(),
+        None => first.clone(),
+    };
+    let mut pick = now.clone();
     ui.horizontal(|ui| {
-        label(ui, "Runs from", "");
-        ui.label(RichText::new(&place).color(theme::PAPER));
-        if kept {
-            ui.label(RichText::new("kept").small().color(theme::PAPER));
-            if ui
-                .small_button("Let PATH decide")
-                .on_hover_text("takes away the saved choice in your plugins folder")
-                .clicked()
-            {
-                pins.insert(p.name.clone(), None);
-            }
-        } else if let Runs::Path(e) = &p.runs
-            && ui
-                .small_button("Keep this one")
-                .on_hover_text(
-                    "saves this choice in your plugins folder, so it's used whatever PATH says",
-                )
-                .clicked()
-        {
-            pins.insert(p.name.clone(), Some(e.clone()));
-        }
+        let l = label(ui, "Runs from", "");
+        egui::ComboBox::from_id_salt(("runs from", &p.name))
+            .selected_text(shown)
+            .width(ui.available_width().min(460.0))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut pick, None, &first);
+                for c in &copies {
+                    ui.selectable_value(&mut pick, Some(c.clone()), c.display().to_string());
+                }
+            })
+            .response
+            .on_hover_text("a pick is kept in your plugins folder, so it's used whatever PATH says")
+            .labelled_by(l.id);
     });
-    for (i, s) in p.skipped.iter().enumerate() {
+    if pick != now {
+        if pick == saved {
+            pins.remove(&p.name);
+        } else {
+            pins.insert(p.name.clone(), pick);
+        }
+    }
+    if pins.contains_key(&p.name) {
         ui.horizontal(|ui| {
-            label(ui, if i == 0 { "Also found, not used" } else { "" }, "");
-            ui.label(RichText::new(s.display().to_string()).color(theme::DUST));
-            if ui
-                .small_button("Use this one")
-                .on_hover_text("keeps it in your plugins folder, so it wins over PATH")
-                .clicked()
-            {
-                pins.insert(p.name.clone(), Some(s.clone()));
-            }
+            ui.add_space(LABEL + ui.spacing().item_spacing.x);
+            ui.label(RichText::new("changes on OK").small().color(theme::PAPER));
         });
     }
 }

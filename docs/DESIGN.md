@@ -53,13 +53,16 @@ If you keep the film folder in git, the `.gitignore` that `init` writes leaves o
 was made, from what, and for how much survives even if the media lives elsewhere.
 
 Keys are never stored in the project, only read from the environment or `~/.config/shotline/.env`.
-The app's Preferences (Cmd+,) has a page per plugin, listed on the left with a dot on one missing
-a key or not answering. A page has the keys it needs, written to that file (mode 600) and checked
-by asking the plugin for its balance, which is free; where its program is, with the copies on PATH
-that aren't used and a button to use one instead; and each model's options for the open film.
-Nothing is written until OK, and Cancel or Escape throws the changes away (Escape asks first). The
-film's options go into shotline.toml as one step that can be undone. Asking for a plugin's keys
-elsewhere, e.g. Keys… under a voice that couldn't be listed, opens Preferences at that plugin.
+The app's Preferences (Cmd+,) holds what isn't any one film's: a page per plugin, listed on the
+left with a dot on one missing a key or not answering, with Check again and Open plugins folder
+under the list, and the spending limit across all films. A plugin's page has the keys it needs,
+written to that file (mode 600) and checked by asking the plugin for its balance, which is free
+(Save and check writes a typed key first); a key set in the shell wins and is shown as that, not
+typed over. Runs from picks between the first copy on PATH and the others found. Nothing else is
+written until OK, and Cancel or Escape throws the changes away (Escape asks first). Asking for a
+plugin's keys elsewhere, e.g. Keys… under a voice that couldn't be listed, opens Preferences at
+that plugin. Film settings (Film menu) has the open film's Format, Default Models, Model options
+and Budget, saved into shotline.toml on OK as one step that can be undone.
 
 ## Shots
 
@@ -175,7 +178,7 @@ model = "claude-haiku-5-5"
 
 The agent can still write prompts itself over MCP; this is for working without one.
 
-Each job can have its own default model, picked in the app under Preferences, Default Models, which
+Each job can have its own default model, picked in the app under Film settings, Default Models, which
 shows how each model is charged (the plugin's `price`, a guide; the quote is still what counts):
 
 ```toml
@@ -650,7 +653,7 @@ Hard stops, in the project currency: `per_job`, `per_take`, `per_chapter`, `per_
 under `[budget]`. Money held by running jobs counts. Every line is also written to
 `~/.config/shotline/spend.jsonl`, and `[budget] per_day` in `~/.config/shotline/config.toml` (in
 that file's `[money] currency`) stops spending across all films, since it's all the same wallet.
-Preferences has a Budget page for both. New films start with `per_take = 2` and `per_day = 10`.
+Film settings has the film's on its Budget page, and Preferences the one across films. New films start with `per_take = 2` and `per_day = 10`.
 
 ### Reports
 
@@ -774,14 +777,18 @@ errors stay until closed, and Activity in the bottom bar lists everything said s
 opened. The Jobs pill in the top bar shows what's being made in the app (takes, lines, bridges,
 sounds, editor changes, renders) with what it costs, and images made out of the app's way; a click
 on one goes to it. Closing the film or quitting while something paid for is being made asks first,
-and with Wait it closes by itself once that's done. Outside a film the app opens on a page to
-make one (with `git init`, like `shotline init` unless `--no-git`) or pick a recent one. File and Edit
-live in the system menu bar on macOS and Windows (muda) and in a menu bar inside the window on
+and with Wait it closes by itself once that's done. Outside a film the app opens on a start page:
+recent films on the left with when each was last opened (one that's gone says so and can be taken
+off the list), New film… (with `git init`, like `shotline init` unless `--no-git`) and Open… on the
+right, and a Setup card saying whether ffmpeg, git and each plugin's keys are there, with a way to
+fix each. Dialogs keep their main button on the right, and Enter presses it. File, Edit, View
+(pages on Cmd+1..5, Reload on F5) and Film (Commit…, Film Settings…, show the folder) live in the
+system menu bar on macOS and Windows (muda) and in a menu bar inside the window on
 Linux, where muda would need GTK; all three send the same commands.
 
 The film's format is the shape, resolution, shot length and video model in shotline.toml. A new
-film picks its shape (9:16 unless chosen); `shotline format` and the Format page under This film
-in Preferences change it later (the Story page shows it, with Change… to go there), as an undo
+film picks its shape (9:16 unless chosen); `shotline format` and the Format page in Film
+settings change it later (the Story page shows it, with Change… to go there), as an undo
 step like any other edit. The video model there is the same one as Video under Default Models.
 The resolutions on offer are the model's own names for them. Takes already made keep the shape
 they were made at, so it says how many shots have one, and OK asks before changing it once any

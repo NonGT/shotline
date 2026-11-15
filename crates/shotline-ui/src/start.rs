@@ -28,6 +28,14 @@ pub enum MenuCommand {
     Paste,
     SelectAll,
     Preferences,
+    /// The open film's format, models and budget.
+    FilmSettings,
+    /// A page, by its place in the sidebar: Story is 0.
+    View(usize),
+    Reload,
+    Commit,
+    /// The film's folder in Finder or Explorer.
+    ShowFilm,
     Quit,
 }
 
@@ -41,7 +49,9 @@ pub struct Shell {
     /// The window title last sent.
     titled: String,
     here: PathBuf,
-    recent: Vec<(PathBuf, String)>,
+    recent: Vec<Recent>,
+    /// What the start page says is set up, worked out when it's first shown.
+    setup: Option<Setup>,
     screen: Screen,
     /// New Film asked for over an open film.
     dialog: Option<Form>,
@@ -100,6 +110,7 @@ impl Shell {
     pub fn new(project: Option<Project>, user_dir: PathBuf, here: &Path) -> Shell {
         let mut shell = Shell {
             recent: recent(&user_dir),
+            setup: None,
             user_dir,
             git: Git::find(),
             plugins: vec![],
@@ -169,12 +180,8 @@ impl Shell {
     pub fn command(&mut self, cmd: MenuCommand) {
         match cmd {
             MenuCommand::NewFilm => {
-                let folder = match &self.screen {
-                    // Next to the film that's open.
-                    Screen::Film(app) => app.project.root.parent().unwrap_or(&self.here),
-                    Screen::Start(_) => return,
-                };
-                self.dialog = Some(Form::new(folder));
+                // Next to the film that's open.
+                self.dialog = Some(Form::new(&self.folder()));
             }
             MenuCommand::OpenFilm => {
                 if let Some(d) = rfd::FileDialog::new()
@@ -189,6 +196,29 @@ impl Shell {
             MenuCommand::Quit if self.holds() => self.leaving = Some(Leave::Quit),
             MenuCommand::CloseFilm => self.close_film(),
             MenuCommand::Preferences => self.preferences(None),
+            MenuCommand::FilmSettings => self.film_settings(None),
+            MenuCommand::View(n) => {
+                if let Screen::Film(app) = &mut self.screen {
+                    app.view(n);
+                }
+            }
+            MenuCommand::Reload => {
+                if let Screen::Film(app) = &mut self.screen {
+                    app.read_again();
+                }
+            }
+            MenuCommand::Commit => {
+                if let Screen::Film(app) = &mut self.screen {
+                    app.ask_commit();
+                }
+            }
+            MenuCommand::ShowFilm => {
+                if let Screen::Film(app) = &mut self.screen
+                    && let Err(e) = crate::reveal(&app.project.root)
+                {
+                    app.error(format!("can't show the film's folder: {e}"));
+                }
+            }
             MenuCommand::Cut
             | MenuCommand::Copy
             | MenuCommand::Paste
@@ -204,6 +234,46 @@ impl Shell {
                 }
             }
         }
+    }
+
+    fn start_do(&mut self, ctx: &egui::Context, d: StartDo) {
+        match d {
+            StartDo::Open(dir) => self.go(Opened::Existing(dir)),
+            StartDo::New => self.command(MenuCommand::NewFilm),
+            StartDo::Choose => self.command(MenuCommand::OpenFilm),
+            StartDo::Forget(dir) => {
+                forget(&self.user_dir, &dir);
+                self.recent = recent(&self.user_dir);
+            }
+            StartDo::Reveal(dir) => {
+                let _ = crate::reveal(&dir);
+            }
+            StartDo::Keys(plugin) => self.preferences(Some(&plugin)),
+            StartDo::Recheck => self.setup = None,
+            StartDo::Url(u) => ctx.open_url(egui::OpenUrl::new_tab(u)),
+        }
+    }
+
+    fn check_setup(&self) -> Setup {
+        let (list, _) = self.host.as_ref().map(|h| h.plugins()).unwrap_or_default();
+        Setup {
+            ffmpeg: shotline_media::Ffmpeg::find().is_ok(),
+            git: self.git.is_some(),
+            keys: list
+                .iter()
+                .filter(|p| !p.missing.is_empty())
+                .map(|p| (p.name.clone(), p.missing.clone()))
+                .collect(),
+            plugins: list.len(),
+        }
+    }
+
+    /// The recent films that are still there, for the menus.
+    fn found(&self) -> Vec<(PathBuf, String)> {
+        self.recent
+            .iter()
+            .filter_map(|r| Some((r.dir.clone(), r.name.clone()?)))
+            .collect()
     }
 
     /// Whether the open film has paid work going on that closing it would lose.
@@ -256,11 +326,8 @@ impl Shell {
                      once it's done.",
                 );
                 ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    wait = crate::kit::primary_button(ui, None, "Wait").clicked();
-                    let anyway = if quit { "Quit anyway" } else { "Close anyway" };
-                    go = crate::kit::danger_button(ui, anyway).clicked();
-                });
+                let anyway = if quit { "Quit anyway" } else { "Close anyway" };
+                (go, wait) = crate::kit::footer(ui, anyway, crate::kit::Main::Danger, true, "Wait");
             });
             wait |= modal.should_close();
         }
@@ -305,22 +372,30 @@ impl Shell {
             ui.ctx().request_repaint();
         }
         let has_git = self.git.is_some();
-        let opened = match &mut self.screen {
-            Screen::Film(app) => {
-                app.show(ui);
-                let (opened, closed) = match &mut self.dialog {
-                    Some(f) => new_film_dialog(ui, f, has_git),
-                    None => (None, false),
-                };
-                if closed {
-                    self.dialog = None;
+        let mut asked = None;
+        match &mut self.screen {
+            Screen::Film(app) => app.show(ui),
+            Screen::Start(_) => {
+                if self.setup.is_none() {
+                    self.setup = Some(self.check_setup());
                 }
-                opened
+                if let Some(setup) = &self.setup {
+                    asked = start_page(ui, &self.recent, setup);
+                }
             }
-            Screen::Start(form) => start_page(ui, form, has_git, &self.recent),
+        }
+        let (opened, closed) = match &mut self.dialog {
+            Some(f) => new_film_dialog(ui, f, has_git),
+            None => (None, false),
         };
+        if closed {
+            self.dialog = None;
+        }
         if let Some(o) = opened {
             self.go(o);
+        }
+        if let Some(d) = asked {
+            self.start_do(ui.ctx(), d);
         }
         if let Screen::Film(app) = &mut self.screen
             && let Some(plugin) = app.wants_keys.take()
@@ -335,8 +410,7 @@ impl Shell {
         if let Screen::Film(app) = &mut self.screen
             && std::mem::take(&mut app.wants_format)
         {
-            self.preferences(None);
-            self.prefs = self.prefs.take().map(|p| p.at(crate::prefs::Page::Format));
+            self.film_settings(Some(crate::prefs::Page::Format));
         }
         self.prefs_window(ui);
         self.leave_dialog(ui);
@@ -350,11 +424,21 @@ impl Shell {
 
     /// Opens Preferences, at `plugin`'s page if given.
     fn preferences(&mut self, plugin: Option<&str>) {
-        let film = match &self.screen {
-            Screen::Film(app) => Some((&app.project.config, app.project.format(), app.film.made)),
-            Screen::Start(_) => None,
+        self.prefs = Some(Prefs::new(&self.user_dir, self.host.as_ref(), None, plugin));
+    }
+
+    /// The open film's own settings, at `page` if given.
+    fn film_settings(&mut self, page: Option<crate::prefs::Page>) {
+        let Screen::Film(app) = &mut self.screen else {
+            return;
         };
-        self.prefs = Some(Prefs::new(&self.user_dir, self.host.as_ref(), film, plugin));
+        app.flush();
+        let film = Some((&app.project.config, app.project.format(), app.film.made));
+        let p = Prefs::new(&self.user_dir, self.host.as_ref(), film, None);
+        self.prefs = Some(match page {
+            Some(page) => p.at(page),
+            None => p,
+        });
     }
 
     fn prefs_window(&mut self, ui: &mut egui::Ui) {
@@ -405,6 +489,17 @@ impl Shell {
             MenuCommand::CloseFilm
         } else if key(egui::Key::Comma) {
             MenuCommand::Preferences
+        } else if let Some(n) = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+        ]
+        .into_iter()
+        .position(key)
+        {
+            MenuCommand::View(n)
         } else if self.window_menu && key(egui::Key::Q) {
             MenuCommand::Quit
         } else {
@@ -443,9 +538,10 @@ impl Shell {
                     ui.menu_button("File", |ui| {
                         item(ui, "New Film...", "Ctrl+N", true, MenuCommand::NewFilm);
                         item(ui, "Open Film...", "Ctrl+O", true, MenuCommand::OpenFilm);
-                        ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
+                        let found = self.found();
+                        ui.add_enabled_ui(!found.is_empty(), |ui| {
                             ui.menu_button("Open Recent", |ui| {
-                                for (dir, name) in &self.recent {
+                                for (dir, name) in &found {
                                     let c = MenuCommand::OpenRecent(dir.clone());
                                     item(ui, name, "", true, c);
                                 }
@@ -472,6 +568,22 @@ impl Shell {
                             true,
                             MenuCommand::Preferences,
                         );
+                    });
+                    ui.menu_button("View", |ui| {
+                        for (i, name) in ["Story", "Elements", "Shots", "Cut", "Cost"]
+                            .iter()
+                            .enumerate()
+                        {
+                            let keys = format!("Ctrl+{}", i + 1);
+                            item(ui, name, &keys, film, MenuCommand::View(i));
+                        }
+                        ui.separator();
+                        item(ui, "Reload", "F5", film, MenuCommand::Reload);
+                    });
+                    ui.menu_button("Film", |ui| {
+                        item(ui, "Commit...", "", film, MenuCommand::Commit);
+                        item(ui, "Film Settings...", "", film, MenuCommand::FilmSettings);
+                        item(ui, "Show in Folder", "", film, MenuCommand::ShowFilm);
                     });
                 });
             });
@@ -521,7 +633,9 @@ impl Shell {
             ),
             Screen::Start(_) => (false, false),
         };
-        menu.sync(undo, redo, film, &self.recent);
+        let found = self.found();
+        let Some(menu) = &mut self.menu else { return };
+        menu.sync(undo, redo, film, &found);
         for c in cmds {
             self.command(c);
         }
@@ -623,17 +737,33 @@ fn new_film_dialog(ui: &mut egui::Ui, form: &mut Form, has_git: bool) -> (Option
         ui.set_width(kit::modal_width(ui.ctx(), 1.0, 460.0, 460.0));
         ui.heading("New film");
         ui.add_space(10.0);
-        out = form.show(ui, has_git, |ui| cancel = ui.button("Cancel").clicked());
+        (out, cancel) = form.show(ui, has_git);
     });
     (out, cancel || modal.should_close())
 }
 
-fn start_page(
-    ui: &mut egui::Ui,
-    form: &mut Form,
-    has_git: bool,
-    recent: &[(PathBuf, String)],
-) -> Option<Opened> {
+/// What the start page asked for.
+enum StartDo {
+    Open(PathBuf),
+    New,
+    Choose,
+    Forget(PathBuf),
+    Reveal(PathBuf),
+    Keys(String),
+    Recheck,
+    Url(&'static str),
+}
+
+/// What a film needs from the machine, checked when the start page is first shown.
+pub(crate) struct Setup {
+    ffmpeg: bool,
+    git: bool,
+    /// Plugins with keys still to set, and which.
+    keys: Vec<(String, Vec<String>)>,
+    plugins: usize,
+}
+
+fn start_page(ui: &mut egui::Ui, recent: &[Recent], setup: &Setup) -> Option<StartDo> {
     let mut out = None;
     egui::CentralPanel::default()
         .frame(egui::Frame::central_panel(ui.style()).inner_margin(0.0))
@@ -643,7 +773,7 @@ fn start_page(
                 let w = if wide {
                     880.0
                 } else {
-                    460.0_f32.min(ui.available_width())
+                    520.0_f32.min(ui.available_width())
                 };
                 ui.add_space(if wide { 64.0 } else { 24.0 });
                 ui.vertical_centered(|ui| {
@@ -669,39 +799,42 @@ fn start_page(
                             });
                         });
                         ui.add_space(28.0);
-                        let new = |ui: &mut egui::Ui, form: &mut Form| {
+                        let side = |ui: &mut egui::Ui, out: &mut Option<StartDo>| {
                             kit::card(ui, |ui| {
-                                kit::card_title(ui, "New film", None);
-                                ui.add_space(8.0);
-                                form.show(ui, has_git, |_| {})
-                            })
-                        };
-                        let open = |ui: &mut egui::Ui, folder: &str| {
-                            kit::card(ui, |ui| open_film(ui, folder, recent))
+                                ui.horizontal(|ui| {
+                                    if kit::primary_button(ui, Some(icon::ADD), "New film…")
+                                        .clicked()
+                                    {
+                                        *out = Some(StartDo::New);
+                                    }
+                                    if kit::icon_text_button(ui, icon::FOLDER, "Open…")
+                                        .on_hover_text("a film's folder")
+                                        .clicked()
+                                    {
+                                        *out = Some(StartDo::Choose);
+                                    }
+                                });
+                            });
+                            ui.add_space(theme::GAP);
+                            kit::card(ui, |ui| setup_card(ui, setup, out));
                         };
                         if wide {
                             ui.horizontal_top(|ui| {
-                                let half = (ui.available_width() - theme::GAP) / 2.0;
-                                let a = ui
-                                    .vertical(|ui| {
-                                        ui.set_width(half);
-                                        new(ui, form)
-                                    })
-                                    .inner;
+                                let right = 320.0;
+                                ui.vertical(|ui| {
+                                    ui.set_width(ui.available_width() - right - theme::GAP);
+                                    kit::card(ui, |ui| recent_list(ui, recent, &mut out));
+                                });
                                 ui.add_space(theme::GAP);
-                                let b = ui
-                                    .vertical(|ui| {
-                                        ui.set_width(half);
-                                        open(ui, &form.folder)
-                                    })
-                                    .inner;
-                                out = a.or(b);
+                                ui.vertical(|ui| {
+                                    ui.set_width(right);
+                                    side(ui, &mut out);
+                                });
                             });
                         } else {
-                            let a = new(ui, form);
+                            side(ui, &mut out);
                             ui.add_space(theme::GAP);
-                            let b = open(ui, &form.folder);
-                            out = a.or(b);
+                            kit::card(ui, |ui| recent_list(ui, recent, &mut out));
                         }
                     });
                 });
@@ -710,64 +843,173 @@ fn start_page(
     out
 }
 
-fn open_film(ui: &mut egui::Ui, folder: &str, recent: &[(PathBuf, String)]) -> Option<Opened> {
-    let mut out = None;
-    kit::card_title(ui, "Open a film", None);
-    ui.add_space(8.0);
-    if kit::icon_text_button(ui, icon::FOLDER, "Choose a folder").clicked()
-        && let Some(d) = rfd::FileDialog::new()
-            .set_directory(expand(folder))
-            .pick_folder()
-    {
-        out = Some(Opened::Existing(d));
+fn recent_list(ui: &mut egui::Ui, recent: &[Recent], out: &mut Option<StartDo>) {
+    kit::card_title(ui, "Recent films", None);
+    ui.add_space(6.0);
+    if recent.is_empty() {
+        hint(
+            ui,
+            "Films you open or make show up here. Start one with New film…, or open a folder \
+             made with shotline init.",
+        );
     }
-    if !recent.is_empty() {
-        ui.add_space(14.0);
-        caption(ui, "Recent");
-        ui.add_space(2.0);
-    }
-    for (dir, name) in recent {
-        if recent_row(ui, name, dir).clicked() {
-            out = Some(Opened::Existing(dir.clone()));
+    for r in recent {
+        if let Some(d) = recent_row(ui, r) {
+            *out = Some(d);
         }
     }
-    out
 }
 
-/// A film opened before: its name, and where it is cut short from the left.
-fn recent_row(ui: &mut egui::Ui, name: &str, dir: &Path) -> egui::Response {
-    let (rect, r) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::click());
-    let path = dir.display().to_string();
-    r.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::Role::Button, true, format!("{name}  {path}"))
+/// ffmpeg, git and the plugins' keys, each with what to do when it's missing.
+fn setup_card(ui: &mut egui::Ui, s: &Setup, out: &mut Option<StartDo>) {
+    ui.horizontal(|ui| {
+        kit::card_title(ui, "Setup", None);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("Check again")
+                .on_hover_text("looks for ffmpeg, git and the keys again")
+                .clicked()
+            {
+                *out = Some(StartDo::Recheck);
+            }
+        });
     });
+    ui.add_space(6.0);
+    let row = |ui: &mut egui::Ui, ok: bool, what: &str, about: &str| {
+        ui.horizontal(|ui| {
+            let (mark, color) = if ok {
+                (icon::CHECK, theme::GO)
+            } else {
+                (icon::WARNING, theme::FLAG)
+            };
+            let (r, _) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+            kit::glyph(ui.painter(), r.center(), mark, 16.0, color);
+            ui.label(RichText::new(what).color(theme::PAPER));
+            ui.label(RichText::new(about).small().color(theme::DUST));
+        });
+    };
+    let fix = |ui: &mut egui::Ui, text: &str, about: &str| -> bool {
+        ui.horizontal(|ui| {
+            ui.add_space(26.0);
+            ui.small_button(text).on_hover_text(about).clicked()
+        })
+        .inner
+    };
+    row(
+        ui,
+        s.ffmpeg,
+        "ffmpeg",
+        if s.ffmpeg { "found" } else { "not found" },
+    );
+    if !s.ffmpeg
+        && fix(
+            ui,
+            "How to install…",
+            "plays, stitches and renders takes; shotline runs it from PATH",
+        )
+    {
+        *out = Some(StartDo::Url("https://ffmpeg.org/download.html"));
+    }
+    row(
+        ui,
+        s.git,
+        "git",
+        if s.git {
+            "found"
+        } else {
+            "not found, so no history"
+        },
+    );
+    if !s.git && fix(ui, "How to install…", "keeps each film's history") {
+        *out = Some(StartDo::Url("https://git-scm.com/downloads"));
+    }
+    let keys = if s.plugins == 0 {
+        "no plugins found".to_string()
+    } else if s.keys.is_empty() {
+        format!("set for all {} plugins", s.plugins)
+    } else {
+        let n = s.keys.len();
+        format!(
+            "{n} plugin{} need{} one",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "s" } else { "" }
+        )
+    };
+    row(ui, s.plugins > 0 && s.keys.is_empty(), "Keys", &keys);
+    for (plugin, vars) in &s.keys {
+        if fix(ui, &format!("Set {plugin}'s key…"), &vars.join(", ")) {
+            *out = Some(StartDo::Keys(plugin.clone()));
+        }
+    }
+}
+
+/// A film opened before: its name, where it is cut short from the left, when, and ⋯. One that
+/// can't be found says so and can only be taken off the list.
+fn recent_row(ui: &mut egui::Ui, film: &Recent) -> Option<StartDo> {
+    let mut out = None;
+    let gone = film.name.is_none();
+    let name = film.name.clone().unwrap_or_else(|| {
+        film.dir
+            .file_name()
+            .map_or_else(|| "film".into(), |n| n.to_string_lossy().into_owned())
+    });
+    let dir = &film.dir;
+    let sense = if gone {
+        egui::Sense::hover()
+    } else {
+        egui::Sense::click()
+    };
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), sense);
+    let path = dir.display().to_string();
+    let when = match (gone, film.at) {
+        (true, _) => "can't be found".to_string(),
+        (false, Some(t)) => ago(t),
+        (false, None) => String::new(),
+    };
+    r.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            !gone,
+            format!("{name}  {path}  {when}").trim_end(),
+        )
+    });
+    let more = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - 22.0, rect.center().y),
+        egui::vec2(32.0, 32.0),
+    );
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        if r.hovered() {
+        if r.hovered() && !gone {
             p.rect_filled(rect, theme::R_ROW, theme::RAISED);
         }
         kit::glyph(
             p,
             egui::pos2(rect.left() + 20.0, rect.center().y),
-            icon::FOLDER,
+            if gone { icon::WARNING } else { icon::FOLDER },
             18.0,
-            theme::DUST,
+            if gone { theme::FLAG } else { theme::DUST },
         );
         let x = rect.left() + 42.0;
-        let w = rect.right() - x - 10.0;
+        let small = egui::FontId::proportional(12.0);
         p.text(
-            egui::pos2(x, rect.top() + 7.0),
+            egui::pos2(more.left() - 8.0, rect.top() + 9.0),
+            egui::Align2::RIGHT_TOP,
+            &when,
+            small.clone(),
+            if gone { theme::FLAG } else { theme::DUST },
+        );
+        p.text(
+            egui::pos2(x, rect.top() + 8.0),
             egui::Align2::LEFT_TOP,
-            name,
+            &name,
             egui::FontId::new(13.5, egui::FontFamily::Name(theme::SEMIBOLD.into())),
-            theme::PAPER,
+            if gone { theme::DUST } else { theme::PAPER },
         );
         // Keep the end of the path, which tells films apart.
-        let font = egui::FontId::proportional(12.0);
+        let w = more.left() - x - 8.0;
         let mut shown = path.clone();
         let fits = |s: &str| {
-            p.layout_no_wrap(s.to_string(), font.clone(), theme::DUST)
+            p.layout_no_wrap(s.to_string(), small.clone(), theme::DUST)
                 .size()
                 .x
                 <= w
@@ -780,14 +1022,37 @@ fn recent_row(ui: &mut egui::Ui, name: &str, dir: &Path) -> egui::Response {
             shown = format!("…{rest}");
         }
         p.text(
-            egui::pos2(x, rect.top() + 26.0),
+            egui::pos2(x, rect.top() + 28.0),
             egui::Align2::LEFT_TOP,
             shown,
-            font,
+            small,
             theme::DUST,
         );
     }
-    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let m = ui
+        .put(more, |ui: &mut egui::Ui| {
+            kit::icon_button(ui, icon::MORE, &format!("More for {name}"))
+        })
+        .on_hover_text("more");
+    egui::Popup::menu(&m).show(|ui| {
+        if !gone && ui.button(crate::REVEAL).clicked() {
+            out = Some(StartDo::Reveal(dir.clone()));
+        }
+        if ui
+            .button("Remove from list")
+            .on_hover_text("the film stays where it is")
+            .clicked()
+        {
+            out = Some(StartDo::Forget(dir.clone()));
+        }
+    });
+    if r.clicked() {
+        out = Some(StartDo::Open(dir.clone()));
+    }
+    if !gone {
+        r.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
+    out
 }
 
 impl Form {
@@ -801,13 +1066,8 @@ impl Form {
         }
     }
 
-    /// The fields and the Create button, with anything `buttons` adds after it.
-    fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        has_git: bool,
-        buttons: impl FnOnce(&mut egui::Ui),
-    ) -> Option<Opened> {
+    /// The fields, then Cancel and Create film. Returns what to make, and whether it was given up.
+    fn show(&mut self, ui: &mut egui::Ui, has_git: bool) -> (Option<Opened>, bool) {
         let label = caption(ui, "Name");
         let name = ui
             .add(
@@ -817,6 +1077,10 @@ impl Form {
                     .margin(egui::vec2(8.0, 6.0)),
             )
             .labelled_by(label.id);
+        let entered = kit::entered(ui, &name);
+        if ui.memory(|m| m.focused().is_none()) && self.name.is_empty() {
+            name.request_focus();
+        }
         ui.add_space(10.0);
         let label = caption(ui, "Goes in");
         ui.horizontal(|ui| {
@@ -863,38 +1127,30 @@ impl Form {
             .labelled_by(label.id);
         hint(
             ui,
-            "Every shot is made this shape. It can change later, on the Story tab.",
+            "Every shot is made this shape. It can change later, in Film settings.",
         );
         ui.add_space(6.0);
         if has_git {
             ui.checkbox(&mut self.git, "Keep history with git");
         }
-        ui.add_space(10.0);
-        let create = ui
-            .horizontal(|ui| {
-                let create = ui
-                    .add_enabled_ui(dir.is_some() && !taken, |ui| {
-                        kit::primary_button(ui, None, "Create film")
-                    })
-                    .inner;
-                buttons(ui);
-                create
-            })
-            .inner;
-        let enter = name.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if let Some(e) = &self.error {
             ui.add_space(6.0);
             ui.label(RichText::new(e).color(theme::FLAG));
         }
-        match dir {
-            Some(dir) if !taken && (create.clicked() || enter) => Some(Opened::New {
+        ui.add_space(14.0);
+        let ready = dir.is_some() && !taken;
+        let (create, cancel) = kit::footer(ui, "Create film", kit::Main::Primary, ready, "Cancel");
+        let create = create || ready && entered;
+        let made = match dir {
+            Some(dir) if ready && create => Some(Opened::New {
                 dir,
                 name: self.name.trim().into(),
                 aspect: self.aspect.clone(),
                 git: has_git && self.git,
             }),
             _ => None,
-        }
+        };
+        (made, cancel)
     }
 
     /// Where a film with the typed name would go.
@@ -935,27 +1191,76 @@ fn recent_file(user_dir: &Path) -> PathBuf {
     user_dir.join("recent-films")
 }
 
-/// Films opened lately, newest first, leaving out any that have gone.
-fn recent(user_dir: &Path) -> Vec<(PathBuf, String)> {
+/// A film opened before. Its name is None once it can't be found.
+#[derive(Clone)]
+struct Recent {
+    dir: PathBuf,
+    name: Option<String>,
+    /// When it was last opened, in seconds since 1970; lists from before didn't say.
+    at: Option<i64>,
+}
+
+/// Films opened lately, newest first: a line each, the folder and when, a tab between.
+fn recent(user_dir: &Path) -> Vec<Recent> {
     read(&recent_file(user_dir))
         .lines()
-        .filter_map(|l| {
-            let p = Project::open(Path::new(l)).ok()?;
-            Some((p.root.clone(), p.config.name.clone()))
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let (dir, at) = l.split_once('\t').unwrap_or((l, ""));
+            let dir = PathBuf::from(dir);
+            let name = Project::open(&dir).ok().map(|p| p.config.name);
+            Recent {
+                dir,
+                name,
+                at: at.parse().ok(),
+            }
         })
         .collect()
 }
 
+fn write_recent(user_dir: &Path, list: &[Recent]) {
+    let text: String = list
+        .iter()
+        .map(|r| match r.at {
+            Some(t) => format!("{}\t{t}\n", r.dir.display()),
+            None => format!("{}\n", r.dir.display()),
+        })
+        .collect();
+    let _ = std::fs::create_dir_all(user_dir);
+    let _ = std::fs::write(recent_file(user_dir), text);
+}
+
 fn remember(user_dir: &Path, dir: &Path) {
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    let mut list = vec![dir.display().to_string()];
-    for l in read(&recent_file(user_dir)).lines() {
-        if l != list[0] && list.len() < RECENT {
-            list.push(l.to_string());
-        }
-    }
-    let _ = std::fs::create_dir_all(user_dir);
-    let _ = std::fs::write(recent_file(user_dir), list.join("\n") + "\n");
+    let mut list = vec![Recent {
+        dir: dir.clone(),
+        name: None,
+        at: Some(jiff::Timestamp::now().as_second()),
+    }];
+    list.extend(recent(user_dir).into_iter().filter(|r| r.dir != dir));
+    list.truncate(RECENT);
+    write_recent(user_dir, &list);
+}
+
+fn forget(user_dir: &Path, dir: &Path) {
+    let list: Vec<Recent> = recent(user_dir)
+        .into_iter()
+        .filter(|r| r.dir != dir)
+        .collect();
+    write_recent(user_dir, &list);
+}
+
+/// "2 days ago", for when a film was last opened.
+fn ago(at: i64) -> String {
+    let s = (jiff::Timestamp::now().as_second() - at).max(0);
+    let (n, unit) = match s {
+        0..60 => return "just now".into(),
+        60..3600 => (s / 60, "minute"),
+        3600..86400 => (s / 3600, "hour"),
+        86400..2_592_000 => (s / 86400, "day"),
+        _ => (s / 2_592_000, "month"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
 /// "9:16 tall, for Reels, TikTok and vertical drama"

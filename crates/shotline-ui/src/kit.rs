@@ -283,3 +283,50 @@ pub(crate) fn drop_button(
     r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, &name));
     r
 }
+
+/// How a dialog's main button looks.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Main {
+    Primary,
+    Danger,
+}
+
+/// A dialog's buttons along its bottom, the main one rightmost as on macOS, Cancel left of it.
+/// Enter presses a primary one when it's `ready` and no box is taking the keys (a one-line box
+/// lets go of them on Enter); a danger one takes a click. Esc is the modal's own. Returns
+/// (main, cancel).
+/// Enter in a single-line box, which leaves it in the same frame.
+pub(crate) fn entered(ui: &egui::Ui, field: &egui::Response) -> bool {
+    field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+}
+
+pub(crate) fn footer(
+    ui: &mut egui::Ui,
+    main: &str,
+    look: Main,
+    ready: bool,
+    cancel: &str,
+) -> (bool, bool) {
+    let enter = ready
+        && look == Main::Primary
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), 32.0),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let go = ui
+                .add_enabled_ui(ready, |ui| match look {
+                    Main::Primary => primary_button(ui, None, main),
+                    Main::Danger => danger_button(ui, main),
+                })
+                .inner
+                .clicked();
+            let no = ui
+                .add(egui::Button::new(cancel).min_size(egui::vec2(0.0, 32.0)))
+                .clicked();
+            (go || enter, no)
+        },
+    )
+    .inner
+}

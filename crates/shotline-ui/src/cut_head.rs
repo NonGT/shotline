@@ -480,21 +480,7 @@ impl App {
     }
 
     fn reveal(&mut self, f: &Path) {
-        let f = std::path::absolute(f).unwrap_or_else(|_| f.to_path_buf());
-        let mut cmd = if cfg!(target_os = "macos") {
-            let mut c = std::process::Command::new("open");
-            c.arg("-R").arg(&f);
-            c
-        } else if cfg!(windows) {
-            let mut c = std::process::Command::new("explorer");
-            c.arg(format!("/select,{}", f.display()));
-            c
-        } else {
-            let mut c = std::process::Command::new("xdg-open");
-            c.arg(f.parent().unwrap_or(Path::new(".")));
-            c
-        };
-        if let Err(e) = cmd.spawn() {
+        if let Err(e) = crate::reveal(f) {
             self.error(format!("can't show {}: {e}", f.display()));
         }
     }

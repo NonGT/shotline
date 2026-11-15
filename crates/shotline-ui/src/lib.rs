@@ -1785,6 +1785,20 @@ impl App {
         self.fill_form();
     }
 
+    /// View > a page, by its place in the sidebar.
+    pub(crate) fn view(&mut self, n: usize) {
+        if let Some((t, _)) = Tab::ALL.get(n) {
+            self.flush();
+            self.tab = *t;
+        }
+    }
+
+    /// Reload: the folder read again, the messages cleared.
+    pub(crate) fn read_again(&mut self) {
+        self.notes.clear();
+        self.reload();
+    }
+
     /// Where a picture of the film came from: Remake is only for those made here.
     pub(crate) fn origin(&mut self, path: &Path) -> Origin {
         if let Some(o) = self.origins.get(path) {
@@ -2029,8 +2043,7 @@ impl App {
                             .clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::F5))
                         {
-                            self.notes.clear();
-                            self.reload();
+                            self.read_again();
                         }
                         self.jobs_button(ui);
                     });
@@ -2339,7 +2352,7 @@ impl App {
             ui.add_space(8.0);
             if ui
                 .button("Change…")
-                .on_hover_text("in Preferences; it changes every shot that doesn't pick its own")
+                .on_hover_text("in Film settings; it changes every shot that doesn't pick its own")
                 .clicked()
             {
                 self.flush();
@@ -2464,6 +2477,7 @@ impl App {
                         .desired_width(f32::INFINITY),
                 )
                 .labelled_by(l.id);
+            let mut entered = kit::entered(ui, &name);
             if ui.memory(|m| m.focused().is_none()) {
                 name.request_focus();
             }
@@ -2472,29 +2486,24 @@ impl App {
             let slug = shotline_core::slug::slugify(n.name.trim());
             ui.horizontal(|ui| {
                 ui.label(RichText::new("@").color(theme::DUST));
-                ui.add(
-                    egui::TextEdit::singleline(&mut n.handle)
-                        .hint_text(
-                            RichText::new(if slug.is_empty() { "handle" } else { &slug })
-                                .color(theme::DUST),
-                        )
-                        .desired_width(f32::INFINITY),
-                )
-                .labelled_by(l.id);
+                let r = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut n.handle)
+                            .hint_text(
+                                RichText::new(if slug.is_empty() { "handle" } else { &slug })
+                                    .color(theme::DUST),
+                            )
+                            .desired_width(f32::INFINITY),
+                    )
+                    .labelled_by(l.id);
+                entered |= kit::entered(ui, &r);
             });
             ui.add_space(4.0);
             hint(ui, "How prompts name it; made from the name if left empty.");
             ui.add_space(14.0);
             let ready = !n.name.trim().is_empty();
-            ui.horizontal(|ui| {
-                add = ui
-                    .add_enabled_ui(ready, |ui| kit::primary_button(ui, Some(icon::ADD), "Add"))
-                    .inner
-                    .clicked();
-                cancel = ui.button("Cancel").clicked();
-            });
-            // Only this dialog takes keys while it's up.
-            add |= ready && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            (add, cancel) = kit::footer(ui, "Add", kit::Main::Primary, ready, "Cancel");
+            add |= ready && entered;
         });
         if add {
             return self.new_element.take().map(Action::AddElement);
@@ -2557,10 +2566,7 @@ impl App {
             ui.add_space(6.0);
             hint(ui, "Undo brings it all back.");
             ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                go = kit::danger_button(ui, "Delete").clicked();
-                back = ui.button("Cancel").clicked();
-            });
+            (go, back) = kit::footer(ui, "Delete", kit::Main::Danger, true, "Cancel");
         });
         if go {
             self.delete_element = None;
@@ -4032,10 +4038,13 @@ impl App {
                  frame; pick the new one in {next} when you want it to follow."
             ));
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                yes = ui.button(format!("Use #{}", t.number)).clicked();
-                no = ui.button("Cancel").clicked();
-            });
+            (yes, no) = kit::footer(
+                ui,
+                &format!("Use #{}", t.number),
+                kit::Main::Primary,
+                true,
+                "Cancel",
+            );
         });
         if yes {
             acts.push(Action::Select(t.clone()));
@@ -6161,4 +6170,36 @@ fn picture_details(ui: &mut egui::Ui, job: Option<&shotline_core::Job>, p: &Proj
                 None => hint(ui, "Made before shotline kept prompts."),
             }
         });
+}
+
+/// "Show in Finder", as the system calls it.
+pub(crate) const REVEAL: &str = if cfg!(target_os = "macos") {
+    "Show in Finder"
+} else if cfg!(windows) {
+    "Show in Explorer"
+} else {
+    "Show in folder"
+};
+
+/// Shows `f` in the system's file browser, picked out where it can be.
+pub(crate) fn reveal(f: &Path) -> std::io::Result<()> {
+    let f = std::path::absolute(f).unwrap_or_else(|_| f.to_path_buf());
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(&f);
+        c
+    } else if cfg!(windows) {
+        let mut c = std::process::Command::new("explorer");
+        c.arg(format!("/select,{}", f.display()));
+        c
+    } else {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(if f.is_dir() {
+            f.as_path()
+        } else {
+            f.parent().unwrap_or(Path::new("."))
+        });
+        c
+    };
+    cmd.spawn().map(|_| ())
 }

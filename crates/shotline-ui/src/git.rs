@@ -52,14 +52,23 @@ impl App {
                 let n = c.len();
                 let text = format!("Commit {n} change{}", if n == 1 { "" } else { "s" });
                 if crate::kit::ghost_button(ui, crate::icon::GIT, &text).clicked() {
-                    self.flush();
-                    self.refresh_repo();
-                    self.git_error = None;
-                    if let Repo::Changes(c) = &self.repo {
-                        self.dialog = Some(Dialog::Commit(change_summary(c)));
-                    }
+                    self.ask_commit();
                 }
             }
+        }
+    }
+
+    /// Film > Commit…, or the bar's button: the dialog for what changed, or for starting a
+    /// history when there's none. Says so when there's nothing to commit.
+    pub(crate) fn ask_commit(&mut self) {
+        self.flush();
+        self.refresh_repo();
+        self.git_error = None;
+        match &self.repo {
+            Repo::None => self.error("git isn't installed".to_string()),
+            Repo::NotYet => self.dialog = Some(Dialog::Start),
+            Repo::Changes(c) if c.is_empty() => self.info("nothing to commit".to_string()),
+            Repo::Changes(c) => self.dialog = Some(Dialog::Commit(change_summary(c))),
         }
     }
 
@@ -69,6 +78,7 @@ impl App {
         };
         let mut go = false;
         let mut close = false;
+        let mut entered = false;
         let changes = match &self.repo {
             Repo::Changes(c) => c.as_slice(),
             _ => &[],
@@ -85,10 +95,10 @@ impl App {
                     let field = ui
                         .add(egui::TextEdit::singleline(message).desired_width(f32::INFINITY))
                         .labelled_by(label.id);
+                    entered = crate::kit::entered(ui, &field);
                     if ui.memory(|m| m.focused().is_none()) {
                         field.request_focus();
                     }
-                    go = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     ui.add_space(8.0);
                     for c in changes.iter().take(8) {
                         ui.label(RichText::new(c).color(theme::DUST));
@@ -121,16 +131,12 @@ impl App {
                 ui.label(RichText::new(e).color(theme::FLAG));
             }
             ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                let ok = match dialog {
-                    Dialog::Commit(m) => {
-                        ui.add_enabled(!m.trim().is_empty(), egui::Button::new("Commit"))
-                    }
-                    Dialog::Start => ui.button("Start history"),
-                };
-                go |= ok.clicked();
-                close = ui.button("Cancel").clicked();
-            });
+            let (main, ready) = match dialog {
+                Dialog::Commit(m) => ("Commit", !m.trim().is_empty()),
+                Dialog::Start => ("Start history", true),
+            };
+            (go, close) = crate::kit::footer(ui, main, crate::kit::Main::Primary, ready, "Cancel");
+            go |= ready && entered;
         });
         if go {
             self.run_git();
