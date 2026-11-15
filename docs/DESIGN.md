@@ -772,7 +772,7 @@ steps, as the Commit dialog says, and anything older is git's job.
 
 The app looks at the film's TOML and Markdown files every two seconds and reads the film again
 when something else changed them, such as the co-director over MCP; what's typed in a field is
-saved first. Messages come up as toasts at the bottom right: the rest go after a few seconds,
+saved first, so the top bar has no Reload button (F5 still reads it again). Messages come up as toasts at the bottom right: the rest go after a few seconds,
 errors stay until closed, and Activity in the bottom bar lists everything said since the film was
 opened. The Jobs pill in the top bar shows what's being made in the app (takes, lines, bridges,
 sounds, editor changes, renders) with what it costs, and images made out of the app's way; a click
@@ -858,8 +858,8 @@ Keep, and Keep is one undo step; Discard drops it. Make starts a `shotline __run
 own (its own process group, detached on Windows), so closing the popup or the whole app doesn't
 stop it. Each run has a record in `.shotline/cache/running/<id>.json` with the popup's settings,
 which the run fills in with the image or the error, and a `<id>.beat` file it touches every 5s; a
-run with no beat for 30s is shown as stopped. While any are listed, an icon beside Reload turns
-while something is being made and has the count on a badge; its list opens a run's popup again, as
+run with no beat for 30s is shown as stopped. While any are listed, an icon at the right of the top
+bar turns while something is being made and has the count on a badge; its list opens a run's popup again, as
 it was. An image made with its popup closed (or the app) is put in place by itself, as one undo
 step; the popup watching one shows it with Keep, Try again and Discard instead. A remade picture goes in
 place of the file it was made again for, wherever it is by then (added as a new one if it's gone);
