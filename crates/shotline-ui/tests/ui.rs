@@ -1437,13 +1437,17 @@ fn keys_in_preferences() {
     h.get_by_label("not set");
     assert!(h.get_by_label("Check").accesskit_node().is_disabled());
 
-    // Typed, it waits for OK.
+    // Typed, it waits for OK, or Save and check.
     let field = h.get_by_role_and_label(Role::TextInput, var);
     field.focus();
     field.type_text("sk-123");
     h.run();
     h.get_by_label("saved on OK");
-    assert!(h.get_by_label("Check").accesskit_node().is_disabled());
+    assert!(
+        !h.get_by_label("Save and check")
+            .accesskit_node()
+            .is_disabled()
+    );
     // Escape doesn't throw it away.
     h.key_press(egui::Key::Escape);
     h.run();
@@ -1799,6 +1803,11 @@ fn start_a_film() {
         .with_size(egui::vec2(900.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
+    // Nothing yet: it says where films will show up.
+    h.get_by_label_contains("Films you open or make show up here");
+    h.get_by_label("New film…").click();
+    h.run();
+    h.run();
     let name = h.get_by_role_and_label(Role::TextInput, "Name");
     name.focus();
     name.type_text("Rain");
@@ -1833,16 +1842,34 @@ fn start_a_film() {
     }
 
     // The next time it's in the list.
-    let shell = Shell::new(None, home, tmp.path()).testing();
+    let shell = Shell::new(None, home.clone(), tmp.path()).testing();
     // Tall enough for the list under Linux's in-window menu bar.
     let mut h = Harness::builder()
         .with_max_steps(16)
         .with_size(egui::vec2(900.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
+    h.get_by_label_contains("just now");
     h.get_by_label_contains("Rain  ").click();
     h.run();
     assert!(h.state().film().is_some());
+
+    // Gone from where it was, it says so and can be taken off the list.
+    h.state_mut().command(MenuCommand::CloseFilm);
+    h.run();
+    std::fs::rename(&dir, tmp.path().join("moved")).unwrap();
+    let shell = Shell::new(None, home.clone(), tmp.path()).testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(900.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    h.get_by_label_contains("can't be found");
+    h.get_by_label("More for rain").click();
+    h.run();
+    h.get_by_label("Remove from list").click();
+    h.run();
+    assert!(h.query_by_label_contains("can't be found").is_none());
 }
 
 #[test]
@@ -4668,11 +4695,22 @@ fn plugins_in_preferences() {
         h.run();
     };
     open(&mut h);
-    // The first plugin's page.
+    // The first plugin's page; its models' options are each film's.
     h.get_by_label("built into shotline");
     h.get_by_label("needs FAL_API_KEY");
+    h.get_by_label("Each film keeps its own options, in Film settings.");
+    h.get_by_label("Cancel").click();
+    h.run();
+    let options = |h: &mut Harness<Shell>| {
+        h.state_mut().command(MenuCommand::FilmSettings);
+        h.run();
+        h.get_by_role_and_label(Role::Button, "Model options")
+            .click();
+        h.run();
+    };
 
     // Options go into the film on OK, as one step to undo.
+    options(&mut h);
     const H3: &str = "minimax/h3-max/reference-to-video";
     let safety = format!("Safety checker for {H3}");
     h.get_by_role_and_label(Role::CheckBox, &safety).click();
@@ -4696,7 +4734,7 @@ fn plugins_in_preferences() {
     h.run();
 
     // Back to the default by hand.
-    open(&mut h);
+    options(&mut h);
     h.get_all_by_label("Use default").next().unwrap().click();
     h.run();
     h.get_all_by_label("Use default").next().unwrap().click();
@@ -4709,10 +4747,11 @@ fn plugins_in_preferences() {
     open(&mut h);
     h.get_by_role_and_label(Role::Button, "venice").click();
     h.run();
-    h.get_by_label("Also found, not used");
-    h.get_by_label("Use this one").click();
+    h.get_by_role_and_label(Role::ComboBox, "Runs from").click();
     h.run();
-    h.get_by_label("keeps /b/shotline-plugin-venice");
+    h.get_by_label("/b/shotline-plugin-venice").click();
+    h.run();
+    h.get_by_label("changes on OK");
     assert!(PINNED.lock().unwrap().is_empty());
     h.get_by_label("OK").click();
     h.run();
@@ -4723,15 +4762,17 @@ fn plugins_in_preferences() {
     open(&mut h);
     h.get_by_role_and_label(Role::Button, "venice").click();
     h.run();
-    h.get_by_label("kept");
-    h.get_by_label("Let PATH decide").click();
+    h.get_by_role_and_label(Role::ComboBox, "Runs from").click();
+    h.run();
+    h.get_by_label_contains("First on PATH").click();
     h.run();
     h.get_by_label("OK").click();
     h.run();
     open(&mut h);
     h.get_by_role_and_label(Role::Button, "venice").click();
     h.run();
-    h.get_by_label("Also found, not used");
+    let runs = h.get_by_role_and_label(Role::ComboBox, "Runs from");
+    assert!(runs.value().unwrap().starts_with("First on PATH"));
 }
 
 #[test]
@@ -4746,7 +4787,7 @@ fn default_models_in_preferences() {
         .with_size(egui::vec2(1100.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
-    h.state_mut().command(MenuCommand::Preferences);
+    h.state_mut().command(MenuCommand::FilmSettings);
     h.run();
     h.get_by_role_and_label(Role::Button, "Default Models")
         .click();
@@ -4800,8 +4841,9 @@ fn budget_in_preferences() {
         .with_size(egui::vec2(1100.0, 900.0))
         .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
     h.run();
-    h.state_mut().command(MenuCommand::Preferences);
+    h.state_mut().command(MenuCommand::FilmSettings);
     h.run();
+    h.get_by_label("Film settings");
     h.get_by_role_and_label(Role::Button, "Budget").click();
     h.run();
 
@@ -4823,6 +4865,14 @@ fn budget_in_preferences() {
 
     set(&mut h, "Per day", "30");
     set(&mut h, "Per take", "");
+    h.get_by_label("OK").click();
+    h.run();
+    // Every film's limit is the app's, in Preferences.
+    h.state_mut().command(MenuCommand::Preferences);
+    h.run();
+    h.get_by_role_and_label(Role::Button, "Spending limit")
+        .click();
+    h.run();
     set(&mut h, "Per day, all films", "50");
     h.get_by_label("OK").click();
     h.run();
@@ -6848,4 +6898,98 @@ fn elements_look() {
     h.get_by_label("Change…").click();
     h.run_steps(4);
     snap_shell(&mut h, "story-format-prefs");
+}
+
+#[test]
+fn view_and_film_menus() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_git(None)
+        .with_plugins(vec![], Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1100.0, 900.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run();
+    // Cmd+1..5 go to the pages in the sidebar's order.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    h.run();
+    assert_eq!(h.state().film().unwrap().tab(), Tab::Elements);
+    h.state_mut().command(MenuCommand::View(0));
+    h.run();
+    assert_eq!(h.state().film().unwrap().tab(), Tab::Story);
+    // With no history yet, Commit… offers to start one.
+    h.state_mut().command(MenuCommand::Commit);
+    h.run();
+    h.run();
+    h.get_by_label("Start history");
+    h.get_by_label("Cancel").click();
+    h.run();
+    // Film settings has the film's pages, Preferences the app's.
+    h.state_mut().command(MenuCommand::FilmSettings);
+    h.run();
+    h.get_by_label("Film settings");
+    h.get_by_role_and_label(Role::Button, "Model options");
+    assert!(h.query_by_role_and_label(Role::Button, "venice").is_none());
+    h.get_by_label("Cancel").click();
+    h.run();
+    h.state_mut().command(MenuCommand::Preferences);
+    h.run();
+    h.get_by_role_and_label(Role::Button, "venice");
+    assert!(h.query_by_role_and_label(Role::Button, "Budget").is_none());
+}
+
+/// The start page, New film, Preferences and Film settings, to target/shots:
+/// `cargo test -p shotline-ui --test ui desktop_look -- --ignored`.
+#[test]
+#[ignore]
+fn desktop_look() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let now = jiff::Timestamp::now().as_second();
+    std::fs::write(
+        home.join("recent-films"),
+        format!(
+            "{}\t{}\n{}/gone/sunset\t{}\n",
+            p.root.display(),
+            now - 7200,
+            tmp.path().display(),
+            now - 86400 * 3
+        ),
+    )
+    .unwrap();
+    let shell = Shell::new(None, home.clone(), tmp.path())
+        .with_git(None)
+        .with_plugins(fal_video(), Some(Arc::new(TestHost)))
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1280.0, 860.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run_steps(4);
+    snap_shell(&mut h, "desktop-start");
+    h.get_by_label("New film…").click();
+    h.run_steps(4);
+    snap_shell(&mut h, "desktop-new-film");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    h.state_mut().command(MenuCommand::Preferences);
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::Button, "venice").click();
+    h.run_steps(2);
+    snap_shell(&mut h, "desktop-prefs");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    h.get_by_label_contains("Rain  ").click();
+    h.run_steps(4);
+    h.state_mut().command(MenuCommand::FilmSettings);
+    h.run_steps(4);
+    h.get_by_role_and_label(Role::Button, "Model options")
+        .click();
+    h.run_steps(2);
+    snap_shell(&mut h, "desktop-film-settings");
 }
