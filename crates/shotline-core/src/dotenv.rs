@@ -58,13 +58,7 @@ pub fn set(path: &Path, key: &str, value: Option<&str>) -> Result<()> {
     }
     let mut out = lines.join("\n");
     out.push('\n');
-    fsx::write(path, &out)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    fsx::write_private(path, &out)
 }
 
 #[cfg(test)]
