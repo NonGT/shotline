@@ -21,11 +21,53 @@ pub fn read_bytes(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).map_err(io(path))
 }
 
+/// Writes through a file next to `path` and renames it over, so the app's watcher or another
+/// process reading at the same moment never sees it half written. The file keeps its mode.
 pub fn write(path: &Path, contents: &str) -> Result<()> {
+    write_with_mode(path, contents, None)
+}
+
+/// [`write`] for a file only its owner may read, such as .env with keys in it.
+pub fn write_private(path: &Path, contents: &str) -> Result<()> {
+    write_with_mode(path, contents, Some(0o600))
+}
+
+fn write_with_mode(path: &Path, contents: &str, mode: Option<u32>) -> Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         mkdir(parent)?;
     }
-    fs::write(path, contents).map_err(io(path))
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut open = fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let kept = fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o777);
+        if let Some(m) = mode.or(kept) {
+            open.mode(m);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let done = open
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(contents.as_bytes()))
+        .map_err(io(&tmp))
+        .and_then(|()| fs::rename(&tmp, path).map_err(io(path)));
+    if done.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    done
 }
 
 pub fn mkdir(path: &Path) -> Result<()> {
@@ -78,4 +120,31 @@ pub fn list(dir: &Path) -> Result<Vec<PathBuf>> {
         .collect::<Result<Vec<_>>>()?;
     paths.sort();
     Ok(paths)
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn writes_whole_and_leaves_nothing_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("a/shot.toml");
+        write(&p, "one").unwrap();
+        write(&p, "two").unwrap();
+        assert_eq!(read(&p).unwrap(), "two");
+        assert_eq!(list(&tmp.path().join("a")).unwrap(), vec![p.clone()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keeps_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".env");
+        write_private(&p, "A=1\n").unwrap();
+        write(&p, "A=2\n").unwrap();
+        let mode = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }
