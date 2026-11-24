@@ -892,7 +892,7 @@ fn edit_the_cut_and_render() {
     );
 
     p.select_take(r, "1").unwrap();
-    h.get_by_label("Reload").click();
+    h.key_press(egui::Key::F5);
     h.run();
     h.get_by_label("Render").click();
     assert!(wait_for(&mut h, |h| h
@@ -2262,7 +2262,7 @@ fn an_editor_s_sequence_on_the_cut_page() {
         serde_json::to_string(&edits).unwrap(),
     )
     .unwrap();
-    h.get_by_label("Reload").click();
+    h.key_press(egui::Key::F5);
     // Read on another thread, which can take a while on a slow machine.
     // What's wrong with a project is in the one chip at the top.
     assert!(wait_for(&mut h, |h| h

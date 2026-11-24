@@ -1384,8 +1384,8 @@ impl App {
         }
     }
 
-    /// Beside Reload while anything is on the jobs list or being worked on: a pill with a ring
-    /// that turns while something is being made and a count, opening the list.
+    /// At the right of the top bar while anything is on the jobs list or being worked on: a pill
+    /// with a ring that turns while something is being made and a count, opening the list.
     fn jobs_button(&mut self, ui: &mut egui::Ui) {
         let busy = self.busy();
         if self.runs.is_empty() && busy.is_empty() {
@@ -2038,11 +2038,8 @@ impl App {
                     ui.set_height(52.0);
                     self.where_we_are(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if kit::icon_button(ui, icon::RELOAD, "Reload")
-                            .on_hover_text("read the project folder again (F5)")
-                            .clicked()
-                            || ui.input(|i| i.key_pressed(egui::Key::F5))
-                        {
+                        // The folder is watched; F5 (View, Reload) is there for when that's slow.
+                        if ui.input(|i| i.key_pressed(egui::Key::F5)) {
                             self.read_again();
                         }
                         self.jobs_button(ui);

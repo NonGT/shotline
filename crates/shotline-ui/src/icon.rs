@@ -7,7 +7,6 @@ pub const ELEMENTS: &str = "\u{E4D6}";
 pub const SHOTS: &str = "\u{E792}";
 pub const CUT: &str = "\u{EAE0}";
 pub const COST: &str = "\u{E150}";
-pub const RELOAD: &str = "\u{E036}";
 pub const SETTINGS: &str = "\u{E272}";
 pub const CLOSE: &str = "\u{E4F6}";
 pub const ADD: &str = "\u{E3D4}";
