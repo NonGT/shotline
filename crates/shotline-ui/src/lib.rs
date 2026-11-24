@@ -27,6 +27,7 @@ pub mod running;
 mod shoot;
 mod sounds;
 mod start;
+pub mod taking;
 mod theme;
 mod voice;
 
@@ -237,6 +238,10 @@ pub trait Host: Send + Sync {
     /// Starts making run `id` of `running` in a process that outlives the app; false to have
     /// it made on a thread of the app instead.
     fn start_run(&self, _film: &Path, _id: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    /// The same for take `id` of `taking`.
+    fn start_take(&self, _film: &Path, _id: &str) -> anyhow::Result<bool> {
         Ok(false)
     }
     /// What recording line `line` (from 0) on its own would cost. Free.
@@ -507,8 +512,11 @@ pub struct App {
     shoot: Arc<Mutex<shoot::Shoot>>,
     /// What the take being shot costs.
     shoot_held: Option<String>,
-    /// Set to cancel the take being shot.
-    shoot_stop: Arc<std::sync::atomic::AtomicBool>,
+    /// The record in `taking` of the take being shot.
+    take_run: Option<String>,
+    /// It's shot by a process of its own, which closing the app leaves going.
+    take_apart: bool,
+    takes_read: Option<std::time::Instant>,
     say: Arc<Mutex<voice::Say>>,
     say_held: Option<String>,
     /// What each speaker in the open shot has recorded.
@@ -919,7 +927,9 @@ impl App {
             translate_prompt: false,
             shoot: Arc::default(),
             shoot_held: None,
-            shoot_stop: Arc::default(),
+            take_run: None,
+            take_apart: false,
+            takes_read: None,
             say: Arc::default(),
             say_held: None,
             voices: HashMap::new(),
@@ -1988,6 +1998,7 @@ impl App {
             theme::apply(ui.ctx());
         }
         self.follow_runs(ui.ctx());
+        self.follow_take(ui.ctx());
         self.watch_film(ui.ctx());
         self.shoot_finished();
         self.said();

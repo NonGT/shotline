@@ -473,8 +473,9 @@ impl App {
             }
             Some(Pressed::Cancel) => *self.shoot.lock().unwrap() = Shoot::Idle,
             Some(Pressed::Stop) => {
-                self.shoot_stop
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Some(id) = &self.take_run {
+                    crate::taking::stop(&self.project.root, id);
+                }
                 *self.shoot.lock().unwrap() = Shoot::Running(r, "cancelling…".into());
             }
             Some(Pressed::Keys) => self.wants_keys = Some(plugin),
@@ -515,34 +516,99 @@ impl App {
             self.shoot_for = Some(self.built(r));
         }
         self.shoot_held = at.clone();
-        let (state, ctx, film) = (self.shoot.clone(), ctx.clone(), self.project.root.clone());
+        let film = self.project.root.clone();
         let translate = self.translate_prompt;
-        self.shoot_stop = std::sync::Arc::default();
-        let stop = self.shoot_stop.clone();
-        std::thread::spawn(move || {
-            let done = match at {
-                None => match host.take_quote(&film, r, translate) {
-                    Ok(cost) => Shoot::Priced(r, cost),
-                    Err(e) => Shoot::Failed(r, format!("{e:#}")),
-                },
-                Some(at) => {
-                    let (step, c) = (state.clone(), ctx.clone());
-                    let stopping = stop.clone();
-                    let mut on = move |s: String| {
-                        // "cancelling…" stays up until it's done, unless it can't be.
-                        if !stopping.load(std::sync::atomic::Ordering::Relaxed)
-                            || s.starts_with("can't cancel")
-                        {
-                            *step.lock().unwrap() = Shoot::Running(r, s);
-                        }
-                        c.request_repaint();
-                    };
-                    let out = host.take(&film, r, &at, translate, &mut on, stop);
-                    Shoot::Done(r, out.map_err(|e| format!("{e:#}")))
+        if let Some(cost) = at {
+            let mut t = crate::taking::Take {
+                id: String::new(),
+                shot: r,
+                started: jiff::Timestamp::now(),
+                cost,
+                translate,
+                step: String::new(),
+                done: None,
+                error: None,
+            };
+            match crate::taking::create(&film, &mut t) {
+                Ok(()) => {
+                    self.take_apart = crate::taking::start(host, &film, &t.id);
+                    self.take_run = Some(t.id);
                 }
+                Err(e) => {
+                    *self.shoot.lock().unwrap() =
+                        Shoot::Done(r, Err(format!("couldn't start the take: {e:#}")))
+                }
+            }
+            ctx.request_repaint();
+            return;
+        }
+        let (state, ctx) = (self.shoot.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let done = match host.take_quote(&film, r, translate) {
+                Ok(cost) => Shoot::Priced(r, cost),
+                Err(e) => Shoot::Failed(r, format!("{e:#}")),
             };
             *state.lock().unwrap() = done;
             ctx.request_repaint();
         });
+    }
+
+    /// Brings the take being shot up to date from its record, and picks up one shot while the
+    /// app was closed.
+    pub(crate) fn follow_take(&mut self, ctx: &egui::Context) {
+        use crate::taking;
+        let film = self.project.root.clone();
+        if self.take_run.is_none() {
+            let every = std::time::Duration::from_secs(1);
+            if self.takes_read.is_some_and(|t| t.elapsed() < every)
+                || !matches!(*self.shoot.lock().unwrap(), Shoot::Idle)
+            {
+                return;
+            }
+            self.takes_read = Some(std::time::Instant::now());
+            let Some(t) = taking::list(&film).pop() else {
+                return;
+            };
+            self.shoot_held = Some(t.cost.clone());
+            self.take_apart = true;
+            self.take_run = Some(t.id);
+        }
+        let Some(id) = self.take_run.clone() else {
+            return;
+        };
+        let Ok(t) = taking::load(&film, &id) else {
+            self.take_run = None;
+            let mut s = self.shoot.lock().unwrap();
+            if matches!(*s, Shoot::Running(..)) {
+                *s = Shoot::Idle;
+            }
+            return;
+        };
+        let r = t.shot;
+        let done = match taking::state(&film, &t) {
+            taking::State::Running => {
+                // "cancelling…" stays up until it's done, unless it can't be.
+                let step = if taking::stopping(&film, &id) && !t.step.starts_with("can't cancel") {
+                    "cancelling…".to_string()
+                } else if t.step.is_empty() {
+                    "starting".to_string()
+                } else {
+                    t.step
+                };
+                *self.shoot.lock().unwrap() = Shoot::Running(r, step);
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                return;
+            }
+            taking::State::Done(d) => Ok(d),
+            taking::State::Failed(e) => Err(e),
+            taking::State::Stopped => Err(
+                "whatever was shooting it went away before it was done; if it was sent, it shows as a stuck job on the Cost page"
+                    .to_string(),
+            ),
+        };
+        taking::remove(&film, &id);
+        self.take_run = None;
+        *self.shoot.lock().unwrap() = Shoot::Done(r, done);
+        ctx.request_repaint();
     }
 }

@@ -208,6 +208,9 @@ enum Cmd {
     /// Makes an image the app started, out of its way
     #[command(name = "__run", hide = true)]
     Background { film: PathBuf, id: String },
+    /// Shoots a take the app started, out of its way
+    #[command(name = "__take", hide = true)]
+    BackgroundTake { film: PathBuf, id: String },
 }
 
 #[derive(clap::Args)]
@@ -844,28 +847,21 @@ impl shotline_ui::Host for Plugins {
     }
 
     fn start_run(&self, film: &Path, id: &str) -> Result<bool> {
-        let log = std::fs::File::create(film.join(format!(".shotline/cache/running/{id}.log")))?;
-        let mut cmd = std::process::Command::new(std::env::current_exe()?);
-        cmd.arg("__run")
-            .arg(film)
-            .arg(id)
-            .stdin(std::process::Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log);
-        // Its own group, so closing or restarting the app doesn't take it along.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
-        #[cfg(windows)]
-        {
-            const DETACHED_PROCESS: u32 = 0x8;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
-            std::os::windows::process::CommandExt::creation_flags(
-                &mut cmd,
-                DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-            );
-        }
-        cmd.spawn()?;
-        Ok(true)
+        detach(
+            "__run",
+            film,
+            id,
+            &film.join(format!(".shotline/cache/running/{id}.log")),
+        )
+    }
+
+    fn start_take(&self, film: &Path, id: &str) -> Result<bool> {
+        detach(
+            "__take",
+            film,
+            id,
+            &film.join(format!(".shotline/cache/takes/{id}.log")),
+        )
     }
 
     fn make_anchor(&self, film: &Path, ask: &shotline_ui::AnchorAsk, at: &str) -> Result<PathBuf> {
@@ -875,6 +871,33 @@ impl shotline_ui::Host for Plugins {
             None => bail!("nothing was made"),
         }
     }
+}
+
+/// Runs `shotline <cmd> <film> <id>` in a process that outlives the app.
+#[cfg(feature = "ui")]
+fn detach(cmd: &str, film: &Path, id: &str, log: &Path) -> Result<bool> {
+    let log = std::fs::File::create(log)?;
+    let mut c = std::process::Command::new(std::env::current_exe()?);
+    c.arg(cmd)
+        .arg(film)
+        .arg(id)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // Its own group, so closing or restarting the app doesn't take it along.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
+    #[cfg(windows)]
+    {
+        const DETACHED_PROCESS: u32 = 0x8;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+        std::os::windows::process::CommandExt::creation_flags(
+            &mut c,
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+        );
+    }
+    c.spawn()?;
+    Ok(true)
 }
 
 #[cfg(feature = "ui")]
@@ -1590,8 +1613,12 @@ fn run(cli: Cli) -> Result<()> {
         }
         #[cfg(feature = "ui")]
         Cmd::Background { ref film, ref id } => shotline_ui::running::work(&Plugins, film, id)?,
+        #[cfg(feature = "ui")]
+        Cmd::BackgroundTake { ref film, ref id } => shotline_ui::taking::work(&Plugins, film, id)?,
         #[cfg(not(feature = "ui"))]
-        Cmd::Background { .. } => bail!("this shotline was built without the ui feature"),
+        Cmd::Background { .. } | Cmd::BackgroundTake { .. } => {
+            bail!("this shotline was built without the ui feature")
+        }
     }
     Ok(())
 }
