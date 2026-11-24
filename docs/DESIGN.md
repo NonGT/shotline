@@ -865,6 +865,12 @@ step; the popup watching one shows it with Keep, Try again and Discard instead. 
 place of the file it was made again for, wherever it is by then (added as a new one if it's gone);
 a frame made out of sight isn't put in if the shot's frame changed meanwhile. A failed one stays
 on the list until its popup has said why.
+Takes work the same way: the spend button starts `shotline __take`, with a record in
+`.shotline/cache/takes/<id>.json` that it fills in with each step ("running (40%)") and the line
+about the take or the error, a beat file, and a `<id>.stop` file the app leaves to cancel it.
+Closing the app doesn't stop it or ask about it, and opening the film again picks it up where it
+is. A take whose process went away (a crash, the computer turned off) says so; if it was sent it
+shows as a stuck job on the Cost page.
 A new anchor starts with no references, so a new look isn't pulled toward the old anchors; they
 can be added from any element, a shot's storyboard frame or own pictures, a file, or a web
 address (Add a reference…, downloaded into `.shotline/cache/refs`). Browse existing lists them under headers

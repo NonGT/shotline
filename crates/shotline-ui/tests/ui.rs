@@ -7149,3 +7149,62 @@ fn cost_look() {
     h.run_steps(4);
     snap(&mut h, "cost-release");
 }
+
+#[test]
+fn picks_up_a_take_shot_while_the_app_was_closed() {
+    use shotline_ui::taking;
+    let tmp = tempfile::tempdir().unwrap();
+    let p = film(tmp.path());
+    let take = |step: &str| taking::Take {
+        id: String::new(),
+        shot: R,
+        started: jiff::Timestamp::now(),
+        cost: "0.40 USD".into(),
+        translate: false,
+        step: step.into(),
+        done: None,
+        error: None,
+    };
+    let mut going = take("running (40%)");
+    taking::create(&p.root, &mut going).unwrap();
+    let shell = Shell::new(Some(p.clone()), tmp.path().join("home"), tmp.path())
+        .with_git(None)
+        .testing();
+    let mut h = Harness::builder()
+        .with_max_steps(16)
+        .with_size(egui::vec2(1200.0, 2400.0))
+        .build_ui_state(|ui, s: &mut Shell| s.show(ui), shell);
+    h.run_steps(4);
+    // Still being shot somewhere else: it's on the Jobs list.
+    h.get_by_label("Jobs: 1 running").click();
+    h.run_steps(4);
+    h.get_by_label("A take of 01-010 · running (40%) · 0.40 USD held");
+
+    taking::finish(&p.root, &going.id, Ok("take 1 of 01-010 is in".into())).unwrap();
+    assert!(wait_for_shell(&mut h, |h| h
+        .query_by_label_contains("take 1 of 01-010 is in")
+        .is_some()));
+    assert!(taking::list(&p.root).is_empty());
+
+    // One whose shooter went away says so.
+    let mut lost = take("running (10%)");
+    taking::create(&p.root, &mut lost).unwrap();
+    std::fs::remove_file(
+        p.root
+            .join(format!(".shotline/cache/takes/{}.beat", lost.id)),
+    )
+    .unwrap();
+    assert!(wait_for_shell(&mut h, |h| h
+        .query_by_label_contains("went away before it was done")
+        .is_some()));
+
+    // Closing doesn't ask about one going on in a process of its own.
+    let mut more = take("running (20%)");
+    taking::create(&p.root, &mut more).unwrap();
+    assert!(wait_for_shell(&mut h, |h| h
+        .query_by_label("Jobs: 1 running")
+        .is_some()));
+    h.state_mut().command(MenuCommand::CloseFilm);
+    h.run_steps(4);
+    assert!(h.state().film().is_none());
+}

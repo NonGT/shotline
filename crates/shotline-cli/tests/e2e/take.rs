@@ -351,3 +351,27 @@ fn a_bridge_take_starts_and_ends_on_its_frames() {
         "the motion note goes along: {job}"
     );
 }
+
+#[test]
+fn a_take_the_app_started_is_shot_by_its_own_process() {
+    let tmp = TempDir::new().unwrap();
+    film(&tmp);
+    let dir = tmp.path().join("film/.shotline/cache/takes");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("7.json"),
+        r#"{"shot":"01-010","started":"2026-01-01T00:00:00Z","cost":"0.4 USD","translate":false}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("7.beat"), "").unwrap();
+    shotline(&tmp)
+        .args(["__take", tmp.path().join("film").to_str().unwrap(), "7"])
+        .assert()
+        .success();
+    let rec: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("7.json")).unwrap()).unwrap();
+    assert!(rec["error"].is_null(), "{rec}");
+    assert!(rec["done"].as_str().unwrap().contains("01-010"), "{rec}");
+    assert!(!dir.join("7.beat").exists());
+    assert!(ledger_types(&tmp).contains(&"charge".to_string()));
+}

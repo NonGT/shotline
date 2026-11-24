@@ -20,6 +20,8 @@ pub(crate) struct Busy {
     pub how: String,
     /// The price agreed, for paid work; closing loses track of it while it's held.
     pub held: Option<String>,
+    /// Goes on in a process of its own after the app closes.
+    pub outlives: bool,
     pub go: Go,
 }
 
@@ -31,6 +33,7 @@ impl App {
                 what: format!("A take of {r}"),
                 how: step.clone(),
                 held: Some(self.shoot_held.clone().unwrap_or_default()),
+                outlives: self.take_apart,
                 go: Go::Shot(*r),
             });
         }
@@ -39,6 +42,7 @@ impl App {
                 what: format!("Line {} of {r}", i + 1),
                 how: "recording".into(),
                 held: Some(self.say_held.clone().unwrap_or_default()),
+                outlives: false,
                 go: Go::Shot(*r),
             });
         }
@@ -49,6 +53,7 @@ impl App {
                 what: "A bridge take".into(),
                 how: "making".into(),
                 held: Some(j.price.clone()),
+                outlives: false,
                 go: Go::Bridge(*id),
             });
         }
@@ -58,6 +63,7 @@ impl App {
                     what: format!("{what} for {}", w.name),
                     how: "making".into(),
                     held: Some(cost),
+                    outlives: false,
                     go: Go::Cut,
                 });
             }
@@ -67,6 +73,7 @@ impl App {
                 what: crate::edit::first_up(&c.what),
                 how: "in the editor".into(),
                 held: c.held.clone(),
+                outlives: false,
                 go: Go::Cut,
             });
         }
@@ -75,6 +82,7 @@ impl App {
                 what: "Rendering the cut".into(),
                 how: step.clone(),
                 held: None,
+                outlives: false,
                 go: Go::Cut,
             });
         }
@@ -83,6 +91,7 @@ impl App {
                 what: "The editor's preview".into(),
                 how: "rendering".into(),
                 held: None,
+                outlives: false,
                 go: Go::Cut,
             });
         }
@@ -93,7 +102,7 @@ impl App {
     pub(crate) fn held(&self) -> Vec<Busy> {
         self.busy()
             .into_iter()
-            .filter(|b| b.held.is_some())
+            .filter(|b| b.held.is_some() && !b.outlives)
             .collect()
     }
 
